@@ -2,6 +2,7 @@
    This is a bounded, CPU-side descriptor/PSO trace and a deliberately narrow
    pure-HDR-upscale replacement. It does not change any game descriptor. */
 #include "sr_route_policy.h"
+#include "debug_capture_policy.h"
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -23,6 +24,10 @@ static UINT azt_reg, azt_space;
 static DWORD azt_hash[4], azt_vs_hash[4];
 static unsigned azt_budget = 160, azt_copy_logs = 8, azt_resolve_logs = 12;
 static unsigned long long azt_generation, azt_frame;
+/* All debug window fields and budgets are guarded by azt_lock. */
+static AzDebugWindow azdbg;
+static unsigned azdbg_geometry, azdbg_velocity, azdbg_aux;
+static int azdbg_aux_warned;
 
 typedef struct {
     ID3D12DescriptorHeap *heap;
@@ -52,7 +57,7 @@ typedef struct {
     DWORD hash[4], vs_hash[4];
     int pure_candidate;
     /* Observational FG metadata, not an indication that a draw renders HUD. */
-    int blend_enabled, depth_enabled;
+    int blend_enabled, depth_enabled, compute;
     UINT color_write_mask;
 } AztPso;
 typedef struct { ID3D12Resource *res; ID3D12GraphicsCommandList *list; unsigned long long recording; int known; D3D12_RESOURCE_STATES state; } AztState;
@@ -90,8 +95,33 @@ static int azt_env_hash(const char *name,DWORD out[4]) {
     for(unsigned i=0;i<4;++i)out[i]=(DWORD)h[i];
     return 1;
 }
+static void azdbg_finish_locked(const char *reason) {
+    if(!azdbg.active)return;
+    log_msg("DEBUG END id=%u reason=%s resolves=%u lastResolve=%llu",azdbg.id,reason,azdbg.observed,azt_frame);
+    azdebug_end(&azdbg);
+    azt_budget=azt_resolve_logs=azt_copy_logs=0;
+}
+static int azdbg_sample(int velocity) {
+    int ok=0;
+    AcquireSRWLockExclusive(&azt_lock);
+    unsigned *left=velocity?&azdbg_velocity:&azdbg_geometry;
+    if(azdbg.active && *left){--*left;ok=1;}
+    ReleaseSRWLockExclusive(&azt_lock);
+    return ok;
+}
+/* Caller holds azt_lock. Separate budget from SR and FG so a busy
+   copy/dispatch stream cannot consume their capture quotas. */
+static int azdbg_aux_locked(void) {
+    if(!azdbg.active)return 0;
+    if(azdbg_aux){--azdbg_aux;return 1;}
+    if(!azdbg_aux_warned++){log_msg("DEBUG TRUNCATED id=%u section=aux",azdbg.id);}
+    return 0;
+}
 static void sr_trace_init(void) {
-    if (dlss_sr_trace_only()) {
+    if (dlss_sr_debug_mode()) {
+        azt_budget=azt_resolve_logs=azt_copy_logs=0;
+        log_msg("DEBUG READY: F8 starts/stops bounded SR+FG trace; no render replacement");
+    } else if (dlss_sr_trace_only()) {
         UINT requested;
         if (azt_env_uint("AZIMUTH_SR_TRACE_BUDGET", &requested) &&
             requested >= 160 && requested <= 20000) azt_budget = requested;
@@ -112,7 +142,9 @@ static void sr_trace_init(void) {
             (unsigned long)azt_vs_hash[0],(unsigned long)azt_vs_hash[1],(unsigned long)azt_vs_hash[2],(unsigned long)azt_vs_hash[3],azt_reg,azt_space);
 }
 static void sr_trace_queue(ID3D12CommandQueue *q,const D3D12_COMMAND_QUEUE_DESC *desc) {
-    if (!q || !desc || desc->Type!=D3D12_COMMAND_LIST_TYPE_DIRECT) return;
+    if (!q || !desc) return;
+    if(dlss_sr_debug_mode()) log_msg("DEBUG QUEUE_CREATE queue=%p type=%d",(void *)q,(int)desc->Type);
+    if(desc->Type!=D3D12_COMMAND_LIST_TYPE_DIRECT)return;
     AcquireSRWLockExclusive(&azt_lock);
     int seen=0;
     for(unsigned i=0;i<azt_direct_count && i<4;++i) if(azt_direct_queues[i]==q)seen=1;
@@ -360,6 +392,7 @@ static void sr_trace_resolved(ID3D12GraphicsCommandList *cl,ID3D12Resource *scen
     AcquireSRWLockExclusive(&azt_lock);
     azt_pending.list=cl;azt_pending.scene=scene;azt_pending.output=output;
     azt_pending.frame=++azt_frame;azt_pending.unmodified=1;azt_pending.copied=0;
+    if(dlss_sr_debug_mode() && azdbg.active && !azdebug_resolve(&azdbg)) azdbg_finish_locked("resolve_limit");
     if(azt_resolve_logs){--azt_resolve_logs;D3D12_RESOURCE_DESC sd;scene->lpVtbl->GetDesc(scene,&sd);
         log_msg("SR TRACE RESOLVE frame=%llu list=%p scene=%ux%u format=%d evaluated=%d",azt_pending.frame,(void *)cl,(UINT)sd.Width,sd.Height,(int)sd.Format,output!=NULL);}
     ReleaseSRWLockExclusive(&azt_lock);
@@ -382,7 +415,7 @@ static AztDesc *azt_bound_srv(ListState *s,const AztRange *r,UINT k) {
 static int sr_trace_draw(ID3D12GraphicsCommandList *cl,ListState *s,UINT count,UINT instances,int role,int start_zero) {
     if(!sr_trace_enabled() || !s)return 0;
     AcquireSRWLockExclusive(&azt_lock);
-    if(!azt_pending.scene || (!azt_budget && dlss_sr_mode()!=AZSR_ROUTE)){ReleaseSRWLockExclusive(&azt_lock);return 0;}
+    if((dlss_sr_debug_mode() && !azdbg.active) || !azt_pending.scene || (!azt_budget && dlss_sr_mode()!=AZSR_ROUTE)){ReleaseSRWLockExclusive(&azt_lock);return 0;}
     AztDesc *target=NULL;
     if(s->num_rtv==1)target=azt_slot(azt_heap_for_cpu(s->rtv[0].ptr,D3D12_DESCRIPTOR_HEAP_TYPE_RTV),s->rtv[0].ptr,0);
     /* Invalidate if any bound target writes into the source. Multi-RTV draws are

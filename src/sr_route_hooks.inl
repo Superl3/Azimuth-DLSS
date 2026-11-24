@@ -23,7 +23,7 @@ static void(STDMETHODCALLTYPE *real_EndQuery)(ID3D12GraphicsCommandList *,ID3D12
 
 static HRESULT STDMETHODCALLTYPE trace_CreateCommandQueue(ID3D12Device *dev,const D3D12_COMMAND_QUEUE_DESC *d,REFIID riid,void **out) {
     HRESULT hr=real_CreateCommandQueue(dev,d,riid,out);
-    if(SUCCEEDED(hr)&&out&&*out){ID3D12CommandQueue *q=NULL;if(SUCCEEDED(IUnknown_QueryInterface((IUnknown *)*out,&IID_ID3D12CommandQueue,(void **)&q))){sr_trace_queue(q,d);ID3D12CommandQueue_Release(q);}}
+    if(SUCCEEDED(hr)&&out&&*out){ID3D12CommandQueue *q=NULL;if(SUCCEEDED(IUnknown_QueryInterface((IUnknown *)*out,&IID_ID3D12CommandQueue,(void **)&q))){sr_trace_queue(q,d);debug_trace_queue_hook(q);ID3D12CommandQueue_Release(q);}}
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE trace_CreateDescriptorHeap(ID3D12Device *dev,const D3D12_DESCRIPTOR_HEAP_DESC *d,REFIID riid,void **out) {
@@ -41,16 +41,16 @@ static void STDMETHODCALLTYPE trace_CreateUnorderedAccessView(ID3D12Device *dev,
 static void STDMETHODCALLTYPE trace_CreateConstantBufferView(ID3D12Device *dev,const D3D12_CONSTANT_BUFFER_VIEW_DESC *d,D3D12_CPU_DESCRIPTOR_HANDLE h){real_CreateConstantBufferView(dev,d,h);azt_write_desc(h.ptr,D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,NULL,DXGI_FORMAT_UNKNOWN,0);}
 static void STDMETHODCALLTYPE trace_CopyDescriptors(ID3D12Device *dev,UINT nd,const D3D12_CPU_DESCRIPTOR_HANDLE *dst,const UINT *ds,UINT ns,const D3D12_CPU_DESCRIPTOR_HANDLE *src,const UINT *ss,D3D12_DESCRIPTOR_HEAP_TYPE type){real_CopyDescriptors(dev,nd,dst,ds,ns,src,ss,type);sr_trace_copy_descriptors(dev,nd,dst,ds,ns,src,ss,type);}
 static void STDMETHODCALLTYPE trace_CopyDescriptorsSimple(ID3D12Device *dev,UINT n,D3D12_CPU_DESCRIPTOR_HANDLE dst,D3D12_CPU_DESCRIPTOR_HANDLE src,D3D12_DESCRIPTOR_HEAP_TYPE type){real_CopyDescriptorsSimple(dev,n,dst,src,type);sr_trace_copy_descriptors(dev,1,&dst,&n,1,&src,&n,type);}
-static void STDMETHODCALLTYPE trace_CopyResource(ID3D12GraphicsCommandList *cl,ID3D12Resource *dst,ID3D12Resource *src){sr_trace_write(cl,dst);real_CopyResource(cl,dst,src);}
-static void STDMETHODCALLTYPE trace_CopyTextureRegion(ID3D12GraphicsCommandList *cl,const D3D12_TEXTURE_COPY_LOCATION *dst,UINT x,UINT y,UINT z,const D3D12_TEXTURE_COPY_LOCATION *src,const D3D12_BOX *box){if(dst)sr_trace_write(cl,dst->pResource);real_CopyTextureRegion(cl,dst,x,y,z,src,box);}
-static void STDMETHODCALLTYPE trace_ResolveSubresource(ID3D12GraphicsCommandList *cl,ID3D12Resource *dst,UINT di,ID3D12Resource *src,UINT si,DXGI_FORMAT fmt){sr_trace_write(cl,dst);real_ResolveSubresource(cl,dst,di,src,si,fmt);}
+static void STDMETHODCALLTYPE trace_CopyResource(ID3D12GraphicsCommandList *cl,ID3D12Resource *dst,ID3D12Resource *src){debug_trace_copy(cl,dst,src,"resource");sr_trace_write(cl,dst);real_CopyResource(cl,dst,src);}
+static void STDMETHODCALLTYPE trace_CopyTextureRegion(ID3D12GraphicsCommandList *cl,const D3D12_TEXTURE_COPY_LOCATION *dst,UINT x,UINT y,UINT z,const D3D12_TEXTURE_COPY_LOCATION *src,const D3D12_BOX *box){if(dst&&src)debug_trace_copy(cl,dst->pResource,src->pResource,"region");if(dst)sr_trace_write(cl,dst->pResource);real_CopyTextureRegion(cl,dst,x,y,z,src,box);}
+static void STDMETHODCALLTYPE trace_ResolveSubresource(ID3D12GraphicsCommandList *cl,ID3D12Resource *dst,UINT di,ID3D12Resource *src,UINT si,DXGI_FORMAT fmt){debug_trace_copy(cl,dst,src,"resolve");sr_trace_write(cl,dst);real_ResolveSubresource(cl,dst,di,src,si,fmt);}
 static void STDMETHODCALLTYPE trace_ClearRenderTargetView(ID3D12GraphicsCommandList *cl,D3D12_CPU_DESCRIPTOR_HANDLE h,const FLOAT *rgba,UINT n,const D3D12_RECT *rect){
     AcquireSRWLockExclusive(&azt_lock);AztDesc *d=azt_slot(azt_heap_for_cpu(h.ptr,D3D12_DESCRIPTOR_HEAP_TYPE_RTV),h.ptr,0);ID3D12Resource *res=d?d->res:NULL;ReleaseSRWLockExclusive(&azt_lock);
     sr_trace_write(cl,res);real_ClearRenderTargetView(cl,h,rgba,n,rect);
 }
 static void STDMETHODCALLTYPE trace_ClearUnorderedAccessViewUint(ID3D12GraphicsCommandList *cl,D3D12_GPU_DESCRIPTOR_HANDLE gh,D3D12_CPU_DESCRIPTOR_HANDLE ch,ID3D12Resource *res,const UINT *values,UINT n,const D3D12_RECT *rect){sr_trace_write(cl,res);real_ClearUnorderedAccessViewUint(cl,gh,ch,res,values,n,rect);}
 static void STDMETHODCALLTYPE trace_ClearUnorderedAccessViewFloat(ID3D12GraphicsCommandList *cl,D3D12_GPU_DESCRIPTOR_HANDLE gh,D3D12_CPU_DESCRIPTOR_HANDLE ch,ID3D12Resource *res,const FLOAT *values,UINT n,const D3D12_RECT *rect){sr_trace_write(cl,res);real_ClearUnorderedAccessViewFloat(cl,gh,ch,res,values,n,rect);}
-static void STDMETHODCALLTYPE trace_Dispatch(ID3D12GraphicsCommandList *cl,UINT x,UINT y,UINT z){sr_trace_write(cl,NULL);real_Dispatch(cl,x,y,z);}
+static void STDMETHODCALLTYPE trace_Dispatch(ID3D12GraphicsCommandList *cl,UINT x,UINT y,UINT z){debug_trace_dispatch(cl,x,y,z);sr_trace_write(cl,NULL);real_Dispatch(cl,x,y,z);}
 static void STDMETHODCALLTYPE trace_ExecuteIndirect(ID3D12GraphicsCommandList *cl,ID3D12CommandSignature *sig,UINT max,ID3D12Resource *arg,UINT64 ao,ID3D12Resource *count,UINT64 co){sr_trace_write(cl,NULL);real_ExecuteIndirect(cl,sig,max,arg,ao,count,co);}
 static void STDMETHODCALLTYPE trace_ExecuteBundle(ID3D12GraphicsCommandList *cl,ID3D12GraphicsCommandList *bundle){sr_trace_write(cl,NULL);ListState *s=state_for(cl);if(s){s->trace_tables_mask=0;s->trace_graphics_rs=NULL;s->trace_topology=D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;s->trace_query_unknown=1;}real_ExecuteBundle(cl,bundle);}
 static void STDMETHODCALLTYPE trace_DiscardResource(ID3D12GraphicsCommandList *cl,ID3D12Resource *res,const D3D12_DISCARD_REGION *region){sr_trace_write(cl,res);real_DiscardResource(cl,res,region);}

@@ -17,6 +17,8 @@ AzSRMode dlss_sr_mode(void);
 void dlss_sr_note_swapchain(unsigned w, unsigned h);
 int dlss_sr_jitter_size(unsigned w, unsigned h);
 int dlss_sr_trace_only(void);
+int dlss_sr_debug_mode(void);
+unsigned dlss_debug_ini_uint(const wchar_t *key,unsigned fallback);
 ID3D12Resource *dlss_sr_route_output(void);
 void dlss_sr_route_result(int displayed);
 void dlss_toggle(void);

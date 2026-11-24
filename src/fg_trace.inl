@@ -7,7 +7,7 @@
 #define AZFG_INPUTS 8
 static int azfg_trace;
 static unsigned azfg_start=1, azfg_resolves=8, azfg_budget=4096;
-static unsigned azfg_rows, azfg_chains;
+static unsigned azfg_rows, azfg_chains, azfg_base_rows;
 static int azfg_limit_logged;
 typedef struct {
     unsigned w,h, count;
@@ -18,7 +18,7 @@ static AzfgChain azfg_chain[AZFG_CHAINS];
 static void fg_trace_init(void) {
     char yes[8];
     DWORD n=GetEnvironmentVariableA("AZIMUTH_FG_TRACE",yes,sizeof(yes));
-    if (!dlss_sr_trace_only() || n!=1 || yes[0]!='1') return;
+    if (!dlss_sr_trace_only() || (!dlss_sr_debug_mode() && (n!=1 || yes[0]!='1'))) return;
     UINT x;
     if (azt_env_uint("AZIMUTH_FG_TRACE_START",&x) && x>=1 && x<=1000000) azfg_start=x;
     if (azt_env_uint("AZIMUTH_FG_TRACE_RESOLVES",&x) && x>=1 && x<=64) azfg_resolves=x;
@@ -73,7 +73,8 @@ static void fg_trace_draw(ID3D12GraphicsCommandList *cl,ListState *s,UINT count,
     AcquireSRWLockExclusive(&azt_lock);
     /* This is a bounded observation window after known scene resolves. Recording
        order across threads/lists is not execution order. Confirm in PIX. */
-    if (azt_frame<azfg_start || azt_frame-azfg_start>=azfg_resolves || !azfg_chains) goto done;
+    if (dlss_sr_debug_mode()) { if(!azdbg.active) goto done; }
+    else if (azt_frame<azfg_start || azt_frame-azfg_start>=azfg_resolves || !azfg_chains) goto done;
     AztDesc *t=azt_slot(azt_heap_for_cpu(s->rtv[0].ptr,D3D12_DESCRIPTOR_HEAP_TYPE_RTV),s->rtv[0].ptr,0);
     if (!t || !t->res || t->desc.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D) goto done;
     int display_size=0,snapshot_match=0;
@@ -82,10 +83,11 @@ static void fg_trace_draw(ID3D12GraphicsCommandList *cl,ListState *s,UINT count,
         if (c->w && c->h && t->desc.Width==c->w && t->desc.Height==c->h) display_size=1;
         for (UINT j=0;j<c->count;++j) if(c->buffers[j] && c->buffers[j]==(uintptr_t)t->res) snapshot_match=1;
     }
-    if (!display_size && !snapshot_match) goto done;
+    /* Debug also follows small fullscreen postprocess intermediates. */
+    if (!display_size && !snapshot_match && !(dlss_sr_debug_mode() && !s->has_dsv && instances==1 && (count==3 || count==6))) goto done;
     AztPso *p=azt_pso_slot(s->pso,0);
     if (!p) goto done;
-    if (azfg_rows>=azfg_budget) {
+    if (azfg_rows-azfg_base_rows>=azfg_budget) {
         if (!azfg_limit_logged++) log_msg("FG TRACE truncated: draw budget exhausted; not a complete HUD pass history");
         goto done;
     }

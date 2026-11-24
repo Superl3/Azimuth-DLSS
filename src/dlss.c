@@ -50,16 +50,28 @@ static AzSRMode sr_mode = AZSR_DLAA;
 static AzSRQuality sr_quality = AZSR_QUALITY;
 static AzSRSize sr_output, sr_render, sr_swapchain;
 static int sr_armed, sr_blocked, sr_optimal_checked;
-static int sr_route_jitter, sr_trace_only;
+static int sr_route_jitter, sr_trace_only, sr_debug_mode;
 static volatile LONG sr_route_visible;
 static ID3D12Resource *sr_route_last_output;
 static unsigned sr_log_budget = 12;
 
+/* An explicit sidecar enables diagnostics for launcher/RenderDoc launches
+   that cannot conveniently inherit environment variables. No config writes. */
+unsigned dlss_debug_ini_uint(const wchar_t *key, unsigned fallback) {
+    wchar_t path[MAX_PATH];
+    DWORD n=GetModuleFileNameW(NULL,path,MAX_PATH);
+    if (!n || n>=MAX_PATH) return fallback;
+    while(n && path[n-1]!=L'\\') --n;
+    if(!n || n+18>=MAX_PATH) return fallback;
+    lstrcpyW(path+n,L"azimuth_debug.ini");
+    return GetPrivateProfileIntW(L"Debug",key,(INT)fallback,path);
+}
 static void sr_read_config(void) {
     char b[64], tail;
     DWORD n = GetEnvironmentVariableA("AZIMUTH_SR_MODE", b, sizeof(b));
+    if (!n && dlss_debug_ini_uint(L"Enabled",0)==1) { strcpy(b,"debug"); n=5; }
     if (!n || n >= sizeof(b)) return;
-    if (!strcmp(b, "trace")) { sr_mode = AZSR_DIAGNOSTIC; sr_trace_only = 1; log_msg("SR TRACE ONLY: no DLAA/NGX dispatch or injected motion replay"); }
+    if (!strcmp(b, "trace") || !strcmp(b,"debug")) { sr_mode = AZSR_DIAGNOSTIC; sr_trace_only = 1; sr_debug_mode = !strcmp(b,"debug"); log_msg("SR TRACE ONLY: no DLAA/NGX dispatch or injected motion replay"); }
     else if (!strcmp(b, "diagnostic")) sr_mode = AZSR_DIAGNOSTIC;
     else if (!strcmp(b, "probe")) sr_mode = AZSR_PROBE;
     else if (!strcmp(b, "padded")) sr_mode = AZSR_PADDED;
@@ -103,6 +115,7 @@ int dlss_sr_jitter_size(unsigned w, unsigned h) {
 }
 
 int dlss_sr_trace_only(void) { return sr_trace_only; }
+int dlss_sr_debug_mode(void) { return sr_debug_mode; }
 ID3D12Resource *dlss_sr_route_output(void) { return sr_route_last_output; }
 void dlss_sr_route_result(int displayed) {
     InterlockedExchange(&sr_route_visible, displayed != 0);
@@ -183,7 +196,7 @@ void dlss_toggle(void) {
 
 
 int dlss_jitter(float *x, float *y) {
-    if (!enabled || !jitter_live || !ngx_ready || sr_mode == AZSR_PROBE || sr_blocked) {
+    if (!enabled || !jitter_live || !ngx_ready || sr_trace_only || sr_mode == AZSR_PROBE || sr_blocked) {
         return 0;
     }
     *x = jx;

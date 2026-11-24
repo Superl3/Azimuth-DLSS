@@ -211,6 +211,11 @@ static void consider_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc, ID3D12P
         return;
     }
 
+    if(dlss_sr_trace_only()) {
+        remember_pso(pso,NULL,ROLE_MV);
+        log_msg("%s native velocity pass found (trace-only; no replacement PSO)",profile->name);
+        return;
+    }
     ID3DBlob *ps = compile(profile->mv_ps_hlsl, "main", "ps_5_0");
     if (!ps) {
         log_msg("%s motion-vector replacement shader compilation failed", profile->name);
@@ -437,6 +442,7 @@ static const ViewEntry *view_find(SIZE_T handle) {
 
 #include "sr_route.inl"
 #include "fg_trace.inl"
+#include "debug_trace.inl"
 #include "sr_route_hooks.inl"
 
 static void STDMETHODCALLTYPE hook_CreateRenderTargetView(ID3D12Device *dev, ID3D12Resource *res,
@@ -870,7 +876,7 @@ static void count_frame(void) {
 static void sr_trace_geometry(ListState *s) {
     static volatile LONG budget;
     if (!sr_trace_enabled() || !s || !scene_color || !scene_depth ||
-        InterlockedIncrement(&budget) > 64) return;
+        (dlss_sr_debug_mode() ? !azdbg_sample(0) : InterlockedIncrement(&budget) > 64)) return;
     D3D12_RESOURCE_DESC c, d;
     scene_color->lpVtbl->GetDesc(scene_color, &c);
     scene_depth->lpVtbl->GetDesc(scene_depth, &d);
@@ -886,7 +892,7 @@ static void sr_trace_geometry(ListState *s) {
 static void sr_trace_native_velocity(ListState *s) {
     static volatile LONG budget;
     if (!sr_trace_enabled() || !s || !s->num_vp ||
-        InterlockedIncrement(&budget) > 64) return;
+        (dlss_sr_debug_mode() ? !azdbg_sample(1) : InterlockedIncrement(&budget) > 64)) return;
     const ViewEntry *rt = s->num_rtv ? view_find(s->rtv[0].ptr) : NULL;
     log_msg("SR NATIVE VELOCITY target=%ux%u format=%d viewport=%.2f,%.2f,%.2f,%.2f",
         rt ? rt->width : 0, rt ? rt->height : 0, rt ? (int)rt->format : 0,
@@ -985,6 +991,7 @@ static void STDMETHODCALLTYPE hook_DrawInstanced(ID3D12GraphicsCommandList *cl, 
     ListState *s = state_for(cl);
     ID3D12PipelineState *variant = NULL;
     int role = s ? pso_lookup(s->pso, &variant) : ROLE_NONE;
+    debug_trace_draw(cl,s,vc,role);
     if (role == ROLE_RESOLVE && s) {
         sr_trace_begin_resolve();
         BOOL scene_ok = note_scene_resources(s);
@@ -993,9 +1000,9 @@ static void STDMETHODCALLTYPE hook_DrawInstanced(ID3D12GraphicsCommandList *cl, 
             run_dlss(cl, s);
         }
         return;
-    } else if (role == ROLE_MV && variant && s && s->num_vp) {
+    } else if (role == ROLE_MV && s && s->num_vp) {
         sr_trace_native_velocity(s);
-        if (!dlss_sr_trace_only()) record_mv_pass(cl, s, variant, vc, ic, sv, si);
+        if (variant && !dlss_sr_trace_only()) record_mv_pass(cl, s, variant, vc, ic, sv, si);
     }
     fg_trace_draw(cl,s,vc,ic,role,0);
     if (sr_trace_draw(cl,s,vc,ic,role,sv==0 && si==0)) return;
@@ -1008,6 +1015,7 @@ static void STDMETHODCALLTYPE hook_DrawIndexedInstanced(ID3D12GraphicsCommandLis
     ListState *s = state_for(cl);
     ID3D12PipelineState *variant = NULL;
     int role = s ? pso_lookup(s->pso, &variant) : ROLE_NONE;
+    debug_trace_draw(cl,s,index_count,role);
     if (role == ROLE_RESOLVE && s) {
         sr_trace_begin_resolve();
         const GameProfile *profile = game_profile_active();
@@ -1019,9 +1027,9 @@ static void STDMETHODCALLTYPE hook_DrawIndexedInstanced(ID3D12GraphicsCommandLis
             }
             return;
         }
-    } else if (role == ROLE_MV && variant && s && s->num_vp) {
+    } else if (role == ROLE_MV && s && s->num_vp) {
         sr_trace_native_velocity(s);
-        if (!dlss_sr_trace_only()) record_mv_pass_indexed(cl, s, variant, index_count, instance_count, start_index, base_vertex, start_instance);
+        if (variant && !dlss_sr_trace_only()) record_mv_pass_indexed(cl, s, variant, index_count, instance_count, start_index, base_vertex, start_instance);
     }
     fg_trace_draw(cl,s,index_count,instance_count,role,1);
     if (sr_trace_draw(cl,s,index_count,instance_count,role,start_index==0 && base_vertex==0 && start_instance==0)) return;
@@ -1079,7 +1087,9 @@ static HRESULT WINAPI hook_D3D12CreateDevice(IUnknown *adapter, D3D_FEATURE_LEVE
             patch_slot(VT_SLOT(dev, ID3D12Device1Vtbl, CreatePipelineLibrary), (void *)hook_CreatePipelineLibrary, (void **)&real_CreatePipelineLibrary);
             dlss_init(dev);
             fg_trace_init();
+            debug_trace_init();
             sr_trace_hook_device(dev);
+            debug_trace_device_hook(dev);
             log_msg("D3D12 device hooked");
         }
     }
@@ -1100,18 +1110,29 @@ static void poll_f11(void) {
         last = now;
         return;
     }
-    if (now && !last) {
+    if (now && !last && !dlss_sr_trace_only()) {
         dlss_toggle();
     }
     last = now;
 }
 
+static void poll_f8(void) {
+    static SHORT last;
+    if(!dlss_sr_debug_mode())return;
+    debug_trace_poll();
+    SHORT now=GetAsyncKeyState(VK_F8)&0x8000;
+    HWND fg=GetForegroundWindow();DWORD pid=0;
+    if(fg)GetWindowThreadProcessId(fg,&pid);
+    if(pid==GetCurrentProcessId() && now && !last)debug_trace_toggle();
+    last=now;
+}
 static volatile LONG hotkey_thread_started;
 
 static DWORD WINAPI hotkey_thread_main(LPVOID unused) {
     (void)unused;
     for (;;) {
         poll_f11();
+        poll_f8();
         Sleep(10);
     }
 }
