@@ -1,5 +1,7 @@
 /* Manual diagnostic capture. No Present hook, no new GPU commands, no
    readback of arbitrary process memory, no automatic upload. */
+/* RenderDoc application header uses C bool; include before vendored header. */
+#include <stdbool.h>
 #include "../third_party/renderdoc/renderdoc_app.h"
 #define AZDBG_GEOM_MAX 64
 typedef struct AzdbgGeom {UINT cw,ch,dw,dh,vw,vh; int cf,df;} AzdbgGeom;
