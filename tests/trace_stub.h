@@ -90,6 +90,7 @@ static AzSRMode stub_mode=AZSR_ROUTE;static int stub_enabled=1,stub_copies,stub_
 static ID3D12Resource *stub_src,*stub_dst;
 static AzSRMode dlss_sr_mode(void){return stub_mode;}
 static int dlss_enabled(void){return stub_enabled;}
+static int dlss_sr_trace_only(void){return stub_mode==AZSR_DIAGNOSTIC;}
 static void dlss_sr_route_result(int visible){stub_visible=visible;}
 static void log_msg(const char *fmt,...){(void)fmt;}
 static void hooks_transition(ID3D12GraphicsCommandList *cl,ID3D12Resource *r,D3D12_RESOURCE_STATES a,D3D12_RESOURCE_STATES b){(void)cl;(void)r;(void)a;(void)b;++stub_transitions;}
