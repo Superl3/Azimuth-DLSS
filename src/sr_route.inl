@@ -88,6 +88,13 @@ static int azt_env_hash(const char *name,DWORD out[4]) {
     return 1;
 }
 static void sr_trace_init(void) {
+    if (dlss_sr_trace_only()) {
+        UINT requested;
+        if (azt_env_uint("AZIMUTH_SR_TRACE_BUDGET", &requested) &&
+            requested >= 160 && requested <= 20000) azt_budget = requested;
+        azt_resolve_logs = 64;
+        log_msg("SR TRACE budget=%u (consumer records; bounded)", azt_budget);
+    }
     if (dlss_sr_mode() != AZSR_ROUTE) return;
     char yes[8];DWORD y=GetEnvironmentVariableA("AZIMUTH_SR_ROUTE_CONFIRMED",yes,sizeof(yes));
     if (!azt_env_hash("AZIMUTH_SR_ROUTE_HASH",azt_hash) || !azt_env_hash("AZIMUTH_SR_ROUTE_VS_HASH",azt_vs_hash) ||

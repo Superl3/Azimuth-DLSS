@@ -864,7 +864,36 @@ static void count_frame(void) {
     ReleaseSRWLockExclusive(&mv_lock);
 }
 
+/* Capture allocation and viewport separately: the resolve viewport is not
+   necessarily the main geometry viewport. No GPU readback or new GPU work. */
+static void sr_trace_geometry(ListState *s) {
+    static volatile LONG budget;
+    if (!sr_trace_enabled() || !s || !scene_color || !scene_depth ||
+        InterlockedIncrement(&budget) > 64) return;
+    D3D12_RESOURCE_DESC c, d;
+    scene_color->lpVtbl->GetDesc(scene_color, &c);
+    scene_depth->lpVtbl->GetDesc(scene_depth, &d);
+    log_msg("SR GEOMETRY color=%ux%u depth=%ux%u cfmt=%d dfmt=%d samples=%u/%u vpCount=%u viewport=%.2f,%.2f,%.2f,%.2f scCount=%u scissor=%ld,%ld,%ld,%ld",
+        (UINT)c.Width, c.Height, (UINT)d.Width, d.Height, (int)c.Format, (int)d.Format,
+        c.SampleDesc.Count, d.SampleDesc.Count, s->num_vp,
+        s->num_vp ? s->vp[0].TopLeftX : 0.0, s->num_vp ? s->vp[0].TopLeftY : 0.0,
+        s->num_vp ? s->vp[0].Width : 0.0, s->num_vp ? s->vp[0].Height : 0.0,
+        s->num_sc, (long)(s->num_sc ? s->sc[0].left : 0),
+        (long)(s->num_sc ? s->sc[0].top : 0), (long)(s->num_sc ? s->sc[0].right : 0),
+        (long)(s->num_sc ? s->sc[0].bottom : 0));
+}
+static void sr_trace_native_velocity(ListState *s) {
+    static volatile LONG budget;
+    if (!sr_trace_enabled() || !s || !s->num_vp ||
+        InterlockedIncrement(&budget) > 64) return;
+    const ViewEntry *rt = s->num_rtv ? view_find(s->rtv[0].ptr) : NULL;
+    log_msg("SR NATIVE VELOCITY target=%ux%u format=%d viewport=%.2f,%.2f,%.2f,%.2f",
+        rt ? rt->width : 0, rt ? rt->height : 0, rt ? (int)rt->format : 0,
+        s->vp[0].TopLeftX, s->vp[0].TopLeftY, s->vp[0].Width, s->vp[0].Height);
+}
+
 static void run_dlss(ID3D12GraphicsCommandList *cl, ListState *s) {
+    sr_trace_geometry(s);
     LONG64 seq = mv_seq;
     static LONG stale_resolves;
     static LONG fallback_active;
@@ -964,6 +993,7 @@ static void STDMETHODCALLTYPE hook_DrawInstanced(ID3D12GraphicsCommandList *cl, 
         }
         return;
     } else if (role == ROLE_MV && variant && s && s->num_vp) {
+        sr_trace_native_velocity(s);
         if (!dlss_sr_trace_only()) record_mv_pass(cl, s, variant, vc, ic, sv, si);
     }
     if (sr_trace_draw(cl,s,vc,ic,role,sv==0 && si==0)) return;
@@ -988,6 +1018,7 @@ static void STDMETHODCALLTYPE hook_DrawIndexedInstanced(ID3D12GraphicsCommandLis
             return;
         }
     } else if (role == ROLE_MV && variant && s && s->num_vp) {
+        sr_trace_native_velocity(s);
         if (!dlss_sr_trace_only()) record_mv_pass_indexed(cl, s, variant, index_count, instance_count, start_index, base_vertex, start_instance);
     }
     if (sr_trace_draw(cl,s,index_count,instance_count,role,start_index==0 && base_vertex==0 && start_instance==0)) return;

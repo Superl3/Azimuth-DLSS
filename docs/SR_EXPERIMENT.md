@@ -109,3 +109,7 @@ Look for `SR ROUTE EVALUATED` (NGX succeeded) and `SR ROUTE COPIED` (the selecte
 ## Verification performed locally
 
 Host C policy tests; host doubles executing the actual consumer metadata/route code including a positive copy and rejection cases; GCC/Clang warnings and AddressSanitizer/UndefinedBehaviorSanitizer for the trace test; Python trace analyzer unit tests; Python installer syntax; generated patch apply and exact output comparison against sparse verified original source excerpts. All six edited original GitHub blob hashes and all 51 non-new-file patch hunk old-line ranges were checked against the pinned remote source. The full checkout was not downloaded into the authoring container. Full Windows SDK/Zig DLL build, GitHub Actions execution, actual NVIDIA NGX evaluation, runtime GPU capture and final screen output have **not** been performed here.
+
+## Capture collection helper
+
+See [FH2 render capture guide](CAPTURE_FH2.md) and `tools/capture_sr.py` for local trace/probe evidence collection. The collector never enables visible routing or uploads game data.
