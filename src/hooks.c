@@ -963,8 +963,7 @@ static void run_dlss(ID3D12GraphicsCommandList *cl, ListState *s) {
         resolve = (AzSRSize){(UINT)s->vp[0].Width,(UINT)s->vp[0].Height};
         top_left = s->vp[0].TopLeftX == 0 && s->vp[0].TopLeftY == 0 &&
             s->vp[0].Width == (float)resolve.w && s->vp[0].Height == (float)resolve.h &&
-            s->num_sc == 1 && s->sc[0].left == 0 && s->sc[0].top == 0 &&
-            s->sc[0].right == (LONG)resolve.w && s->sc[0].bottom == (LONG)resolve.h;
+            s->num_sc == 1 && azsr_scissor_ok(dlss_sr_mode(),resolve,s->sc[0].left,s->sc[0].top,s->sc[0].right,s->sc[0].bottom);
     }
     int ok = dlss_run(cl, scene_color, (D3D12_RESOURCE_STATES)color_state, scene_depth,
                      (D3D12_RESOURCE_STATES)depth_state, mv_tex, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,

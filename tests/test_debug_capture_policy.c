@@ -17,6 +17,12 @@ int main(void){
     assert(azdebug_begin(&w,8,20000,8000));assert(w.id==2&&w.observed==0);
     assert(!azdebug_expired(&w,19999));assert(!azdebug_expired(&w,27999));
     assert(azdebug_expired(&w,28000));azdebug_end(&w);
-    puts("PASS: manual capture start/rearm/resolve interval/timeout policy");
+    assert(azdebug_pass_kind(1,1,0,0,0,0,3,1)==2);
+    assert(azdebug_pass_kind(0,0,0,1,1,0,6000,1)==0);
+    assert(azdebug_pass_kind(0,1,0,1,1,1,342,1)==1);
+    assert(azdebug_pass_kind(0,0,1,1,1,1,30,1)==1);
+    assert(azdebug_pass_kind(0,0,0,0,0,0,3,1)==1);
+    assert(azdebug_pass_kind(0,0,0,0,0,1,3,1)==0);
+    puts("PASS: manual capture window and prioritized postprocess logging policy");
     return 0;
 }

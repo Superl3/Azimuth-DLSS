@@ -33,6 +33,14 @@ static inline int azsr_same_aspect(AzSRSize a, AzSRSize b) {
     double x = (double)a.w * b.h, y = (double)b.w * a.h;
     return x > 0 && y > 0 && x >= y * 0.99 && x <= y * 1.01;
 }
+/* Observed FH2 scissor is 0,0,32767,32767. The effective raster region is
+   clipped by the viewport/target. Permit covering scissors for offscreen
+   probe only; visible padded/route modes retain their stricter gate. */
+static inline int azsr_scissor_ok(AzSRMode mode,AzSRSize render,long l,long t,long r,long b) {
+    if(l!=0 || t!=0 || !azsr_nonzero(render))return 0;
+    return mode==AZSR_PROBE ? r>=(long)render.w && b>=(long)render.h :
+        r==(long)render.w && b==(long)render.h;
+}
 static inline AzSRDecision azsr_decide(AzSRMode mode, AzSRFrame f) {
     if (!f.fh2 || !f.top_left || !azsr_nonzero(f.motion) ||
         !azsr_nonzero(f.output) || !azsr_equal(f.motion, f.resolve) ||

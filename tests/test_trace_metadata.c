@@ -49,6 +49,12 @@ int main(void){
     b.Flags=1;sr_trace_barriers(&cl,&s,1,&b);assert(!sr_trace_draw(&cl,&s,3,1,ROLE_NONE,1));b.Flags=0;sr_trace_barriers(&cl,&s,1,&b);
     sr_trace_reset(&cl);assert(!sr_trace_draw(&cl,&s,3,1,ROLE_NONE,1));
     sr_trace_resolved(&cl,&scene,&output);sr_trace_queue(&q2,&qd);assert(!sr_trace_route_ready());assert(!sr_trace_draw(&cl,&s,3,1,ROLE_NONE,1));
+    /* The actual FH2 capture has five direct queues. Merely observing multiple
+       queues must not mark unrelated descriptor tracking incomplete. Never arm route. */
+    ID3D12CommandQueue more[3]={{0},{0},{0}};
+    for(unsigned i=0;i<3;++i)sr_trace_queue(&more[i],&qd);
+    assert(azt_direct_count==5&&!azt_incomplete&&!sr_trace_route_ready());
+    sr_trace_queue(&more[0],&qd);assert(azt_direct_count==5);
     /* Heap pointer reused: previous generation cannot resolve an old descriptor. */
     hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;hd.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;sr_trace_heap(&dev,&vis,&hd);assert(!azt_slot(azt_heap_for_ptr(&vis),dest_cpu.ptr,0));
     puts("PASS: metadata propagation, root ranges, real route predicate/copy, stale handles, write/reset/queue rejection (host doubles)");return 0;

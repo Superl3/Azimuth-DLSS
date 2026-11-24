@@ -4,11 +4,12 @@
    A resolve sequence is NOT a present/frame token. */
 #define AZFG_CHAINS 4
 #define AZFG_BUFFERS 16
-#define AZFG_INPUTS 8
+#define AZFG_INPUTS 24
+#define AZFG_PRIORITY_BUDGET 256
 static int azfg_trace;
 static unsigned azfg_start=1, azfg_resolves=8, azfg_budget=4096;
-static unsigned azfg_rows, azfg_chains, azfg_base_rows;
-static int azfg_limit_logged;
+static unsigned azfg_rows, azfg_chains, azfg_general_rows, azfg_priority_rows;
+static int azfg_limit_logged, azfg_priority_limit_logged;
 typedef struct {
     unsigned w,h, count;
     uintptr_t chain, queue, buffers[AZFG_BUFFERS];
@@ -68,6 +69,22 @@ static void fg_trace_swapchain(IDXGISwapChain1 *sc,IUnknown *device) {
     ReleaseSRWLockExclusive(&azt_lock);
 }
 
+/* Full PS/VS pairs observed repeatedly in native and 1080p HDR FH2 traces.
+   This is a logging priority only, not a verified pass semantic or route. */
+static int azfg_known_candidate(const AztPso *p) {
+    static const DWORD ps[][4]={
+        {0x479be24a,0x12d3a1cc,0x5ae78b8d,0xe91827a4},
+        {0xa7840ad0,0xc7ff485a,0xbaaba36a,0xf2b83b22},
+        {0x577d52ef,0x933f3888,0x157f3b5e,0xe0935945}
+    };
+    static const DWORD vs[][4]={
+        {0x2098e1f9,0x8e0d8b8e,0x7bdf6434,0x4ec0d391},
+        {0x2b57aba8,0x08891572,0xded78132,0x0c122cb6},
+        {0x79d0ca68,0x15da8827,0x24fc6096,0x35dd7508}
+    };
+    for(unsigned i=0;i<3;++i)if(!memcmp(p->hash,ps[i],16)&&!memcmp(p->vs_hash,vs[i],16))return 1;
+    return 0;
+}
 static void fg_trace_draw(ID3D12GraphicsCommandList *cl,ListState *s,UINT count,UINT instances,int role,int indexed) {
     if (!azfg_trace || !s || role!=ROLE_NONE || s->num_rtv!=1 || !s->pso) return;
     AcquireSRWLockExclusive(&azt_lock);
@@ -83,15 +100,30 @@ static void fg_trace_draw(ID3D12GraphicsCommandList *cl,ListState *s,UINT count,
         if (c->w && c->h && t->desc.Width==c->w && t->desc.Height==c->h) display_size=1;
         for (UINT j=0;j<c->count;++j) if(c->buffers[j] && c->buffers[j]==(uintptr_t)t->res) snapshot_match=1;
     }
-    /* Debug also follows small fullscreen postprocess intermediates. */
-    if (!display_size && !snapshot_match && !(dlss_sr_debug_mode() && !s->has_dsv && instances==1 && (count==3 || count==6))) goto done;
     AztPso *p=azt_pso_slot(s->pso,0);
-    if (!p) goto done;
-    if (azfg_rows-azfg_base_rows>=azfg_budget) {
-        if (!azfg_limit_logged++) log_msg("FG TRACE truncated: draw budget exhausted; not a complete HUD pass history");
-        goto done;
+    if (!p || p->compute) goto done;
+    int priority=0;
+    if(dlss_sr_debug_mode()){
+        priority=azfg_known_candidate(p)&&instances==1&&count==3&&!indexed;
+        int kind=azdebug_pass_kind(priority,display_size&&t->format==DXGI_FORMAT_R10G10B10A2_UNORM,
+            snapshot_match,p->depth_enabled,s->has_dsv,p->blend_enabled,count,instances);
+        if(!kind)goto done;
+    }else if(!display_size&&!snapshot_match)goto done;
+    if(priority){
+        if(azfg_priority_rows>=AZFG_PRIORITY_BUDGET){
+            if(!azfg_priority_limit_logged++)log_msg("FG TRACE truncated: known-candidate budget exhausted");
+            goto done;
+        }
+        ++azfg_priority_rows;
+    }else{
+        if(azfg_general_rows>=azfg_budget){
+            if(!azfg_limit_logged++)log_msg("FG TRACE truncated: draw budget exhausted; not a complete HUD pass history");
+            goto done;
+        }
+        ++azfg_general_rows;
     }
     unsigned seq=++azfg_rows;
+    if(priority)log_msg("DEBUG PRIORITY_PASS id=%u resolve=%llu seq=%u list=%p (candidate only)",azdbg.id,azt_frame,seq,(void *)cl);
     AztRoot *r=azt_root_slot(s->trace_graphics_rs,0);
     int complete=r && r->complete && !azt_incomplete && p->rs==s->trace_graphics_rs;
     /* Unknown state/format or unknown layout is logged, never guessed. */
@@ -104,7 +136,7 @@ static void fg_trace_draw(ID3D12GraphicsCommandList *cl,ListState *s,UINT count,
        layout=0 above explicitly marks the observation as unverified. */
     if (complete || (dlss_sr_debug_mode() && r && p->rs==s->trace_graphics_rs)) {
         uintptr_t seen[AZFG_INPUTS]={0};
-        unsigned n=0,excess=0;
+        unsigned n=0,excess=0,limit=priority?AZFG_INPUTS:8;
         for (UINT i=0;i<r->count;++i) {
             const AztRange *x=&r->ranges[i];
             for (UINT k=0;k<x->count;++k) {
@@ -114,10 +146,11 @@ static void fg_trace_draw(ID3D12GraphicsCommandList *cl,ListState *s,UINT count,
                 int duplicate=0;
                 for(unsigned j=0;j<n;++j) if(seen[j]==id){duplicate=1;break;}
                 if(duplicate)continue;
-                if(n>=AZFG_INPUTS){excess=1;continue;}
+                if(n>=limit){excess=1;continue;}
                 seen[n++]=id;
                 log_msg("FG INPUT seq=%u resource=%p size=%ux%u fmt=%d t%u space%u scene=%d boundOnly=1",
-                    seq,(void *)id,(UINT)a->desc.Width,a->desc.Height,(int)a->format,x->reg+k,x->space,a->res==azt_pending.scene);
+                    seq,(void *)id,(UINT)a->desc.Width,a->desc.Height,(int)a->format,x->reg+k,x->space,
+                    dlss_sr_debug_mode()?(id==azdbg_scene_identity && (uintptr_t)cl==azdbg_scene_list):a->res==azt_pending.scene);
             }
         }
         if(excess) log_msg("FG INPUT truncated seq=%u",seq);

@@ -18,7 +18,8 @@
 static SRWLOCK azt_lock = SRWLOCK_INIT;
 static int azt_incomplete, azt_warned, azt_confirmed, azt_disabled;
 static unsigned azt_misses;
-static ID3D12CommandQueue *azt_direct_queues[4];
+#define AZT_DIRECT_QUEUES 32
+static ID3D12CommandQueue *azt_direct_queues[AZT_DIRECT_QUEUES];
 static unsigned azt_direct_count;
 static UINT azt_reg, azt_space;
 static DWORD azt_hash[4], azt_vs_hash[4];
@@ -28,6 +29,8 @@ static unsigned long long azt_generation, azt_frame;
 static AzDebugWindow azdbg;
 static unsigned azdbg_geometry, azdbg_velocity, azdbg_aux;
 static int azdbg_aux_warned;
+/* Last recognized resolve identity is debug evidence only; never dereference or use for route. */
+static uintptr_t azdbg_scene_identity, azdbg_scene_list;
 
 typedef struct {
     ID3D12DescriptorHeap *heap;
@@ -147,8 +150,8 @@ static void sr_trace_queue(ID3D12CommandQueue *q,const D3D12_COMMAND_QUEUE_DESC 
     if(desc->Type!=D3D12_COMMAND_LIST_TYPE_DIRECT)return;
     AcquireSRWLockExclusive(&azt_lock);
     int seen=0;
-    for(unsigned i=0;i<azt_direct_count && i<4;++i) if(azt_direct_queues[i]==q)seen=1;
-    if(!seen){if(azt_direct_count<4)azt_direct_queues[azt_direct_count++]=q;else azt_overflow();}
+    for(unsigned i=0;i<azt_direct_count && i<AZT_DIRECT_QUEUES;++i) if(azt_direct_queues[i]==q)seen=1;
+    if(!seen){if(azt_direct_count<AZT_DIRECT_QUEUES)azt_direct_queues[azt_direct_count++]=q;else azt_overflow();}
     if(!seen)log_msg("SR TRACE observed direct queues=%u",azt_direct_count);
     ReleaseSRWLockExclusive(&azt_lock);
 }
@@ -392,7 +395,11 @@ static void sr_trace_resolved(ID3D12GraphicsCommandList *cl,ID3D12Resource *scen
     AcquireSRWLockExclusive(&azt_lock);
     azt_pending.list=cl;azt_pending.scene=scene;azt_pending.output=output;
     azt_pending.frame=++azt_frame;azt_pending.unmodified=1;azt_pending.copied=0;
-    if(dlss_sr_debug_mode() && azdbg.active && !azdebug_resolve(&azdbg)) azdbg_finish_locked("resolve_limit");
+    if(dlss_sr_debug_mode()) {
+        azdbg_scene_identity=(uintptr_t)scene; azdbg_scene_list=(uintptr_t)cl;
+        if(azdbg.active && !azdebug_resolve(&azdbg)) azdbg_finish_locked("resolve_limit");
+        if(azdbg.active)log_msg("DEBUG RESOLVE_RESOURCE id=%u resolve=%llu scene=%p list=%p identityOnly=1",azdbg.id,azt_frame,(void *)scene,(void *)cl);
+    }
     if(azt_resolve_logs){--azt_resolve_logs;D3D12_RESOURCE_DESC sd;scene->lpVtbl->GetDesc(scene,&sd);
         log_msg("SR TRACE RESOLVE frame=%llu list=%p scene=%ux%u format=%d evaluated=%d",azt_pending.frame,(void *)cl,(UINT)sd.Width,sd.Height,(int)sd.Format,output!=NULL);}
     ReleaseSRWLockExclusive(&azt_lock);

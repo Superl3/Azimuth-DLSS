@@ -128,3 +128,7 @@ routing or FG.
 
 No actual FH2 GPU capture, generated frame, or performance result is
 included until the user runs these steps and the evidence is inspected.
+
+## Follow-up after first actual FH2 captures
+
+See [FH2 capture findings](FH2_CAPTURE_FINDINGS.md). The next debug build prioritizes three observed fullscreen PS/VS pairs with a separate quota, omits most unrelated depth-using geometry, keeps partial role SRVs marked unverified, and observes up to 32 direct queues. Multiple direct queues still disallow the visible SR route. The native texture/scene identity recorded for debugging is not a frame token. Repeat one low-resolution capture, then use RenderDoc or PIX to inspect the three passes and camera/MV resources. The offscreen `probe` mode separately permits a covering scissor; it does not change displayed output or establish GPU synchronization.

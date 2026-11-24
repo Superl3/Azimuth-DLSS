@@ -24,4 +24,13 @@ static inline int azdebug_expired(const AzDebugWindow *w,uint64_t now) {
     return w->active && now>=w->started_ms && now-w->started_ms>=w->timeout_ms;
 }
 static inline void azdebug_end(AzDebugWindow *w) { w->active=0; }
+/* Trace-only prioritization: a known candidate bypasses the general draw
+   quota. Otherwise keep 10-bit output composition, observed backbuffers
+   and simple no-depth/no-blend postprocess draws. No rendering decisions. */
+static inline int azdebug_pass_kind(int priority,int output10,int backbuffer,
+                                   int depth,int dsv,int blend,unsigned count,unsigned instances) {
+    if(priority)return 2;
+    if(backbuffer||output10)return 1;
+    return !depth&&!dsv&&!blend&&instances==1&&(count==3||count==6);
+}
 #endif

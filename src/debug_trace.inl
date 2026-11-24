@@ -73,7 +73,7 @@ static void debug_trace_toggle(void) {
     else if(azdebug_begin(&azdbg,azdbg_limit,now,azdbg_ms)){
         azt_budget=4000;azt_resolve_logs=64;azt_copy_logs=0;
         azdbg_geometry=64;azdbg_velocity=64;azdbg_aux=2048;azdbg_aux_warned=0;
-        azdbg_geom_count=0;azfg_base_rows=azfg_rows;azfg_limit_logged=0;
+        azdbg_geom_count=0;azfg_general_rows=azfg_priority_rows=0;azfg_limit_logged=azfg_priority_limit_logged=0;
         log_msg("DEBUG BEGIN id=%u firstResolveAfter=%llu limit=%u timeoutMs=%u",azdbg.id,azt_frame,azdbg_limit,azdbg_ms);
         started=1;
     }
@@ -98,16 +98,18 @@ static void debug_trace_draw(ID3D12GraphicsCommandList *cl,ListState *s,UINT cou
                 azdbg.id,role,(unsigned long)p->hash[0],(unsigned long)p->hash[1],(unsigned long)p->hash[2],(unsigned long)p->hash[3],
                 (unsigned long)p->vs_hash[0],(unsigned long)p->vs_hash[1],(unsigned long)p->vs_hash[2],(unsigned long)p->vs_hash[3]);
             AztRoot *r=azt_root_slot(s->trace_graphics_rs,0);
-            if(r && r->complete && !azt_incomplete){
+            /* Partial layouts are useful for diagnostics, never for enabling rendering. */
+            if(r && p && p->rs==s->trace_graphics_rs){
+                int complete=r->complete&&!azt_incomplete;
                 unsigned emitted=0;
-                for(UINT i=0;i<r->count && emitted<12;++i){
+                for(UINT i=0;i<r->count && emitted<24;++i){
                     AztRange *x=&r->ranges[i];
-                    for(UINT k=0;k<x->count && emitted<12;++k){
+                    for(UINT k=0;k<x->count && emitted<24;++k){
                         AztDesc *a=azt_bound_srv(s,x,k);
                         if(!a || !a->res || a->desc.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D)continue;
                         ++emitted;
-                        log_msg("DEBUG ROLE_SRV id=%u role=%d t%u space%u resource=%p size=%ux%u fmt=%d boundOnly=1",
-                            azdbg.id,role,x->reg+k,x->space,(void *)a->res,(UINT)a->desc.Width,a->desc.Height,(int)a->format);
+                        log_msg("DEBUG ROLE_SRV id=%u role=%d t%u space%u resource=%p size=%ux%u fmt=%d boundOnly=1 layout=%d",
+                            azdbg.id,role,x->reg+k,x->space,(void *)a->res,(UINT)a->desc.Width,a->desc.Height,(int)a->format,complete);
                     }
                 }
             }

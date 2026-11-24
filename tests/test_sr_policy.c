@@ -31,6 +31,16 @@ int main(void) {
     assert(azsr_in_range(r,optimal));
     assert(!azsr_in_range(o,optimal));
     assert(!azsr_in_range((AzSRSize){0,0},optimal));
-    puts("PASS: 18 SR policy assertions");
+    AzSRSize fh2={2592,1080};
+    assert(azsr_scissor_ok(AZSR_PROBE,fh2,0,0,32767,32767));
+    assert(azsr_scissor_ok(AZSR_PROBE,fh2,0,0,2592,1080));
+    assert(!azsr_scissor_ok(AZSR_PROBE,fh2,0,0,2591,1080));
+    assert(!azsr_scissor_ok(AZSR_PROBE,fh2,0,1,32767,32767));
+    assert(!azsr_scissor_ok(AZSR_ROUTE,fh2,0,0,32767,32767));
+    assert(!azsr_scissor_ok(AZSR_PADDED,fh2,0,0,32767,32767));
+    assert(azsr_scissor_ok(AZSR_ROUTE,fh2,0,0,2592,1080));
+    f=(AzSRFrame){fh2,fh2,fh2,fh2,o,1,1,1};
+    assert(azsr_decide(AZSR_PROBE,f)==AZSR_EVALUATE_ONLY);
+    puts("PASS: SR policy including observed FH2 covering scissor and probe dimensions");
     return 0;
 }
