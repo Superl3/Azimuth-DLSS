@@ -436,6 +436,7 @@ static const ViewEntry *view_find(SIZE_T handle) {
 }
 
 #include "sr_route.inl"
+#include "fg_trace.inl"
 #include "sr_route_hooks.inl"
 
 static void STDMETHODCALLTYPE hook_CreateRenderTargetView(ID3D12Device *dev, ID3D12Resource *res,
@@ -996,6 +997,7 @@ static void STDMETHODCALLTYPE hook_DrawInstanced(ID3D12GraphicsCommandList *cl, 
         sr_trace_native_velocity(s);
         if (!dlss_sr_trace_only()) record_mv_pass(cl, s, variant, vc, ic, sv, si);
     }
+    fg_trace_draw(cl,s,vc,ic,role,0);
     if (sr_trace_draw(cl,s,vc,ic,role,sv==0 && si==0)) return;
     real_DrawInstanced(cl, vc, ic, sv, si);
 }
@@ -1021,6 +1023,7 @@ static void STDMETHODCALLTYPE hook_DrawIndexedInstanced(ID3D12GraphicsCommandLis
         sr_trace_native_velocity(s);
         if (!dlss_sr_trace_only()) record_mv_pass_indexed(cl, s, variant, index_count, instance_count, start_index, base_vertex, start_instance);
     }
+    fg_trace_draw(cl,s,index_count,instance_count,role,1);
     if (sr_trace_draw(cl,s,index_count,instance_count,role,start_index==0 && base_vertex==0 && start_instance==0)) return;
     real_DrawIndexedInstanced(cl, index_count, instance_count, start_index, base_vertex, start_instance);
 }
@@ -1075,6 +1078,7 @@ static HRESULT WINAPI hook_D3D12CreateDevice(IUnknown *adapter, D3D_FEATURE_LEVE
             patch_slot(VT_SLOT(dev, ID3D12DeviceVtbl, CreateDepthStencilView), (void *)hook_CreateDepthStencilView, (void **)&real_CreateDepthStencilView);
             patch_slot(VT_SLOT(dev, ID3D12Device1Vtbl, CreatePipelineLibrary), (void *)hook_CreatePipelineLibrary, (void **)&real_CreatePipelineLibrary);
             dlss_init(dev);
+            fg_trace_init();
             sr_trace_hook_device(dev);
             log_msg("D3D12 device hooked");
         }
@@ -1136,6 +1140,7 @@ static HRESULT STDMETHODCALLTYPE hook_CreateSwapChainForHwnd(IDXGIFactory2 *f, I
         ensure_hotkey_thread();
         log_msg("swap chain %ux%u format %d hooked", desc->Width, desc->Height, (int)desc->Format);
         dlss_sr_note_swapchain(desc->Width, desc->Height);
+        fg_trace_swapchain(*sc, device);
     }
     return hr;
 }

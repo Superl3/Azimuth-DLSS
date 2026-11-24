@@ -9,6 +9,7 @@ import zipfile
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"tools"))
 from capture_sr import package, summarize, trace_env
+from analyze_fg_trace import parse_fg
 
 TRACE="""SR TRACE ONLY: no DLAA/NGX dispatch or injected motion replay
 SR observed swapchain: 3840x1600
@@ -35,6 +36,31 @@ class CaptureTests(unittest.TestCase):
             self.assertEqual(env["AZIMUTH_SR_MODE"],"trace")
             self.assertEqual(env["OTHER"],"yes")
         self.assertEqual(trace_env("probe","3840x1600","quality",4000)["AZIMUTH_SR_OUTPUT"],"3840x1600")
+    def test_fg_environment(self):
+        with patch.dict(os.environ,{"AZIMUTH_FG_TRACE":"1","AZIMUTH_FG_TRACE_START":"999"}):
+            env=trace_env("trace","3840x1600","quality",4000)
+            self.assertNotIn("AZIMUTH_FG_TRACE",env)
+            env=trace_env("trace","3840x1600","quality",4000,True,80,12)
+            self.assertEqual(env["AZIMUTH_FG_TRACE"],"1")
+            self.assertEqual(env["AZIMUTH_FG_TRACE_START"],"80")
+            self.assertEqual(env["AZIMUTH_FG_TRACE_RESOLVES"],"12")
+            with self.assertRaises(ValueError): trace_env("probe","3840x1600","quality",4000,True)
+    def test_fg_observation(self):
+        h="12345678-12345678-12345678-12345678"
+        s="FG TRACE ONLY start=1 resolves=8 budget=4096\n"
+        s+="FG SWAPCHAIN slot=0 chain=0x1 queue=0x2 size=3840x1600 format=28 buffers=3 effect=4 flags=0 creationSnapshot=1\n"
+        s+=f"FG PASS resolve=2 seq=1 list=0x3 target=0x4 size=3840x1600 fmt=28 bbSnapshot=1 blend=1 depth=0 dsv=0 writeMask=15 layout=1 viewport=0.00,0.00,3840.00,1600.00 draw=6/1 indexed=1 ps={h} vs={h}\n"
+        s+="FG INPUT seq=1 resource=0x5 size=3840x1600 fmt=28 t0 space0 scene=0 boundOnly=1\n"
+        data=parse_fg(s)
+        self.assertTrue(data["enabled"])
+        self.assertEqual(data["draw_count"],1)
+        self.assertEqual(data["passes"][0]["inputs"][0]["resource"],"0x5")
+        self.assertEqual(data["groups"][0]["resolves"],[2])
+        self.assertEqual(data["swapchain_creation_snapshots"][0]["queue"],"0x2")
+        self.assertFalse(data["truncated"])
+        self.assertTrue(parse_fg(s+"FG TRACE truncated")["truncated"])
+        self.assertEqual(summarize(s,"3840x1600")["fg_discovery"]["draw_count"],1)
+        self.assertFalse(parse_fg("old SR log")["enabled"])
     def test_package_and_wrong_log(self):
         with tempfile.TemporaryDirectory() as tmp:
             game=Path(tmp);log=game/"azimuth_dlaa.log";log.write_text(TRACE)

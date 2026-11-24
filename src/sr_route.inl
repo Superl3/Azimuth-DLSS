@@ -51,6 +51,9 @@ typedef struct {
     ID3D12RootSignature *rs;
     DWORD hash[4], vs_hash[4];
     int pure_candidate;
+    /* Observational FG metadata, not an indication that a draw renders HUD. */
+    int blend_enabled, depth_enabled;
+    UINT color_write_mask;
 } AztPso;
 typedef struct { ID3D12Resource *res; ID3D12GraphicsCommandList *list; unsigned long long recording; int known; D3D12_RESOURCE_STATES state; } AztState;
 static AztHeap azt_heaps[AZT_HEAPS];
@@ -289,6 +292,9 @@ static void sr_trace_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *d,ID3D12Pipel
     if(d->PS.BytecodeLength>=20 && d->PS.pShaderBytecode && !memcmp(d->PS.pShaderBytecode,"DXBC",4)) memcpy(v.hash,(const BYTE *)d->PS.pShaderBytecode+4,16);
     if(d->VS.BytecodeLength>=20 && d->VS.pShaderBytecode && !memcmp(d->VS.pShaderBytecode,"DXBC",4)) memcpy(v.vs_hash,(const BYTE *)d->VS.pShaderBytecode+4,16);
     const D3D12_RENDER_TARGET_BLEND_DESC *b=&d->BlendState.RenderTarget[0];
+    v.blend_enabled=b->BlendEnable;
+    v.depth_enabled=d->DepthStencilState.DepthEnable;
+    v.color_write_mask=b->RenderTargetWriteMask;
     v.pure_candidate=d->NumRenderTargets==1 && d->RTVFormats[0]==DXGI_FORMAT_R11G11B10_FLOAT && d->DSVFormat==DXGI_FORMAT_UNKNOWN &&
         !d->DepthStencilState.DepthEnable && !d->DepthStencilState.StencilEnable && !b->BlendEnable && !b->LogicOpEnable &&
         b->RenderTargetWriteMask==D3D12_COLOR_WRITE_ENABLE_ALL && !d->BlendState.AlphaToCoverageEnable && d->SampleMask==UINT_MAX &&

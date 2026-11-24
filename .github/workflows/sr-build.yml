@@ -85,8 +85,8 @@ jobs:
           New-Item -ItemType Directory -Path sr-build -Force | Out-Null
           Copy-Item build/dxgi.dll,build/azimuth_ngx.dll,LICENSE,LICENSE-NVIDIA-DLSS.txt,docs/SR_EXPERIMENT.md -Destination sr-build
           New-Item -ItemType Directory -Path sr-build/tools -Force | Out-Null
-          Copy-Item tools/capture_sr.py,tools/analyze_sr_trace.py -Destination sr-build/tools
-          Copy-Item docs/CAPTURE_FH2.md -Destination sr-build
+          Copy-Item tools/capture_sr.py,tools/analyze_sr_trace.py,tools/analyze_fg_trace.py -Destination sr-build/tools
+          Copy-Item docs/CAPTURE_FH2.md,docs/FG_INTEGRATION.md -Destination sr-build
           Get-FileHash sr-build/*.dll -Algorithm SHA256 | Format-Table -AutoSize | Out-String | Set-Content sr-build/SHA256.txt
       - uses: actions/upload-artifact@v4
         with:

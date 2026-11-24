@@ -118,3 +118,5 @@ NVIDIA SDK files are not part of this repository's MIT-licensed source.
 Azimuth-DLAA is an unofficial community mod and is not affiliated with NVIDIA, Microsoft, Xbox, Playground Games, Turn 10 Studios, or Almost There Games.
 
 For the experimental FH2 trace and GPU capture procedure, see [docs/CAPTURE_FH2.md](docs/CAPTURE_FH2.md).
+
+Frame generation discovery (no FG backend yet): [FG integration and capture plan](docs/FG_INTEGRATION.md).
