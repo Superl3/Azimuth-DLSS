@@ -120,3 +120,5 @@ Azimuth-DLAA is an unofficial community mod and is not affiliated with NVIDIA, M
 For the experimental FH2 trace and GPU capture procedure, see [docs/CAPTURE_FH2.md](docs/CAPTURE_FH2.md).
 
 Frame generation discovery (no FG backend yet): [FG integration and capture plan](docs/FG_INTEGRATION.md).
+
+**F8 debug capture (SR + FG):** see [Debug capture quick start](docs/DEBUG_CAPTURE.md). The independent debug-only artifact does not need NGX runtime DLLs. The optional RenderDoc API is used only when RenderDoc is already loaded.

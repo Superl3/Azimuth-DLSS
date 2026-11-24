@@ -16,6 +16,7 @@ import zipfile
 
 from analyze_sr_trace import parse
 from analyze_fg_trace import parse_fg
+from analyze_debug_trace import parse_debug
 
 DIM = re.compile(r"[1-9]\d*x[1-9]\d*")
 LABEL = re.compile(r"[A-Za-z0-9_-]{1,48}")
@@ -30,10 +31,12 @@ def sha256(path):
             digest.update(block)
     return digest.hexdigest()
 
-def trace_env(mode, size, quality, budget, fg=False, fg_start=1, fg_resolves=8):
-    env = {k:v for k,v in os.environ.items() if not k.upper().startswith(("AZIMUTH_SR_", "AZIMUTH_FG_"))}
+def trace_env(mode, size, quality, budget, fg=False, fg_start=1, fg_resolves=8, renderdoc=False):
+    env = {k:v for k,v in os.environ.items() if not k.upper().startswith(("AZIMUTH_SR_", "AZIMUTH_FG_", "AZIMUTH_DEBUG_"))}
     env["AZIMUTH_SR_MODE"] = mode
     env["AZIMUTH_SR_TRACE_BUDGET"] = str(budget)
+    if renderdoc and mode != "debug": raise ValueError("RenderDoc trigger requires debug mode")
+    if mode == "debug": env["AZIMUTH_DEBUG_RENDERDOC"] = "1" if renderdoc else "0"
     if fg:
         if mode != "trace": raise ValueError("FG discovery requires trace mode")
         env["AZIMUTH_FG_TRACE"] = "1"
@@ -59,6 +62,7 @@ def summarize(text, output):
         "route_copied": "SR ROUTE COPIED" in text,
         "candidates": candidates,
         "fg_discovery": parse_fg(text),
+        "debug_capture": parse_debug(text, output),
         "warning": "Bound SRVs are not proof of shader sampling; a resolve viewport is not proof of geometry resolution. Do not arm route from this report."
     }
 
@@ -71,8 +75,10 @@ def package(log, game, dest, label, mode, output, quality, render, exit_code):
     raw = log.read_bytes()
     text = raw.decode("utf-8", errors="replace")
     summary = summarize(text, output)
-    if mode == "trace" and not summary["trace_mode_seen"]:
+    if mode in ("trace","debug") and not summary["trace_mode_seen"]:
         raise RuntimeError("Log does not identify trace mode. Check that the experimental dxgi.dll was installed.")
+    if mode=="debug" and not summary["debug_capture"]["debug_ready"]:
+        raise RuntimeError("Log does not identify debug mode. Check that the latest debug proxy was installed.")
     metadata = {"label": label, "mode": mode, "requested_output": output, "requested_render_setting": render,
                 "requested_quality": quality if mode == "probe" else None,
                 "exit_code": exit_code, "utc": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -96,10 +102,11 @@ def main():
     p.add_argument("--label", required=True)
     p.add_argument("--render-setting", required=True, help="Actual setting selected in Azimuth (not applied by this script).")
     p.add_argument("--output", required=True, help="Expected display resolution, e.g. 3840x1600")
-    p.add_argument("--mode", choices=("trace","probe"), default="trace")
+    p.add_argument("--mode", choices=("trace","probe","debug"), default="trace")
     p.add_argument("--quality", choices=("quality","balanced","performance"),default="quality")
     p.add_argument("--budget",type=int,default=4000)
     p.add_argument("--fg-trace",action="store_true",help="Observe final-size pass candidates; does not enable FG.")
+    p.add_argument("--renderdoc",action="store_true",help="Debug only: F8 triggers the API if RenderDoc is already loaded; does not inject it.")
     p.add_argument("--fg-start",type=int,default=1,help="First recognized resolve sequence to observe.")
     p.add_argument("--fg-resolves",type=int,default=8,help="Number of resolve sequences to observe (1..64).")
     p.add_argument("--dest",type=Path,default=Path("sr-captures"))
@@ -109,6 +116,7 @@ def main():
         p.error("Invalid label, output WxH or budget (160..20000).")
     if a.fg_trace and (a.mode!='trace' or not 1<=a.fg_start<=1000000 or not 1<=a.fg_resolves<=64):
         p.error('FG discovery requires trace mode, start 1..1000000 and resolves 1..64.')
+    if a.renderdoc and a.mode!="debug": p.error("--renderdoc requires --mode debug")
     game=a.game_dir.resolve()
     log=game/"azimuth_dlaa.log"
     for name in ("azimuth.exe","dxgi.dll"):
@@ -128,9 +136,9 @@ def main():
                     backup=Path(f.name)
                 shutil.copy2(log,backup)
                 print("Previous log copied to",backup)
-            print("Drive into gameplay, then exit the game normally. No files are uploaded.",flush=True)
+            print("Drive into gameplay, then press F8 to capture (debug mode). Exit normally. No files are uploaded.",flush=True)
             proc=subprocess.Popen([str(game/"azimuth.exe")],cwd=game,
-                                  env=trace_env(a.mode,a.output,a.quality,a.budget,a.fg_trace,a.fg_start,a.fg_resolves))
+                                  env=trace_env(a.mode,a.output,a.quality,a.budget,a.fg_trace,a.fg_start,a.fg_resolves,a.renderdoc))
             exit_code=proc.wait()
             if running_azimuth():
                 raise RuntimeError("A launcher child is still running. Close it and use --collect-only.")
@@ -140,6 +148,8 @@ def main():
         target, summary=package(log,game,a.dest,a.label,a.mode,a.output,a.quality,a.render_setting,exit_code)
         print("Evidence package:",target.resolve())
         print("Resolve samples:",summary["resolves_logged"],"candidate groups:",len(summary["candidates"]))
+        if a.mode=="debug" and not summary["debug_capture"]["capture_count"]:
+            print("WARNING: no F8 capture window found; enter actual gameplay and press F8.")
         if a.fg_trace and not summary["fg_discovery"]["enabled"]:
             print("WARNING: FG trace not detected in log; verify build and capture settings.")
         if not summary["resolves_logged"]: print("WARNING: no recognized scene resolve. Include the log for diagnosis.")

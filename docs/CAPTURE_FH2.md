@@ -88,3 +88,5 @@ No actual FH2 capture or visible SR result is included in this branch yet.
 ## Optional frame generation discovery
 
 See [FG_INTEGRATION.md](FG_INTEGRATION.md). Add `--fg-trace` to a native trace run to collect output-sized graphics draw metadata, candidate HUD boundaries and swapchain creation snapshots. This does not enable FG.
+
+For the recommended manual F8 workflow and optional two-frame RenderDoc capture, see [DEBUG_CAPTURE.md](DEBUG_CAPTURE.md).

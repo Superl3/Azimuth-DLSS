@@ -100,7 +100,9 @@ static void fg_trace_draw(ID3D12GraphicsCommandList *cl,ListState *s,UINT count,
         s->num_vp?s->vp[0].TopLeftX:0.0,s->num_vp?s->vp[0].TopLeftY:0.0,s->num_vp?s->vp[0].Width:0.0,s->num_vp?s->vp[0].Height:0.0,
         count,instances,indexed,(unsigned long)p->hash[0],(unsigned long)p->hash[1],(unsigned long)p->hash[2],(unsigned long)p->hash[3],
         (unsigned long)p->vs_hash[0],(unsigned long)p->vs_hash[1],(unsigned long)p->vs_hash[2],(unsigned long)p->vs_hash[3]);
-    if (complete) {
+    /* Debug can log known ranges from a partial layout as candidate evidence.
+       layout=0 above explicitly marks the observation as unverified. */
+    if (complete || (dlss_sr_debug_mode() && r && p->rs==s->trace_graphics_rs)) {
         uintptr_t seen[AZFG_INPUTS]={0};
         unsigned n=0,excess=0;
         for (UINT i=0;i<r->count;++i) {

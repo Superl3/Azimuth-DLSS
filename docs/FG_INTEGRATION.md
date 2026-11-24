@@ -124,3 +124,5 @@ mip bias, reconstructed dynamic object motion, cut reset, descriptor/command
 list tracking and resource retirement need actual GPU validation. The upstream
 fixed-call-count retirement is not a GPU fence. Never use that strategy for
 FG inputs; keep per-frame resources alive to the backend's real completion.
+
+For bounded F8 metadata collection and optional actual RenderDoc GPU frame capture, use [DEBUG_CAPTURE.md](DEBUG_CAPTURE.md) rather than relying on startup resolve windows.
