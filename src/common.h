@@ -2,6 +2,7 @@
 #pragma once
 #include <windows.h>
 #include <d3d12.h>
+#include "sr_experiment.h"
 
 void log_msg(const char *fmt, ...);
 
@@ -12,6 +13,12 @@ void hooks_transition(ID3D12GraphicsCommandList *cl, ID3D12Resource *r, D3D12_RE
 /* dlss.c */
 void dlss_init(ID3D12Device *device);
 int dlss_enabled(void);
+AzSRMode dlss_sr_mode(void);
+void dlss_sr_note_swapchain(unsigned w, unsigned h);
+int dlss_sr_jitter_size(unsigned w, unsigned h);
+int dlss_sr_trace_only(void);
+ID3D12Resource *dlss_sr_route_output(void);
+void dlss_sr_route_result(int displayed);
 void dlss_toggle(void);
 /* Jitter for the frame currently being recorded, in render pixels. Returns 0 when off. */
 int dlss_jitter(float *x, float *y);
@@ -19,6 +26,7 @@ int dlss_jitter(float *x, float *y);
    States are the resources' current legacy states; they are left unchanged. */
 int dlss_run(ID3D12GraphicsCommandList *cl, ID3D12Resource *color, D3D12_RESOURCE_STATES color_state,
              ID3D12Resource *depth, D3D12_RESOURCE_STATES depth_state, ID3D12Resource *motion,
-             D3D12_RESOURCE_STATES motion_state);
+             D3D12_RESOURCE_STATES motion_state,
+             AzSRSize resolve, int top_left, int fh2, int fresh_mv);
 /* Updates temporal jitter/reset state after a DLAA attempt. */
 void dlss_end_frame(int ran);

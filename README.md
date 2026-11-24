@@ -1,4 +1,6 @@
-# Azimuth-DLAA
+# Azimuth-DLAA / experimental Azimuth-DLSS
+
+**Experimental SR v0.2:** the upstream DLAA path is the default. New opt-in native trace, offscreen DLSS probe, padded and guarded pure-HDR route modes are development features, not validated game support. See [SR experiment and validation guide](docs/SR_EXPERIMENT.md).
 
 NVIDIA DLAA support for Forza games running through [Azimuth](https://almost-there-games.itch.io/azimuth).
 

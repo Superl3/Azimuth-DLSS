@@ -10,6 +10,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <limits.h>
 
 #include "game_profile.h"
 #include "common.h"
@@ -127,6 +128,10 @@ static HRESULT(WINAPI *real_CreateDXGIFactory1)(REFIID, void **);
 static HRESULT(WINAPI *real_CreateDXGIFactory2)(UINT, REFIID, void **);
 static HRESULT(STDMETHODCALLTYPE *real_CreateSwapChainForHwnd)(IDXGIFactory2 *, IUnknown *, HWND, const DXGI_SWAP_CHAIN_DESC1 *, const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *, IDXGIOutput *, IDXGISwapChain1 **);
 
+static int sr_trace_enabled(void);
+static void sr_trace_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *,ID3D12PipelineState *);
+static void(STDMETHODCALLTYPE *real_CopyResource)(ID3D12GraphicsCommandList *,ID3D12Resource *,ID3D12Resource *);
+
 /* ---------------------------------------------------------------- shaders */
 
 static ID3DBlob *compile(const char *src, const char *entry, const char *target) {
@@ -140,7 +145,8 @@ static ID3DBlob *compile(const char *src, const char *entry, const char *target)
         }
     }
     ID3DBlob *code = NULL, *errors = NULL;
-    HRESULT hr = fn(src, strlen(src), entry, NULL, NULL, entry, target,
+    const D3D_SHADER_MACRO padded[] = {{"AZIMUTH_SR_PADDED", "1"}, {NULL, NULL}};
+    HRESULT hr = fn(src, strlen(src), entry, dlss_sr_mode() == AZSR_PADDED ? padded : NULL, NULL, entry, target,
                     D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
     if (FAILED(hr)) {
         log_msg("compile %s/%s failed 0x%08lx: %s", entry, target, hr,
@@ -189,6 +195,7 @@ static void consider_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc, ID3D12P
         return;
     }
 
+    sr_trace_pso(desc,pso);
     int role = ROLE_NONE;
     const GameProfile *profile = profile_for_shader(&desc->PS, &role);
     if (!profile || role == ROLE_NONE || pso_known(pso)) {
@@ -323,6 +330,13 @@ typedef struct {
     ID3D12RootSignature *compute_rs;
     UINT tables_mask;
     D3D12_GPU_DESCRIPTOR_HANDLE tables[32];
+    /* Separate tracking so the legacy DLAA restore path is not changed. */
+    ID3D12RootSignature *trace_graphics_rs;
+    UINT trace_tables_mask;
+    unsigned long long trace_recording_id;
+    D3D_PRIMITIVE_TOPOLOGY trace_topology;
+    UINT trace_queries;
+    int trace_predicated, trace_query_unknown;
 } ListState;
 
 /* Azimuth creates command lists continually and never tells us when one dies, so this
@@ -421,11 +435,15 @@ static const ViewEntry *view_find(SIZE_T handle) {
     return NULL;
 }
 
+#include "sr_route.inl"
+#include "sr_route_hooks.inl"
+
 static void STDMETHODCALLTYPE hook_CreateRenderTargetView(ID3D12Device *dev, ID3D12Resource *res,
                                                           const D3D12_RENDER_TARGET_VIEW_DESC *desc,
                                                           D3D12_CPU_DESCRIPTOR_HANDLE h) {
     real_CreateRenderTargetView(dev, res, desc, h);
     view_record(h, res, desc ? desc->Format : DXGI_FORMAT_UNKNOWN);
+    sr_trace_rtv(res,desc,h);
 }
 
 static void STDMETHODCALLTYPE hook_CreateDepthStencilView(ID3D12Device *dev, ID3D12Resource *res,
@@ -454,7 +472,8 @@ static BOOL is_scene_dsv(D3D12_CPU_DESCRIPTOR_HANDLE h) {
 
 static void apply_viewports(ID3D12GraphicsCommandList *cl, ListState *s) {
     float jx, jy;
-    if (s->dsv_scene && s->num_vp && dlss_jitter(&jx, &jy)) {
+    if (s->dsv_scene && s->num_vp &&
+        dlss_sr_jitter_size((UINT)s->vp[0].Width, (UINT)s->vp[0].Height) && dlss_jitter(&jx, &jy)) {
         D3D12_VIEWPORT vp[4];
         memcpy(vp, s->vp, s->num_vp * sizeof(*vp));
         for (UINT i = 0; i < s->num_vp; ++i) {
@@ -473,6 +492,7 @@ static void apply_viewports(ID3D12GraphicsCommandList *cl, ListState *s) {
 
 static HRESULT STDMETHODCALLTYPE hook_Reset(ID3D12GraphicsCommandList *cl, ID3D12CommandAllocator *a,
                                             ID3D12PipelineState *pso) {
+    sr_trace_reset(cl);
     ListState *s = state_for(cl);
     if (s) {
         memset((char *)s + sizeof(s->list), 0, sizeof(*s) - sizeof(s->list));
@@ -542,8 +562,11 @@ static void STDMETHODCALLTYPE hook_RSSetScissorRects(ID3D12GraphicsCommandList *
 static void STDMETHODCALLTYPE hook_SetDescriptorHeaps(ID3D12GraphicsCommandList *cl, UINT n, ID3D12DescriptorHeap *const *h) {
     ListState *s = state_for(cl);
     if (s) {
-        s->num_heaps = n > 2 ? 2 : n;
-        memcpy(s->heaps, h, s->num_heaps * sizeof(*h));
+        UINT tracked_n = n > 2 ? 2 : n;
+        if (tracked_n != s->num_heaps || (tracked_n && (!h || memcmp(s->heaps,h,tracked_n*sizeof(*h)))))
+            s->trace_tables_mask = 0;
+        s->num_heaps = tracked_n;
+        if (tracked_n && h) memcpy(s->heaps, h, tracked_n * sizeof(*h));
     }
     real_SetDescriptorHeaps(cl, n, h);
 }
@@ -560,6 +583,8 @@ static void STDMETHODCALLTYPE hook_SetGraphicsRootSignature(ID3D12GraphicsComman
     ListState *s = state_for(cl);
     if (s) {
         s->tables_mask = 0;
+        s->trace_tables_mask=0;
+        s->trace_graphics_rs=rs;
     }
     real_SetGraphicsRootSignature(cl, rs);
 }
@@ -570,11 +595,13 @@ static void STDMETHODCALLTYPE hook_SetGraphicsRootDescriptorTable(ID3D12Graphics
     if (s && index < 32) {
         s->tables[index] = base;
         s->tables_mask |= 1u << index;
+        s->trace_tables_mask |= 1u << index;
     }
     real_SetGraphicsRootDescriptorTable(cl, index, base);
 }
 
 static void STDMETHODCALLTYPE hook_ResourceBarrier(ID3D12GraphicsCommandList *cl, UINT n, const D3D12_RESOURCE_BARRIER *b) {
+    if (sr_trace_enabled()) sr_trace_barriers(cl,state_for(cl),n,b);
     ID3D12Resource *color = scene_color, *depth = scene_depth;
     if (color || depth) {
         for (UINT i = 0; i < n; ++i) {
@@ -844,7 +871,10 @@ static void run_dlss(ID3D12GraphicsCommandList *cl, ListState *s) {
     int fallback = 0;
 
     count_frame();
-    if (!dlss_enabled() || !scene_color || !scene_depth || !mv_tex) {
+    if (!dlss_enabled() || !scene_color || !scene_depth || !mv_tex || dlss_sr_trace_only() ||
+        (dlss_sr_mode()==AZSR_ROUTE && !sr_trace_route_ready())) {
+        if (dlss_sr_mode()==AZSR_ROUTE) dlss_sr_route_result(0);
+        sr_trace_resolved(cl,scene_color,NULL);
         return;
     }
 
@@ -855,6 +885,8 @@ static void run_dlss(ID3D12GraphicsCommandList *cl, ListState *s) {
            no fresh MV pass, switch to a history-reset fallback: zero vectors, no
            temporal jitter, and a reset on every frame. */
         if (n < 2) {
+            if (dlss_sr_mode() >= AZSR_PROBE) dlss_end_frame(0);
+            sr_trace_resolved(cl,scene_color,NULL);
             return;
         }
         fallback = 1;
@@ -887,11 +919,26 @@ static void run_dlss(ID3D12GraphicsCommandList *cl, ListState *s) {
         /* dlss_end_frame(0) below forces reset and keeps jitter disabled. */
     }
 
+    const GameProfile *profile = game_profile_active();
+    AzSRSize resolve = {0,0};
+    int top_left = 0;
+    if (s->num_vp == 1 && s->vp[0].Width > 0 && s->vp[0].Height > 0 &&
+        s->vp[0].Width <= 16384 && s->vp[0].Height <= 16384) {
+        resolve = (AzSRSize){(UINT)s->vp[0].Width,(UINT)s->vp[0].Height};
+        top_left = s->vp[0].TopLeftX == 0 && s->vp[0].TopLeftY == 0 &&
+            s->vp[0].Width == (float)resolve.w && s->vp[0].Height == (float)resolve.h &&
+            s->num_sc == 1 && s->sc[0].left == 0 && s->sc[0].top == 0 &&
+            s->sc[0].right == (LONG)resolve.w && s->sc[0].bottom == (LONG)resolve.h;
+    }
     int ok = dlss_run(cl, scene_color, (D3D12_RESOURCE_STATES)color_state, scene_depth,
-                     (D3D12_RESOURCE_STATES)depth_state, mv_tex, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                     (D3D12_RESOURCE_STATES)depth_state, mv_tex, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                     resolve,top_left,profile && !strcmp(profile->id,"fh2"),!fallback);
     ReleaseSRWLockShared(&mv_lock);
     InterlockedExchange(&scene_color_state, color_state);
     InterlockedExchange(&scene_depth_state, depth_state);
+    if (s->trace_graphics_rs != saved.trace_graphics_rs) {
+        saved.trace_graphics_rs=NULL; saved.trace_tables_mask=0;
+    } else saved.trace_tables_mask &= saved.tables_mask;
     *s = saved;
     restore_after_dlss(cl, s);
 
@@ -899,6 +946,7 @@ static void run_dlss(ID3D12GraphicsCommandList *cl, ListState *s) {
        Fallback frames deliberately remain disconnected from history: dlss_end_frame(0)
        keeps reset asserted and suppresses camera jitter until fresh MVs return. */
     dlss_end_frame((!fallback && ok) ? 1 : 0);
+    sr_trace_resolved(cl,scene_color,(!fallback && ok && dlss_sr_mode()==AZSR_ROUTE)?dlss_sr_route_output():NULL);
 }
 
 /* Resolve dispatch is exact-hash-specific inside the active game profile. */
@@ -908,6 +956,7 @@ static void STDMETHODCALLTYPE hook_DrawInstanced(ID3D12GraphicsCommandList *cl, 
     ID3D12PipelineState *variant = NULL;
     int role = s ? pso_lookup(s->pso, &variant) : ROLE_NONE;
     if (role == ROLE_RESOLVE && s) {
+        sr_trace_begin_resolve();
         BOOL scene_ok = note_scene_resources(s);
         real_DrawInstanced(cl, vc, ic, sv, si);
         if (scene_ok) {
@@ -915,8 +964,9 @@ static void STDMETHODCALLTYPE hook_DrawInstanced(ID3D12GraphicsCommandList *cl, 
         }
         return;
     } else if (role == ROLE_MV && variant && s && s->num_vp) {
-        record_mv_pass(cl, s, variant, vc, ic, sv, si);
+        if (!dlss_sr_trace_only()) record_mv_pass(cl, s, variant, vc, ic, sv, si);
     }
+    if (sr_trace_draw(cl,s,vc,ic,role,sv==0 && si==0)) return;
     real_DrawInstanced(cl, vc, ic, sv, si);
 }
 
@@ -927,6 +977,7 @@ static void STDMETHODCALLTYPE hook_DrawIndexedInstanced(ID3D12GraphicsCommandLis
     ID3D12PipelineState *variant = NULL;
     int role = s ? pso_lookup(s->pso, &variant) : ROLE_NONE;
     if (role == ROLE_RESOLVE && s) {
+        sr_trace_begin_resolve();
         const GameProfile *profile = game_profile_active();
         BOOL scene_ok = note_scene_resources(s);
         if (profile && profile->dispatch_indexed_resolve) {
@@ -937,8 +988,9 @@ static void STDMETHODCALLTYPE hook_DrawIndexedInstanced(ID3D12GraphicsCommandLis
             return;
         }
     } else if (role == ROLE_MV && variant && s && s->num_vp) {
-        record_mv_pass_indexed(cl, s, variant, index_count, instance_count, start_index, base_vertex, start_instance);
+        if (!dlss_sr_trace_only()) record_mv_pass_indexed(cl, s, variant, index_count, instance_count, start_index, base_vertex, start_instance);
     }
+    if (sr_trace_draw(cl,s,index_count,instance_count,role,start_index==0 && base_vertex==0 && start_instance==0)) return;
     real_DrawIndexedInstanced(cl, index_count, instance_count, start_index, base_vertex, start_instance);
 }
 
@@ -957,6 +1009,7 @@ static void hook_command_list(ID3D12GraphicsCommandList *cl) {
     patch_slot(VT_SLOT(cl, ID3D12GraphicsCommandListVtbl, SetComputeRootSignature), (void *)hook_SetComputeRootSignature, (void **)&real_SetComputeRootSignature);
     patch_slot(VT_SLOT(cl, ID3D12GraphicsCommandListVtbl, SetGraphicsRootSignature), (void *)hook_SetGraphicsRootSignature, (void **)&real_SetGraphicsRootSignature);
     patch_slot(VT_SLOT(cl, ID3D12GraphicsCommandListVtbl, SetGraphicsRootDescriptorTable), (void *)hook_SetGraphicsRootDescriptorTable, (void **)&real_SetGraphicsRootDescriptorTable);
+    sr_trace_hook_list(cl);
 }
 
 static HRESULT STDMETHODCALLTYPE hook_CreateCommandList(ID3D12Device *dev, UINT mask, D3D12_COMMAND_LIST_TYPE type,
@@ -967,8 +1020,10 @@ static HRESULT STDMETHODCALLTYPE hook_CreateCommandList(ID3D12Device *dev, UINT 
         ID3D12GraphicsCommandList *cl = NULL;
         if (SUCCEEDED(IUnknown_QueryInterface((IUnknown *)*out, &IID_ID3D12GraphicsCommandList, (void **)&cl))) {
             hook_command_list(cl);
+            sr_trace_reset(cl);
             ListState *s = state_for(cl);
             if (s) {
+                if (sr_trace_enabled()) memset((char *)s + sizeof(s->list),0,sizeof(*s)-sizeof(s->list));
                 s->pso = pso;
             }
             ID3D12GraphicsCommandList_Release(cl);
@@ -989,6 +1044,7 @@ static HRESULT WINAPI hook_D3D12CreateDevice(IUnknown *adapter, D3D_FEATURE_LEVE
             patch_slot(VT_SLOT(dev, ID3D12DeviceVtbl, CreateDepthStencilView), (void *)hook_CreateDepthStencilView, (void **)&real_CreateDepthStencilView);
             patch_slot(VT_SLOT(dev, ID3D12Device1Vtbl, CreatePipelineLibrary), (void *)hook_CreatePipelineLibrary, (void **)&real_CreatePipelineLibrary);
             dlss_init(dev);
+            sr_trace_hook_device(dev);
             log_msg("D3D12 device hooked");
         }
     }
@@ -1048,6 +1104,7 @@ static HRESULT STDMETHODCALLTYPE hook_CreateSwapChainForHwnd(IDXGIFactory2 *f, I
     if (SUCCEEDED(hr) && sc && *sc) {
         ensure_hotkey_thread();
         log_msg("swap chain %ux%u format %d hooked", desc->Width, desc->Height, (int)desc->Format);
+        dlss_sr_note_swapchain(desc->Width, desc->Height);
     }
     return hr;
 }
