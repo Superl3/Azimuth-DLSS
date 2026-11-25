@@ -161,3 +161,73 @@ No live entries are evicted and the visible-route fail-closed gates
 remain unchanged. Add exact alternate final pair to priority capture
 and an offline chain analyzer. These changes are diagnostics only.
 No proprietary shader text, game data or GPU capture is committed.
+
+
+## Fourth capture: final color path and native pre-overlay HDR copy
+
+The latest local ZIP's label says 1920x1080, but its two creation-time
+swapchains are 1920x1080 and 2560x1440. Actual scene/depth/geometry
+2560x1440, native velocity 1280x720. All three F8 windows completed,
+24 recognized resolve intervals, exit code zero. All 24 observed
+chains are 2560x1440 -> 2560x1440 -> 1920x1080, with exactly 23
+intervening same-target blend draws. This is a downscale observation,
+not an SR test. The final executed shader is a93721c4. The
+577d52ef PSO exists and was disassembled, but no draw using it
+appears in these windows. Both final shader assembly files and
+shared fullscreen VS are available privately. Descriptor occupancy
+151207, 152979, 154458 / 524288; no global incomplete warning. Some
+individual root layouts remain incomplete (including the first
+postprocess and copy); final SDR candidate layout is complete.
+No GPU frame capture, present event, or texture contents.
+
+Final shader disassembly corrects the prior interpretation:
+a93721c4 samples image t0 and a 1D calibration curve t1, converts
+transfer functions and returns the curve-mapped image. 577d52ef
+uses t0 image, t1 curve, t2 scene and cb0 peak/paper/black. It maps
+scene and composite through the curve, compares their values,
+attenuates scene-specific HDR enhancement in changed pixels, maps
+color to a wide-gamut basis consistent with Rec.2020, and applies
+ST 2084/PQ. These are SDR-curve and HDR-PQ path candidates, not
+aspect-ratio variants. Actual swapchain color space is not recorded.
+
+Cross-check against the earlier 2592x1080 HDR metadata:
+all 24/24 matched HDR chains have a same-list, same-resolve
+CopyTextureRegion from the 479be24a postprocess target (resource
+format 23) to the distinct t2 texture (format 24), recorded after
+postprocess and before the first recorded blend draw. t0 remains
+the a7840ad0 post-overlay image. This is strong evidence that the
+game already retains a pre-overlay scene image for HDR composition.
+No evidence that t2 is a separate UI layer; it is the scene copy.
+The new analyzer verifies copy ordering and identities, and reports
+measured direction rather than trusting the filename. Copy region,
+GPU ordering and actual image contents remain unverified.
+
+### Changed implementation approach
+
+For HDR FG, reuse this existing pre-overlay input rather than trying
+to remove HUD from final PQ pixels. An initial offscreen experiment
+should replay the *existing* final HDR color transform with t0 and
+t2 both sourced from the native pre-overlay scene, same t1 curve,
+cb0 brightness levels and display viewport. With identical samples
+the scene/composite difference in the shader is zero, avoiding the
+overlay-specific suppression of scene enhancement. Verify the
+result against the actual game HDR color space/format and pixels.
+Use separate resources/descriptors and restore state. No copying
+of proprietary shader bytecode into this repository. The replay
+is a plan, not implemented yet; root binding/state, fence/lifetime,
+actual active swapchain, and pixels require validation.
+
+This does not recover true UI alpha: scene/composite difference
+alone is not an alpha image. Preserve actual UI draws or use the
+supported SDK HUD-less mode, and test translucent HUD, non-HUD
+overlays and exposure changes. SDR path does not show the same
+native t2 input, so a dedicated pre-overlay copy may be needed.
+
+For SR, select a genuine low scene -> higher output run, e.g. the
+previous 2592x1080 -> 3840x1600 HDR path, rather than the latest
+downscale path. Reconstruct HDR before postprocess, map low-res
+auxiliary pixel coordinates, keep UI/composition and original HDR
+output transform. First validate the actual offscreen NGX image;
+an API success return is not an image-quality measurement. No new
+runtime rendering changes in this commit. The next high-value
+evidence is actual GPU pixels/constants, not another broad F8 trace.

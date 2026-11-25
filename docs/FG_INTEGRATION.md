@@ -126,3 +126,7 @@ fixed-call-count retirement is not a GPU fence. Never use that strategy for
 FG inputs; keep per-frame resources alive to the backend's real completion.
 
 For bounded F8 metadata collection and optional actual RenderDoc GPU frame capture, use [DEBUG_CAPTURE.md](DEBUG_CAPTURE.md) rather than relying on startup resolve windows.
+
+### Native HDR pre-overlay scene candidate
+
+The final HDR shader `577d52ef` consumes the composite at t0 and a scene copy at t2; the earlier HDR traces contain 24/24 matching pre-overlay copy records. See [FH2 capture findings](FH2_CAPTURE_FINDINGS.md). The initial HDR HUD-less replay experiment should apply the existing final shader using the same pre-overlay scene for t0 and t2, preserving curve/brightness and display color space. This is not a recovered UI alpha layer. The SDR final shader does not have t2. Actual GPU contents, active chain, frame identity, camera constants and resource lifetimes still require validation. No runtime FG backend or shader replay was added by the analysis update.

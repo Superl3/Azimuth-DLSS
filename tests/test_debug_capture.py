@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"tools"))
 from analyze_debug_trace import parse_debug
-from analyze_fg_trace import analyze_fh2_postfx,FH2_POSTFX,FH2_COPY,FH2_FINAL
+from analyze_fg_trace import analyze_fh2_postfx,analyze_hdr_scene_copy,FH2_POSTFX,FH2_COPY,FH2_FINAL,HDR_FINAL_PS,SDR_FINAL_PS
 from capture_sr import trace_env,summarize
 
 class DebugTests(unittest.TestCase):
@@ -57,6 +57,27 @@ DEBUG TRUNCATED id=2 section=aux
             self.assertEqual(analyze_fh2_postfx([a,overlay,b,dict(c,list="list2")])["matched_chains"],0)
             self.assertEqual(analyze_fh2_postfx([a,b,dict(c,inputs=[])])["matched_chains"],0)
             self.assertEqual(analyze_fh2_postfx([a,b,dict(b,seq=5),c])["ambiguous_chains"],1)
+    def test_hdr_preoverlay_copy(self):
+        c={"resolve":9,"list":"cl1","postfx_seq":1,"first_blend_seq":2,"copy_seq":3,"final_seq":4,
+           "final_ps":HDR_FINAL_PS,"scene_target":"scene","copy_target":"composite","final_target":"output",
+           "sizes":["2560x1440","2560x1440","3840x2160"]}
+        rows=[dict(seq=1,resolve=9,target="scene"),dict(seq=2,resolve=9,target="scene"),
+              dict(seq=3,resolve=9,target="composite"),dict(seq=4,resolve=9,target="output",
+              inputs=[dict(register="2",space="0",resource="prehud",size="2560x1440",format="24")])]
+        draw=lambda n:f"FG PASS resolve=9 seq={n} list=cl1"
+        copy="DEBUG COPY id=1 resolve=9 list=cl1 kind=region src=scene size=2560x1440 fmt=23 dst=prehud size=2560x1440 fmt=24"
+        lines=[draw(1),copy,draw(2),draw(3),draw(4)]
+        def report(lines,rows=rows,chain=c):
+            return analyze_hdr_scene_copy(lines,rows,[chain])
+        result=report(lines)
+        self.assertEqual(result["observed_preoverlay_copies"],1)
+        self.assertEqual(result["scale_directions"],{"upscale":1})
+        self.assertEqual(report([draw(1),draw(2),copy,draw(3),draw(4)])["observed_preoverlay_copies"],0)
+        self.assertEqual(report([draw(1),copy.replace("list=cl1","list=cl2"),draw(2),draw(3),draw(4)])["observed_preoverlay_copies"],0)
+        self.assertEqual(report([draw(1),copy,draw(2),copy,draw(3),draw(4)])["observed_preoverlay_copies"],0)
+        self.assertEqual(report(lines,[*rows[:3],dict(rows[3],inputs=[])])["observed_preoverlay_copies"],0)
+        self.assertEqual(report(lines,chain=dict(c,final_ps=SDR_FINAL_PS,sizes=["2560x1440","2560x1440","1920x1080"]))["scale_directions"],{"downscale":1})
+        self.assertEqual(report(lines,chain=dict(c,final_ps=SDR_FINAL_PS))["hdr_chains"],0)
     def test_env(self):
         with patch.dict(os.environ,{"AZIMUTH_DEBUG_RENDERDOC":"1","AZIMUTH_SR_ROUTE_CONFIRMED":"1","AZIMUTH_FG_TRACE":"1"}):
             env=trace_env("debug","3840x1600","quality",4000)

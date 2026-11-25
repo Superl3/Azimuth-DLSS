@@ -92,3 +92,96 @@ def analyze_fh2_postfx(rows):
             "blend_draw_range":[min(counts),max(counts)] if counts else None,
             "chains":chains,
             "warning":"Bound descriptor identities and CPU recording order only. Blended draws are candidate overlays, not proven HUD; final presentation and pre-HUD color require GPU capture. Never enable rendering from this analysis."}
+
+
+# Actual final shader assembly identifies these as different color paths,
+# not simply aspect-ratio variants. Presence at PSO creation is not execution.
+HDR_FINAL_PS="577d52ef-933f3888-157f3b5e-e0935945"
+SDR_FINAL_PS="a93721c4-5975a343-749f00dc-e74366c0"
+PASS_ORDER=re.compile(r"^FG PASS resolve=(\d+) seq=(\d+) list=(\S+)")
+COPY_ORDER=re.compile(r"^DEBUG COPY id=\d+ resolve=(\d+) list=(\S+) kind=(\S+) src=(\S+) size=(\d+x\d+) fmt=(\d+) dst=(\S+) size=(\d+x\d+) fmt=(\d+)")
+
+def _scale_direction(source,dest):
+    a=tuple(map(int,source.split("x")))
+    b=tuple(map(int,dest.split("x")))
+    if a==b: return "same_size"
+    if a[0]*b[1]!=a[1]*b[0]: return "aspect_changed"
+    return "upscale" if b[0]>a[0] else "downscale"
+
+def analyze_hdr_scene_copy(lines,rows,chains):
+    """Require an observed same-list copy of pre-overlay color to final t2.
+    These are CPU recording identities, never proof of GPU pixels or lifetime.
+    A CopyTextureRegion log does not describe the region or subresource.
+    """
+    positions={}
+    duplicate=set()
+    copies=defaultdict(list)
+    byseq={}
+    for r in rows:
+        byseq[r["seq"]]=r
+    for pos,line in enumerate(lines):
+        m=PASS_ORDER.match(line)
+        if m:
+            seq=int(m[2])
+            if seq in positions: duplicate.add(seq)
+            positions[seq]=pos
+        m=COPY_ORDER.match(line)
+        if m:
+            frame,cl,kind,src,ss,sf,dst,ds,df=m.groups()
+            copies[int(frame)].append((pos,cl,kind,src,ss,int(sf),dst,ds,int(df)))
+    observations=[]
+    for c in chains:
+        mode="hdr_pq_candidate" if c["final_ps"].lower()==HDR_FINAL_PS else "sdr_curve_candidate"
+        entry=dict(resolve=c["resolve"],list=c["list"],final_ps=c["final_ps"],
+                   path=mode,source_size=c["sizes"][0],final_size=c["sizes"][-1],
+                   scale_direction=_scale_direction(c["sizes"][0],c["sizes"][-1]),
+                   status="not_hdr" if mode=="sdr_curve_candidate" else "unverified")
+        observations.append(entry)
+        if mode!="hdr_pq_candidate":continue
+        ids=[c["postfx_seq"],c["copy_seq"],c["final_seq"],c["first_blend_seq"]]
+        if any(i is None or i not in positions or i in duplicate or i not in byseq for i in ids):
+            entry["status"]="missing_or_ambiguous_event_order"
+            continue
+        start,post_copy,final,blend=(positions[i] for i in ids)
+        if not start<blend<post_copy<final:
+            entry["status"]="invalid_event_order"
+            continue
+        final_row=byseq[c["final_seq"]]
+        t2={(x["resource"],x["size"],x["format"]) for x in final_row["inputs"]
+            if x["register"]=="2" and x["space"]=="0"}
+        if len(t2)!=1:
+            entry["status"]="missing_or_ambiguous_t2"
+            continue
+        resource,size,fmt=next(iter(t2))
+        entry.update(t2_resource=resource,t2_size=size,t2_format=fmt)
+        if (resource in (c["scene_target"],c["copy_target"],c["final_target"])
+            or size!=c["sizes"][0] or fmt!="24"):
+            entry["status"]="t2_identity_or_format_mismatch"
+            continue
+        # Include potential subsequent writes from any observed list, not
+        # merely the list that recorded the original scene draw.
+        edges=[e for e in copies[c["resolve"]] if start<e[0]<final and e[6]==resource]
+        candidates=[e for e in edges if e[0]<blend and e[1]==c["list"]
+            and e[2] in ("region","resource") and e[3]==c["scene_target"]
+            and e[4]==size and e[7]==size and e[5] in (23,24) and e[8]==24]
+        if len(candidates)!=1:
+            entry["status"]="missing_or_ambiguous_preoverlay_copy"
+            continue
+        e=candidates[0]
+        earlier_draw=any(r["resolve"]==c["resolve"] and r["target"]==c["scene_target"]
+            and start<positions.get(r["seq"],-1)<e[0] for r in rows)
+        later_draw=any(r["resolve"]==c["resolve"] and r["target"]==resource
+            and e[0]<positions.get(r["seq"],-1)<final for r in rows)
+        if earlier_draw or later_draw or any(q[0]>e[0] for q in edges):
+            entry["status"]="intervening_or_overwriting_draw_copy"
+            continue
+        entry.update(status="preoverlay_copy_observed",copy_kind=e[2],copy_source_format=e[5],
+                     copy_destination_format=e[8],copy_source=e[3],
+                     postfx_seq=c["postfx_seq"],first_blend_seq=c["first_blend_seq"],final_seq=c["final_seq"])
+    return {"hdr_chains":sum(o["path"]=="hdr_pq_candidate" for o in observations),
+            "sdr_chains":sum(o["path"]=="sdr_curve_candidate" for o in observations),
+            "observed_preoverlay_copies":sum(o["status"]=="preoverlay_copy_observed" for o in observations),
+            "scale_directions":dict((k,sum(o["scale_direction"]==k for o in observations))
+                for k in sorted({o["scale_direction"] for o in observations})),
+            "observations":observations,
+            "warning":"Shader path and recorded copy evidence only. No proof of copy region, UI contents, GPU ordering, color space, present ownership, or valid FG input. Do not enable rendering from this report."}
