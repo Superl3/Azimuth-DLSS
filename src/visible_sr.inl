@@ -170,15 +170,23 @@ static int azvis_final_bindings(ListState *s,ID3D12Resource *native,AzvisFrame *
         log_msg("VISIBLE SKIP resolve=%llu stage=final reason=root_schema",resolve);return 0;
     }
     AzvisReg t0={0},t1={0},s0={0};UINT n0=0,n1=0;
-    if(azdbg.active&&azdbg.observed<=AZPV_CAPTURE_COUNT){
+    AcquireSRWLockShared(&azt_lock);
+    int verbose=azdbg.active&&azdbg.observed<=AZPV_CAPTURE_COUNT;
+    ReleaseSRWLockShared(&azt_lock);
+    if(verbose){
         log_msg("VISIBLE FINAL_SCHEMA resolve=%llu root=%p parameters=%u rows=%u flags=0x%x",resolve,(void *)s->trace_graphics_rs,e.parameters,e.rows,e.flags);
         for(UINT i=0;i<e.rows;++i){const AzrpSchemaRow *x=&e.row[i];log_msg("VISIBLE FINAL_SCHEMA_ROW resolve=%llu index=%u vis=%u type=%u reg=%u space=%u count=%u offset=%u kind=%u",resolve,x->root,x->visibility,x->type,x->reg,x->space,x->count,x->offset,x->kind);}
     }
-    if(!azvis_reg(&e,AZRB_SRV,0,&t0)||!azvis_reg(&e,AZRB_SRV,1,&t1)||!azvis_reg(&e,AZRB_SAMPLER,0,&s0)||
-       t0.mode!=AZRB_TABLE||t1.mode!=AZRB_TABLE||!azvis_table_span(&e,t0.root,&n0)||
-       (t0.root!=t1.root&&!azvis_table_span(&e,t1.root,&n1))||
-       t0.offset>=n0||t1.offset>=(t0.root==t1.root?n0:n1)||(t0.root==t1.root&&t0.offset==t1.offset)||
-       n0+n1>AZRB_HEAP_LIMIT/2){
+    int t0ok=azvis_reg(&e,AZRB_SRV,0,&t0)&&t0.mode==AZRB_TABLE;
+    int t1ok=azvis_reg(&e,AZRB_SRV,1,&t1)&&t1.mode==AZRB_TABLE;
+    int s0ok=azvis_reg(&e,AZRB_SAMPLER,0,&s0);
+    int span0=t0ok&&azvis_table_span(&e,t0.root,&n0);
+    int span1=t1ok&&(t0ok&&t0.root==t1.root?span0:azvis_table_span(&e,t1.root,&n1));
+    int bounds=span0&&span1&&t0.offset<n0&&t1.offset<(t0.root==t1.root?n0:n1)&&
+        !(t0.root==t1.root&&t0.offset==t1.offset)&&n0+n1<=AZRB_HEAP_LIMIT/2;
+    if(verbose||!t0ok||!t1ok||!s0ok||!bounds)
+        log_msg("VISIBLE FINAL_LAYOUT resolve=%llu t0=%d t1=%d s0=%d span0=%d span1=%d bounds=%d root0=%u root1=%u samplerRoot=%u samplerMode=%u entries0=%u entries1=%u",resolve,t0ok,t1ok,s0ok,span0,span1,bounds,t0.root,t1.root,s0.root,s0.mode,n0,n1);
+    if(!t0ok||!t1ok||!s0ok||!bounds){
         log_msg("VISIBLE SKIP resolve=%llu stage=final reason=final_required_layout",resolve);return 0;
     }
     int ok=0;const char *reason="restore";

@@ -9,7 +9,7 @@ typedef struct {
     IDXGISwapChain3 *chain;
     uintptr_t queue,buffer;
     UINT count,index;
-    int sampled;
+    int sampled,snapshot_logged;
     long long qpc;
 } AzvisChain;
 static AzvisChain azvis_chains[AZVIS_CHAINS];
@@ -77,19 +77,27 @@ static void visible_note_hud(uintptr_t target,unsigned long long resolve){
 }
 static void visible_trace_copy(ID3D12GraphicsCommandList *cl,ID3D12Resource *dst,ID3D12Resource *src,int full){
     if(!azvis_enabled||!dst||!src||dst==src)return;
-    AcquireSRWLockExclusive(&azvis_trace_lock);
+    unsigned long long resolve=0;
+    AcquireSRWLockShared(&azvis_trace_lock);
     if(!azvis_trace_closed&&azvis_edge_logs<256){
         AzvisEvent *from=azvis_find_event((uintptr_t)src);
-        if(from){
-            unsigned long long resolve=from->resolve;
-            ListState *s=state_for(cl);
-            D3D12_RESOURCE_DESC a,b;src->lpVtbl->GetDesc(src,&a);dst->lpVtbl->GetDesc(dst,&b);
-            full=full&&a.Dimension==D3D12_RESOURCE_DIMENSION_TEXTURE2D&&b.Dimension==a.Dimension&&a.Width==b.Width&&a.Height==b.Height&&
-                a.Format==b.Format&&a.DepthOrArraySize==1&&b.DepthOrArraySize==1&&a.MipLevels==1&&b.MipLevels==1&&a.SampleDesc.Count==1&&b.SampleDesc.Count==1;
-            log_msg("VISIBLE EDGE resolve=%llu kind=copy list=%p recording=%llu src=%p dst=%p size=%llux%u full=%d qpc=%lld identityOnly=1",resolve,(void *)cl,s?s->trace_recording_id:0,(void *)src,(void *)dst,(unsigned long long)b.Width,b.Height,full,azvis_qpc());
-            ++azvis_edge_logs;
-            if(full&&s&&s->trace_recording_id)azvis_event((uintptr_t)dst,cl,s->trace_recording_id,resolve,1);
-        }
+        if(from)resolve=from->resolve;
+    }
+    ReleaseSRWLockShared(&azvis_trace_lock);
+    if(!resolve)return;
+    /* Do not call a COM method or the command-list state table while
+       holding the lineage lock. DXGI can be wrapped by other modules. */
+    ListState *s=state_for(cl);
+    unsigned long long recording=s?s->trace_recording_id:0;
+    D3D12_RESOURCE_DESC a,b;src->lpVtbl->GetDesc(src,&a);dst->lpVtbl->GetDesc(dst,&b);
+    full=full&&a.Dimension==D3D12_RESOURCE_DIMENSION_TEXTURE2D&&b.Dimension==a.Dimension&&a.Width==b.Width&&a.Height==b.Height&&
+        a.Format==b.Format&&a.DepthOrArraySize==1&&b.DepthOrArraySize==1&&a.MipLevels==1&&b.MipLevels==1&&a.SampleDesc.Count==1&&b.SampleDesc.Count==1;
+    AcquireSRWLockExclusive(&azvis_trace_lock);
+    AzvisEvent *from=azvis_find_event((uintptr_t)src);
+    if(!azvis_trace_closed&&azvis_edge_logs<256&&from&&from->resolve==resolve){
+        log_msg("VISIBLE EDGE resolve=%llu kind=copy list=%p recording=%llu src=%p dst=%p size=%llux%u full=%d qpc=%lld identityOnly=1",resolve,(void *)cl,recording,(void *)src,(void *)dst,(unsigned long long)b.Width,b.Height,full,azvis_qpc());
+        ++azvis_edge_logs;
+        if(full&&recording)azvis_event((uintptr_t)dst,cl,recording,resolve,1);
     }
     ReleaseSRWLockExclusive(&azvis_trace_lock);
 }
@@ -119,6 +127,7 @@ static void visible_trace_draw(ID3D12GraphicsCommandList *cl,ListState *s,UINT c
         if(!azvis_events[i].ambiguous&&azvis_events[i].resource){sources[source_count]=azvis_events[i].resource;resolves[source_count++]=azvis_events[i].resolve;}
     ReleaseSRWLockExclusive(&azvis_trace_lock);
     if(!hud&&!source_count)return;
+    unsigned hud_logged=0,edge_logged=0;
     AcquireSRWLockExclusive(&azt_lock);
     if(!azdbg.active||azdbg.observed>AZPV_CAPTURE_COUNT)goto done;
     AztDesc *t=azt_slot(azt_heap_for_cpu(s->rtv[0].ptr,D3D12_DESCRIPTOR_HEAP_TYPE_RTV),s->rtv[0].ptr,0);
@@ -146,7 +155,7 @@ static void visible_trace_draw(ID3D12GraphicsCommandList *cl,ListState *s,UINT c
             }
         }
         if(rows==48)log_msg("VISIBLE HUD_BIND_LIMIT resolve=%llu pso=%p",azt_frame,(void *)s->pso);
-        AcquireSRWLockExclusive(&azvis_trace_lock);++azvis_hud_logs;ReleaseSRWLockExclusive(&azvis_trace_lock);
+        hud_logged=1;
     }
     if(source_count&&t->desc.Width==1920&&t->desc.Height==1080){
         AztRoot *r=azt_root_slot(s->trace_graphics_rs,0);
@@ -158,12 +167,13 @@ static void visible_trace_draw(ID3D12GraphicsCommandList *cl,ListState *s,UINT c
                 log_msg("VISIBLE EDGE resolve=%llu kind=draw list=%p recording=%llu src=%p dst=%p t=%u ps=%08lx-%08lx-%08lx-%08lx boundOnly=1 qpc=%lld",
                     resolves[j],(void *)cl,s->trace_recording_id,(void *)d->res,(void *)t->res,r->ranges[i].reg+k,
                     (unsigned long)p->hash[0],(unsigned long)p->hash[1],(unsigned long)p->hash[2],(unsigned long)p->hash[3],azvis_qpc());
-                AcquireSRWLockExclusive(&azvis_trace_lock);++azvis_edge_logs;ReleaseSRWLockExclusive(&azvis_trace_lock);
+                edge_logged=1;
                 matched=1;break;
             }
         }
     }
 done: ReleaseSRWLockExclusive(&azt_lock);
+    if(hud_logged||edge_logged){AcquireSRWLockExclusive(&azvis_trace_lock);azvis_hud_logs+=hud_logged;azvis_edge_logs+=edge_logged;ReleaseSRWLockExclusive(&azvis_trace_lock);}
 }
 static uintptr_t azvis_buffer(IDXGISwapChain3 *c,UINT i){
     ID3D12Resource *r=NULL;
@@ -178,36 +188,70 @@ static void visible_poll_present(void){
     unsigned long long observed=azt_frame;
     ReleaseSRWLockExclusive(&azt_lock);
     if(!begun)return;
+    /* Only this polling thread releases retained chain references. Copy
+       its stable references/state under the lock, then query DXGI OUTSIDE
+       all trace and preview locks; avoid overlay/runtime lock inversion. */
+    AzvisChain local[AZVIS_CHAINS];unsigned count_chains=0;
     AcquireSRWLockExclusive(&azvis_trace_lock);
-    if(azvis_trace_closed)goto done;
-    if(expired){
-        for(unsigned i=0;i<azvis_chain_count;++i)if(azvis_chains[i].chain){
-            azvis_chains[i].chain->lpVtbl->Release(azvis_chains[i].chain);azvis_chains[i].chain=NULL;
+    if(!azvis_trace_closed){
+        count_chains=azvis_chain_count;
+        memcpy(local,azvis_chains,count_chains*sizeof(*local));
+        if(expired){
+            for(unsigned i=0;i<count_chains;++i)azvis_chains[i].chain=NULL;
+            azvis_trace_closed=1;
         }
-        azvis_trace_closed=1;log_msg("VISIBLE TRIAL_END resolve=%llu chainRefsReleased=1",observed);goto done;
     }
-    for(unsigned i=0;i<azvis_chain_count;++i){
-        AzvisChain *x=&azvis_chains[i];IDXGISwapChain3 *c=x->chain;
+    ReleaseSRWLockExclusive(&azvis_trace_lock);
+    if(expired){
+        for(unsigned i=0;i<count_chains;++i)if(local[i].chain)local[i].chain->lpVtbl->Release(local[i].chain);
+        if(count_chains)log_msg("VISIBLE TRIAL_END resolve=%llu chainRefsReleased=1",observed);
+        return;
+    }
+    for(unsigned i=0;i<count_chains;++i){
+        AzvisChain *x=&local[i];IDXGISwapChain3 *c=x->chain;
         if(!c)continue;
+        if(!x->snapshot_logged){
+            DXGI_SWAP_CHAIN_DESC1 d={0};HRESULT dh=c->lpVtbl->GetDesc1(c,&d);
+            LARGE_INTEGER freq;QueryPerformanceFrequency(&freq);
+            log_msg("VISIBLE LIVE_CHAIN chain=%p queue=%p descHr=%08lx size=%ux%u buffers=%u fmt=%u qpcFrequency=%lld",(void *)c,(void *)x->queue,(unsigned long)dh,d.Width,d.Height,d.BufferCount,(unsigned)d.Format,(long long)freq.QuadPart);
+            if(SUCCEEDED(dh))for(UINT j=0;j<d.BufferCount&&j<16;++j)
+                log_msg("VISIBLE LIVE_BUFFER chain=%p index=%u resource=%p qpc=%lld",(void *)c,j,(void *)azvis_buffer(c,j),azvis_qpc());
+            x->snapshot_logged=1;
+        }
         UINT count=0;HRESULT hr=c->lpVtbl->GetLastPresentCount(c,&count);
-        if(FAILED(hr)){if(!x->sampled){x->sampled=-1;log_msg("VISIBLE PRESENT_COUNTER chain=%p hr=%08lx unavailable=1",(void *)c,(unsigned long)hr);}continue;}
-        if(x->sampled>0&&count==x->count)continue;
-        UINT index=c->lpVtbl->GetCurrentBackBufferIndex(c);
-        uintptr_t buffer=azvis_buffer(c,index);
-        long long qpc=azvis_qpc();
-        UINT delta=x->sampled>0?count-x->count:0;
-        DXGI_FRAME_STATISTICS stats={0};
-        HRESULT shr=c->lpVtbl->GetFrameStatistics(c,&stats);
-        /* A single increment plus previous-current-buffer identity and a
-           submission in that sampled interval is a candidate association.
-           Never label it a Present hook or actual displayed-pixel proof. */
-        const AzvisEvent *e=x->sampled>0&&delta==1?azvis_find_event(x->buffer):NULL;
-        int candidate=e&&e->submitted&&e->qpc>=x->qpc&&e->qpc<=qpc;
-        log_msg("VISIBLE PRESENT_COUNT chain=%p queue=%p count=%u delta=%u currentIndex=%u currentBuffer=%p previousBuffer=%p qpc=%lld frameStatsHr=%08lx statsPresent=%u statsQpc=%lld observedResolve=%llu candidateResolve=%llu identityMatch=%d queueMatch=%d association=sample_interval",
-            (void *)c,(void *)x->queue,count,delta,index,(void *)buffer,(void *)x->buffer,qpc,(unsigned long)shr,
-            SUCCEEDED(shr)?stats.PresentCount:0,SUCCEEDED(shr)?(long long)stats.SyncQPCTime.QuadPart:0,
-            observed,candidate?e->resolve:0,candidate,candidate&&e->queue==x->queue);
-        x->count=count;x->index=index;x->buffer=buffer;x->qpc=qpc;x->sampled=1;
+        if(FAILED(hr)){
+            if(!x->sampled){x->sampled=-1;log_msg("VISIBLE PRESENT_COUNTER chain=%p hr=%08lx unavailable=1",(void *)c,(unsigned long)hr);}
+        }else if(x->sampled<=0||count!=x->count){
+            UINT index=c->lpVtbl->GetCurrentBackBufferIndex(c);
+            uintptr_t buffer=azvis_buffer(c,index);
+            long long qpc=azvis_qpc();
+            UINT delta=x->sampled>0?count-x->count:0;
+            DXGI_FRAME_STATISTICS stats={0};
+            HRESULT shr=c->lpVtbl->GetFrameStatistics(c,&stats);
+            unsigned long long candidate_resolve=0,latest_target=0;int queue_match=0,identity_match=0;
+            AcquireSRWLockShared(&azvis_trace_lock);
+            const AzvisEvent *latest=azvis_find_event(x->buffer);
+            if(latest)latest_target=latest->resolve;
+            if(x->sampled>0&&delta==1&&x->buffer){
+                unsigned matches=0;
+                for(unsigned j=0;j<azvis_event_count;++j){
+                    const AzvisEvent *e=&azvis_events[j];
+                    if(!e->ambiguous&&e->submitted&&e->resource==x->buffer&&e->qpc>=x->qpc&&e->qpc<=qpc){
+                        ++matches;candidate_resolve=e->resolve;queue_match=e->queue==x->queue;
+                    }
+                }
+                identity_match=matches==1;
+                if(!identity_match){candidate_resolve=0;queue_match=0;}
+            }
+            ReleaseSRWLockShared(&azvis_trace_lock);
+            log_msg("VISIBLE PRESENT_COUNT chain=%p queue=%p count=%u delta=%u currentIndex=%u currentBuffer=%p previousBuffer=%p qpc=%lld frameStatsHr=%08lx statsPresent=%u statsQpc=%lld observedResolve=%llu latestTargetResolve=%llu candidateResolve=%llu identityMatch=%d queueMatch=%d association=sample_interval",
+                (void *)c,(void *)x->queue,count,delta,index,(void *)buffer,(void *)x->buffer,qpc,(unsigned long)shr,
+                SUCCEEDED(shr)?stats.PresentCount:0,SUCCEEDED(shr)?(long long)stats.SyncQPCTime.QuadPart:0,
+                observed,latest_target,candidate_resolve,identity_match,queue_match);
+            x->count=count;x->index=index;x->buffer=buffer;x->qpc=qpc;x->sampled=1;
+        }
+        AcquireSRWLockExclusive(&azvis_trace_lock);
+        if(!azvis_trace_closed&&azvis_chains[i].chain==c)azvis_chains[i]=*x;
+        ReleaseSRWLockExclusive(&azvis_trace_lock);
     }
-done: ReleaseSRWLockExclusive(&azvis_trace_lock);
 }

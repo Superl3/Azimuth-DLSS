@@ -476,3 +476,5 @@ window plus one second. Do not resize/recreate swapchains in this alpha
 test; a retained swapchain interface may delay destruction. If no
 identity match is found, capture actual desktop/game screen video or
 external PresentMon evidence to establish display, not just final RAW.
+
+Live chain descriptors and all current buffer identities are recorded even if the present counter is unavailable. DXGI queries and chain releases run outside the tracing locks. The association remains a sampled candidate, only emitted for one uniquely observed submission in a single-count interval. QPC frequency is included for independent screen/ETW timeline correlation. FINAL_LAYOUT reports each required register and table-span check separately.
