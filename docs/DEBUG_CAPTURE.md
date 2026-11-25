@@ -319,3 +319,46 @@ unsupported/invalid layouts and a full registry are logged too. The
 replay path still registers only validated layouts. If several conditions
 are false, the first failure follows the original short-circuit ordering.
 The debug summary already includes POSTFX SR_ lines.
+
+
+### Multi-plan SR replay preflight (one gameplay test)
+
+The 812079b capture already demonstrated native replay and all six native
+postprocess snapshots, with two complete core groups. Its actual shader
+assembly declares the same 20 PS/VS bindings as the replay policy. No
+need to run the diagnosis-only build before trying fallback plans.
+
+The same -PreviewSRReplay invocation now evaluates A_compact (original
+32K packed policy), B_physical (rebase each required table to its original
+physical index in a new same-capacity resource heap), and C_extended
+(disjoint packing with a bounded one-million-descriptor maximum).
+The root's parsed requirements and bounded full schema are stored as
+private data on the live root-signature COM object, including rejected
+layouts, independent of the fixed approved-layout cache. The object
+data is revalidated at replay, never treated as approval. The physical
+plan preserves original heap size, verifies all required slots, rejects
+physical aliases to PS t0 across tables, and does not use an unknown
+range/registration as permission to replay. Extended packing can
+separate physical aliases between different tables. All paths reject
+logical aliases, missing required registers, incomplete global tracking,
+unproven state restoration and producer ordering. For B/C the original
+PS t0 CPU shadow is unnecessary only when its exact native scene
+identity, simple view and format are verified: the replacement descriptor
+is created anew in the private heap. Other required descriptors still
+need exact shadow copies. Neither game descriptor writes nor GPU waits
+nor independent root-signature switching are introduced.
+
+SR_PREFLIGHT includes independent producer, original draw, heap, global
+trace and graphics/compute restoration checks. SR_SCHEMA_ROW describes
+original parameter/range/register/space/offset information, with bounded
+truncation status. SR_REQ includes every required binding and its
+availability, including native root arguments preserved but not read
+back. SR_PLAN records each plan's independent layout and descriptor
+checks even if no replay may be recorded. The first feasible plan is
+allocated; allocation failure advances to the next plan before recording
+any draw. SR_BINDINGS path=1/2/3 identifies the selected implementation.
+If none is feasible, native rendering and native replay remain intact.
+This is still offscreen SR postprocess, not visible output or FG. An
+independent root signature/PSO is not implemented; it requires complete
+direct root-argument and state restoration tracking. The existing
+launcher and ZIP format are unchanged.

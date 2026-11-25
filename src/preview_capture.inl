@@ -240,16 +240,18 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
             }else log_msg("POSTFX REPLAY SKIP resolve=%llu reason=original_draw_gate missing=0x%02x chain=%d",resolve,missing,chain);
             if(azrp_sr_enabled){
                 g->requested_mask|=256u;
-                if(chain&&!(missing&~16u)&&s->trace_recording_id&&preview_sr_ready(g,cl,s->trace_recording_id)){
-                    AzpvBatch *batch=preview_batch(i,cl,s->trace_recording_id);
-                    AzrpBindings bindings;
-                    if(batch&&azrp_prepare_bindings(s,g->scene,g->sr_snapshot,&bindings,resolve)){
-                        ID3D12Resource *image=postfx_replay_draw(cl,s,resolve,&bindings);
-                        if(!image){ID3D12DescriptorHeap_Release(bindings.heap);log_msg("POSTFX SR_REPLAY SKIP resolve=%llu reason=draw",resolve);}
-                        else if(!preview_add(batch,image,D3D12_RESOURCE_STATE_RENDER_TARGET,"srpostfx"))
-                            log_msg("POSTFX SR_REPLAY SKIP resolve=%llu reason=readback",resolve);
-                    }
-                }else log_msg("POSTFX SR_REPLAY SKIP resolve=%llu reason=producer_or_original_draw_gate",resolve);
+                int draw_ready=chain&&!(missing&~16u)&&s->trace_recording_id;
+                int producer_ready=preview_sr_ready(g,cl,s->trace_recording_id);
+                AzpvBatch *batch=draw_ready&&producer_ready?preview_batch(i,cl,s->trace_recording_id):NULL;
+                AzrpBindings bindings;
+                /* Independent preflight runs even when the producer or
+                   draw gate prevents any replay work. */
+                if(azrp_prepare_bindings(s,g->scene,g->sr_snapshot,&bindings,resolve,producer_ready,draw_ready&&batch!=NULL)){
+                    ID3D12Resource *image=postfx_replay_draw(cl,s,resolve,&bindings);
+                    if(!image){ID3D12DescriptorHeap_Release(bindings.heap);log_msg("POSTFX SR_REPLAY SKIP resolve=%llu reason=draw path=%u",resolve,bindings.path);}
+                    else if(!preview_add(batch,image,D3D12_RESOURCE_STATE_RENDER_TARGET,"srpostfx"))
+                        log_msg("POSTFX SR_REPLAY SKIP resolve=%llu reason=readback path=%u",resolve,bindings.path);
+                }
             }
         }
     }

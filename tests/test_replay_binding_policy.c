@@ -35,6 +35,28 @@ int main(void){
     l=layout();l.req[3].mode=AZRB_DIRECT;assert(azrb_finish_detail(&l,base,&total,&mask,&req)==AZRB_FINISH_SRV_MODE&&req==3);
     l=layout();l.req[3].offset=12;assert(azrb_finish_detail(&l,base,&total,&mask,&req)==AZRB_FINISH_TABLE&&req==3);
     l=layout();l.span[3]=AZRB_HEAP_LIMIT;assert(azrb_finish_detail(&l,base,&total,&mask,&req)==AZRB_FINISH_SPAN&&req==16);
-    puts("PASS: exact PS/VS bindings, separate t0, bounded tables, reject ambiguity and detailed failure reasons");
+    /* Large declared extents need not require disjoint packed copies.
+       Physical rebase preserves original capacity and indices; extended
+       packing can instead separate a physical alias between tables. */
+    uint32_t original[AZRB_TABLES]={0};
+    original[0]=20;original[3]=100;
+    l=layout();
+    assert(azrb_rebase(&l,original,256,&mask,&req)==AZRB_REBASE_OK);
+    l.span[0]=40000;
+    assert(azrb_finish_detail(&l,base,&total,&mask,&req)==AZRB_FINISH_SPAN);
+    assert(azrb_rebase(&l,original,50000,&mask,&req)==AZRB_REBASE_OK);
+    assert(azrb_finish_limit(&l,base,&total,&mask,&req,AZRB_FALLBACK_LIMIT)==AZRB_FINISH_OK&&total==40006);
+    original[3]=15;
+    assert(azrb_rebase(&l,original,50000,&mask,&req)==AZRB_REBASE_ALIAS&&req==16);
+    assert(azrb_finish_limit(&l,base,&total,&mask,&req,AZRB_FALLBACK_LIMIT)==AZRB_FINISH_OK);
+    original[3]=UINT32_MAX;
+    assert(azrb_rebase(&l,original,50000,&mask,&req)==AZRB_REBASE_BOUNDS&&req==16);
+    assert(azrb_rebase(&l,original,AZRB_FALLBACK_LIMIT+1,&mask,&req)==AZRB_REBASE_CAPACITY);
+    l.req[3].mode=AZRB_UNBOUND;
+    assert(azrb_rebase(&l,original,50000,&mask,&req)==AZRB_REBASE_LAYOUT&&req==3);
+    assert(azrb_finish_limit(&l,base,&total,&mask,&req,AZRB_FALLBACK_LIMIT)==AZRB_FINISH_MISSING);
+    l=layout();l.valid=0;
+    assert(azrb_rebase(&l,original,50000,&mask,&req)==AZRB_REBASE_LAYOUT);
+    puts("PASS: exact bindings, legacy/physical/extended plans, bounds, aliases and fail-closed diagnostics");
     return 0;
 }
