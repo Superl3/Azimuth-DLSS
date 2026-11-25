@@ -15,16 +15,30 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - name: Install pinned Zig from official release
+      - name: Install pinned Zig and verify its release hash
+        timeout-minutes: 6
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $index = Invoke-RestMethod https://ziglang.org/download/index.json
-          $release = $index.'0.15.2'.'x86_64-windows'
-          if (!$release.tarball -or !$release.shasum) { throw 'Zig release not found' }
+          $PSNativeCommandUseErrorActionPreference = $false
+          $archive = 'zig-x86_64-windows-0.15.2.zip'
+          # SHA-256 from the official Zig 0.15.2 release index.
+          $sha256 = '3a0ed1e8799a2f8ce2a6e6290a9ff22e6906f8227865911fb7ddedc3cc14cb0c'
+          $sources = @(
+            "https://zig.squirl.dev/${archive}?source=azimuth-dlss-ci"
+            "https://ziglang.org/download/0.15.2/$archive"
+          )
           $zip = Join-Path $env:RUNNER_TEMP 'zig.zip'
-          Invoke-WebRequest $release.tarball -OutFile $zip
-          if ((Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $release.shasum.ToLowerInvariant()) { throw 'Zig checksum mismatch' }
+          $verified = $false
+          foreach ($uri in $sources) {
+            curl.exe --fail --silent --show-error --location --connect-timeout 10 --max-time 120 --output $zip $uri
+            if ($LASTEXITCODE -eq 0 -and (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -eq $sha256) {
+              $verified = $true
+              break
+            }
+            Write-Warning "Zig download failed or did not match the pinned hash: $uri"
+          }
+          if (!$verified) { throw 'Could not download a verified Zig archive' }
           $dir = Join-Path $env:RUNNER_TEMP 'zig'
           Expand-Archive $zip -DestinationPath $dir
           $exe = Get-ChildItem $dir -Recurse -Filter zig.exe | Select-Object -First 1
