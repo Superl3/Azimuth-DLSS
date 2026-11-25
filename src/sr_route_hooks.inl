@@ -2,11 +2,7 @@
 static HRESULT(STDMETHODCALLTYPE *real_CreateCommandQueue)(ID3D12Device *,const D3D12_COMMAND_QUEUE_DESC *,REFIID,void **);
 static HRESULT(STDMETHODCALLTYPE *real_CreateDescriptorHeap)(ID3D12Device *,const D3D12_DESCRIPTOR_HEAP_DESC *,REFIID,void **);
 static HRESULT(STDMETHODCALLTYPE *real_CreateRootSignature)(ID3D12Device *,UINT,const void *,SIZE_T,REFIID,void **);
-static void(STDMETHODCALLTYPE *real_CreateShaderResourceView)(ID3D12Device *,ID3D12Resource *,const D3D12_SHADER_RESOURCE_VIEW_DESC *,D3D12_CPU_DESCRIPTOR_HANDLE);
-static void(STDMETHODCALLTYPE *real_CreateUnorderedAccessView)(ID3D12Device *,ID3D12Resource *,ID3D12Resource *,const D3D12_UNORDERED_ACCESS_VIEW_DESC *,D3D12_CPU_DESCRIPTOR_HANDLE);
-static void(STDMETHODCALLTYPE *real_CreateConstantBufferView)(ID3D12Device *,const D3D12_CONSTANT_BUFFER_VIEW_DESC *,D3D12_CPU_DESCRIPTOR_HANDLE);
 static void(STDMETHODCALLTYPE *real_CopyDescriptors)(ID3D12Device *,UINT,const D3D12_CPU_DESCRIPTOR_HANDLE *,const UINT *,UINT,const D3D12_CPU_DESCRIPTOR_HANDLE *,const UINT *,D3D12_DESCRIPTOR_HEAP_TYPE);
-static void(STDMETHODCALLTYPE *real_CopyDescriptorsSimple)(ID3D12Device *,UINT,D3D12_CPU_DESCRIPTOR_HANDLE,D3D12_CPU_DESCRIPTOR_HANDLE,D3D12_DESCRIPTOR_HEAP_TYPE);
 static void(STDMETHODCALLTYPE *real_CopyTextureRegion)(ID3D12GraphicsCommandList *,const D3D12_TEXTURE_COPY_LOCATION *,UINT,UINT,UINT,const D3D12_TEXTURE_COPY_LOCATION *,const D3D12_BOX *);
 static void(STDMETHODCALLTYPE *real_ResolveSubresource)(ID3D12GraphicsCommandList *,ID3D12Resource *,UINT,ID3D12Resource *,UINT,DXGI_FORMAT);
 static void(STDMETHODCALLTYPE *real_ClearRenderTargetView)(ID3D12GraphicsCommandList *,D3D12_CPU_DESCRIPTOR_HANDLE,const FLOAT *,UINT,const D3D12_RECT *);
@@ -33,12 +29,12 @@ static HRESULT STDMETHODCALLTYPE trace_CreateDescriptorHeap(ID3D12Device *dev,co
 }
 static HRESULT STDMETHODCALLTYPE trace_CreateRootSignature(ID3D12Device *dev,UINT mask,const void *blob,SIZE_T bytes,REFIID riid,void **out) {
     HRESULT hr=real_CreateRootSignature(dev,mask,blob,bytes,riid,out);
-    if(SUCCEEDED(hr)&&out&&*out){ID3D12RootSignature *r=NULL;if(SUCCEEDED(IUnknown_QueryInterface((IUnknown *)*out,&IID_ID3D12RootSignature,(void **)&r))){sr_trace_root(r,blob,bytes);ID3D12RootSignature_Release(r);}}
+    if(SUCCEEDED(hr)&&out&&*out){ID3D12RootSignature *r=NULL;if(SUCCEEDED(IUnknown_QueryInterface((IUnknown *)*out,&IID_ID3D12RootSignature,(void **)&r))){sr_trace_root(r,blob,bytes);azrp_note_root(r,blob,bytes);ID3D12RootSignature_Release(r);}}
     return hr;
 }
-static void STDMETHODCALLTYPE trace_CreateShaderResourceView(ID3D12Device *dev,ID3D12Resource *res,const D3D12_SHADER_RESOURCE_VIEW_DESC *d,D3D12_CPU_DESCRIPTOR_HANDLE h){real_CreateShaderResourceView(dev,res,d,h);sr_trace_srv(res,d,h);}
-static void STDMETHODCALLTYPE trace_CreateUnorderedAccessView(ID3D12Device *dev,ID3D12Resource *res,ID3D12Resource *counter,const D3D12_UNORDERED_ACCESS_VIEW_DESC *d,D3D12_CPU_DESCRIPTOR_HANDLE h){real_CreateUnorderedAccessView(dev,res,counter,d,h);azt_write_desc(h.ptr,D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,NULL,DXGI_FORMAT_UNKNOWN,0);}
-static void STDMETHODCALLTYPE trace_CreateConstantBufferView(ID3D12Device *dev,const D3D12_CONSTANT_BUFFER_VIEW_DESC *d,D3D12_CPU_DESCRIPTOR_HANDLE h){real_CreateConstantBufferView(dev,d,h);azt_write_desc(h.ptr,D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,NULL,DXGI_FORMAT_UNKNOWN,0);}
+static void STDMETHODCALLTYPE trace_CreateShaderResourceView(ID3D12Device *dev,ID3D12Resource *res,const D3D12_SHADER_RESOURCE_VIEW_DESC *d,D3D12_CPU_DESCRIPTOR_HANDLE h){real_CreateShaderResourceView(dev,res,d,h);sr_trace_srv(res,d,h);azrp_shadow_srv(dev,res,d,h);}
+static void STDMETHODCALLTYPE trace_CreateUnorderedAccessView(ID3D12Device *dev,ID3D12Resource *res,ID3D12Resource *counter,const D3D12_UNORDERED_ACCESS_VIEW_DESC *d,D3D12_CPU_DESCRIPTOR_HANDLE h){real_CreateUnorderedAccessView(dev,res,counter,d,h);azt_write_desc(h.ptr,D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,NULL,DXGI_FORMAT_UNKNOWN,0);azrp_shadow_uav(dev,res,counter,d,h);}
+static void STDMETHODCALLTYPE trace_CreateConstantBufferView(ID3D12Device *dev,const D3D12_CONSTANT_BUFFER_VIEW_DESC *d,D3D12_CPU_DESCRIPTOR_HANDLE h){real_CreateConstantBufferView(dev,d,h);azt_write_desc(h.ptr,D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,NULL,DXGI_FORMAT_UNKNOWN,0);azrp_shadow_cbv(dev,d,h);}
 static void STDMETHODCALLTYPE trace_CopyDescriptors(ID3D12Device *dev,UINT nd,const D3D12_CPU_DESCRIPTOR_HANDLE *dst,const UINT *ds,UINT ns,const D3D12_CPU_DESCRIPTOR_HANDLE *src,const UINT *ss,D3D12_DESCRIPTOR_HEAP_TYPE type){real_CopyDescriptors(dev,nd,dst,ds,ns,src,ss,type);sr_trace_copy_descriptors(dev,nd,dst,ds,ns,src,ss,type);}
 static void STDMETHODCALLTYPE trace_CopyDescriptorsSimple(ID3D12Device *dev,UINT n,D3D12_CPU_DESCRIPTOR_HANDLE dst,D3D12_CPU_DESCRIPTOR_HANDLE src,D3D12_DESCRIPTOR_HEAP_TYPE type){real_CopyDescriptorsSimple(dev,n,dst,src,type);sr_trace_copy_descriptors(dev,1,&dst,&n,1,&src,&n,type);}
 static void STDMETHODCALLTYPE trace_CopyResource(ID3D12GraphicsCommandList *cl,ID3D12Resource *dst,ID3D12Resource *src){debug_trace_copy(cl,dst,src,"resource");sr_trace_write(cl,dst);real_CopyResource(cl,dst,src);}

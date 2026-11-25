@@ -121,6 +121,11 @@ static void(STDMETHODCALLTYPE *real_SetDescriptorHeaps)(ID3D12GraphicsCommandLis
 static void(STDMETHODCALLTYPE *real_SetComputeRootSignature)(ID3D12GraphicsCommandList *, ID3D12RootSignature *);
 static void(STDMETHODCALLTYPE *real_SetGraphicsRootSignature)(ID3D12GraphicsCommandList *, ID3D12RootSignature *);
 static void(STDMETHODCALLTYPE *real_SetGraphicsRootDescriptorTable)(ID3D12GraphicsCommandList *, UINT, D3D12_GPU_DESCRIPTOR_HANDLE);
+static void(STDMETHODCALLTYPE *real_SetComputeRootDescriptorTable)(ID3D12GraphicsCommandList *,UINT,D3D12_GPU_DESCRIPTOR_HANDLE);
+static void(STDMETHODCALLTYPE *real_CreateShaderResourceView)(ID3D12Device *,ID3D12Resource *,const D3D12_SHADER_RESOURCE_VIEW_DESC *,D3D12_CPU_DESCRIPTOR_HANDLE);
+static void(STDMETHODCALLTYPE *real_CreateUnorderedAccessView)(ID3D12Device *,ID3D12Resource *,ID3D12Resource *,const D3D12_UNORDERED_ACCESS_VIEW_DESC *,D3D12_CPU_DESCRIPTOR_HANDLE);
+static void(STDMETHODCALLTYPE *real_CreateConstantBufferView)(ID3D12Device *,const D3D12_CONSTANT_BUFFER_VIEW_DESC *,D3D12_CPU_DESCRIPTOR_HANDLE);
+static void(STDMETHODCALLTYPE *real_CopyDescriptorsSimple)(ID3D12Device *,UINT,D3D12_CPU_DESCRIPTOR_HANDLE,D3D12_CPU_DESCRIPTOR_HANDLE,D3D12_DESCRIPTOR_HEAP_TYPE);
 static void(STDMETHODCALLTYPE *real_CreateRenderTargetView)(ID3D12Device *, ID3D12Resource *, const D3D12_RENDER_TARGET_VIEW_DESC *, D3D12_CPU_DESCRIPTOR_HANDLE);
 static void(STDMETHODCALLTYPE *real_CreateDepthStencilView)(ID3D12Device *, ID3D12Resource *, const D3D12_DEPTH_STENCIL_VIEW_DESC *, D3D12_CPU_DESCRIPTOR_HANDLE);
 static HRESULT(WINAPI *real_CreateDXGIFactory)(REFIID, void **);
@@ -341,7 +346,8 @@ typedef struct {
     D3D12_GPU_DESCRIPTOR_HANDLE tables[32];
     /* Separate tracking so the legacy DLAA restore path is not changed. */
     ID3D12RootSignature *trace_graphics_rs;
-    UINT trace_tables_mask;
+    UINT trace_tables_mask,trace_compute_mask;
+    D3D12_GPU_DESCRIPTOR_HANDLE trace_compute_tables[32];
     unsigned long long trace_recording_id;
     D3D_PRIMITIVE_TOPOLOGY trace_topology;
     UINT trace_queries;
@@ -576,8 +582,9 @@ static void STDMETHODCALLTYPE hook_SetDescriptorHeaps(ID3D12GraphicsCommandList 
     ListState *s = state_for(cl);
     if (s) {
         UINT tracked_n = n > 2 ? 2 : n;
-        if (tracked_n != s->num_heaps || (tracked_n && (!h || memcmp(s->heaps,h,tracked_n*sizeof(*h)))))
-            s->trace_tables_mask = 0;
+        if (tracked_n != s->num_heaps || (tracked_n && (!h || memcmp(s->heaps,h,tracked_n*sizeof(*h))))){
+            s->trace_tables_mask = 0;s->trace_compute_mask=0;
+        }
         s->num_heaps = tracked_n;
         if (tracked_n && h) memcpy(s->heaps, h, tracked_n * sizeof(*h));
     }
@@ -587,11 +594,17 @@ static void STDMETHODCALLTYPE hook_SetDescriptorHeaps(ID3D12GraphicsCommandList 
 static void STDMETHODCALLTYPE hook_SetComputeRootSignature(ID3D12GraphicsCommandList *cl, ID3D12RootSignature *rs) {
     ListState *s = state_for(cl);
     if (s) {
+        if(s->compute_rs!=rs)s->trace_compute_mask=0;
         s->compute_rs = rs;
     }
     real_SetComputeRootSignature(cl, rs);
 }
 
+static void STDMETHODCALLTYPE hook_SetComputeRootDescriptorTable(ID3D12GraphicsCommandList *cl,UINT index,D3D12_GPU_DESCRIPTOR_HANDLE base){
+    ListState *s=state_for(cl);
+    if(s&&index<32){s->trace_compute_tables[index]=base;s->trace_compute_mask|=1u<<index;}
+    real_SetComputeRootDescriptorTable(cl,index,base);
+}
 static void STDMETHODCALLTYPE hook_SetGraphicsRootSignature(ID3D12GraphicsCommandList *cl, ID3D12RootSignature *rs) {
     ListState *s = state_for(cl);
     if (s) {
@@ -650,6 +663,8 @@ static void restore_after_dlss(ID3D12GraphicsCommandList *cl, ListState *s) {
     }
     if (s->compute_rs) {
         real_SetComputeRootSignature(cl, s->compute_rs);
+        if(azrp_sr_enabled&&real_SetComputeRootDescriptorTable)for(UINT i=0;i<32;++i)
+            if(s->trace_compute_mask&(1u<<i))real_SetComputeRootDescriptorTable(cl,i,s->trace_compute_tables[i]);
     }
     for (UINT i = 0; i < 32; ++i) {
         if (s->tables_mask & (1u << i)) {
@@ -1057,6 +1072,7 @@ static void hook_command_list(ID3D12GraphicsCommandList *cl) {
     patch_slot(VT_SLOT(cl, ID3D12GraphicsCommandListVtbl, SetComputeRootSignature), (void *)hook_SetComputeRootSignature, (void **)&real_SetComputeRootSignature);
     patch_slot(VT_SLOT(cl, ID3D12GraphicsCommandListVtbl, SetGraphicsRootSignature), (void *)hook_SetGraphicsRootSignature, (void **)&real_SetGraphicsRootSignature);
     patch_slot(VT_SLOT(cl, ID3D12GraphicsCommandListVtbl, SetGraphicsRootDescriptorTable), (void *)hook_SetGraphicsRootDescriptorTable, (void **)&real_SetGraphicsRootDescriptorTable);
+    if(azrp_sr_enabled)patch_slot(VT_SLOT(cl, ID3D12GraphicsCommandListVtbl, SetComputeRootDescriptorTable),(void *)hook_SetComputeRootDescriptorTable,(void **)&real_SetComputeRootDescriptorTable);
     sr_trace_hook_list(cl);
 }
 

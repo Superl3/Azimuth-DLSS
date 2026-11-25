@@ -65,6 +65,8 @@ jobs:
           ./build/test_postfx_dxbc.exe
           zig cc -target x86_64-windows-gnu -std=c11 -Wall -Wextra -Werror tests/test_postfx_compiler.c -o build/test_postfx_compiler.exe
           ./build/test_postfx_compiler.exe
+          zig cc -target x86_64-windows-gnu -std=c11 -Wall -Wextra -Werror tests/test_replay_binding_policy.c -o build/test_replay_binding_policy.exe
+          ./build/test_replay_binding_policy.exe
           python tests/test_debug_capture.py
       - name: Test automatic capture packaging
         shell: pwsh

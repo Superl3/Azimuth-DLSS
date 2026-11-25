@@ -47,6 +47,7 @@ typedef struct {
     D3D12_RESOURCE_DESC desc;
     DXGI_FORMAT format;
     unsigned simple;
+    unsigned shadow,shadow_valid,shadow_type;
 } AztDesc;
 typedef struct { UINT root, offset, count, reg, space; } AztRange;
 typedef struct {
@@ -67,6 +68,8 @@ typedef struct {
 typedef struct { ID3D12Resource *res; ID3D12GraphicsCommandList *list; unsigned long long recording; int known; D3D12_RESOURCE_STATES state; } AztState;
 static AztHeap azt_heaps[AZT_HEAPS];
 static AztDesc azt_descs[AZT_DESCS];
+/* Optional CPU descriptor mirror; no effect on the existing route policy. */
+static unsigned (*azt_shadow_copy)(unsigned dst,unsigned src);
 static unsigned azt_desc_used;
 static int azt_desc_warned;
 static AztRoot azt_roots[AZT_ROOTS];
@@ -228,7 +231,7 @@ static void azt_write_desc(SIZE_T handle,UINT type,ID3D12Resource *res,DXGI_FORM
     if (rd.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D || rd.DepthOrArraySize!=1 || rd.SampleDesc.Count!=1) simple=0;
     AcquireSRWLockExclusive(&azt_lock);
     AztDesc *d=azt_slot(azt_heap_for_cpu(handle,type),handle,1);
-    if (d) {d->res=res;d->desc=rd;d->format=format;d->simple=(unsigned)(simple!=0);}
+    if (d) {d->res=res;d->desc=rd;d->format=format;d->simple=(unsigned)(simple!=0);d->shadow_valid=0;}
     ReleaseSRWLockExclusive(&azt_lock);
 }
 static void sr_trace_rtv(ID3D12Resource *res,const D3D12_RENDER_TARGET_VIEW_DESC *desc,D3D12_CPU_DESCRIPTOR_HANDLE h) {
@@ -248,6 +251,10 @@ static void azt_copy_one(SIZE_T dst,SIZE_T src,UINT type) {
     if (!d) return;
     if (s) {d->res=s->res;d->desc=s->desc;d->format=s->format;d->simple=s->simple;}
     else {d->res=NULL;d->simple=0;d->format=DXGI_FORMAT_UNKNOWN;memset(&d->desc,0,sizeof(d->desc));}
+    if(azt_shadow_copy&&type==D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV){
+        if(s&&s->shadow_valid){d->shadow=azt_shadow_copy(d->shadow,s->shadow);d->shadow_valid=d->shadow!=0;d->shadow_type=s->shadow_type;}
+        else d->shadow_valid=0;
+    }
 }
 static void sr_trace_copy_descriptors(ID3D12Device *dev,UINT nd,const D3D12_CPU_DESCRIPTOR_HANDLE *dst,const UINT *ds,
     UINT ns,const D3D12_CPU_DESCRIPTOR_HANDLE *src,const UINT *ss,D3D12_DESCRIPTOR_HEAP_TYPE type) {

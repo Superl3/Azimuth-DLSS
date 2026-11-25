@@ -273,3 +273,28 @@ and https://github.com/microsoft/hlsl-specs/blob/main/proposals/infra/INF-0004-v
 Tests cover a synthetic container and a real Windows D3DCompile/D3DDisassemble
 fixture. Real FH2 variant creation and replay pixels still require runtime
 verification. Up to 16 textures, still bounded by 256 MiB of readbacks.
+
+
+### SR input binding experiment
+
+    Start-DebugCapture.cmd -Preview -PreviewPostFx -PreviewReplay -PreviewSRReplay -PreviewJitter -ShaderDisasm -Output 1920x1080
+
+The additional opt-in mode keeps CPU-only copies of created SRV/CBV/UAV
+descriptors and propagates them through descriptor copies. The exact
+postprocess PS/VS pair's declared shader registers are resolved from the
+original root signature. A private shader-visible heap is populated
+from the CPU mirror; the pixel shader's scene t0 is replaced by an
+immutable GPU-local SR snapshot, while the vertex shader's different
+t0 and every other required binding stay native. Tier 3 and distinct
+PS/VS t0 bindings are required. Unknown or ambiguous roots, missing
+descriptor shadows, and an unfinished producer fence skip the replay.
+The game descriptors are never modified. Original heaps and graphics
+and compute table bindings are restored. Direct root args are not
+changed. At most two SR snapshots and four replay surfaces are retained.
+No GPU queue waits are inserted; producer must have completed (or be
+earlier in the same physical recording). This is an experimental
+offscreen result, not visible SR or proven postprocess quality. It may
+save f*-srpostfx-1920x1080-fmt24.raw along with native replay and
+original stages. See POSTFX SR_LAYOUT, SR_BINDINGS and SR_REPLAY SKIP.
+Up to 18 textures under the existing 256 MiB readback cap. No FG,
+UI recomposition, actual camera constant values, or present takeover.
