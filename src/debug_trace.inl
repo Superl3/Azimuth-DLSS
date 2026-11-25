@@ -74,7 +74,7 @@ static void debug_trace_poll(void) {
     int started=0;
     AcquireSRWLockExclusive(&azt_lock);
     if(azdebug_expired(&azdbg,now))azdbg_finish_locked("timeout");
-    if(azdebug_auto_due(&azdbg,azdbg_auto_resolve,azt_frame)){
+    if(azdebug_auto_due(&azdbg,azdbg_auto_resolve,azt_frame)&&(!dlss_sr_preview_mode()||azdebug_preview_ready(&azpv_ready,azt_frame,now))){
         started=debug_trace_begin_locked(now);
         if(started)log_msg("DEBUG AUTO_BEGIN id=%u requestedResolve=%u",azdbg.id,azdbg_auto_resolve);
     }
@@ -97,7 +97,12 @@ static void debug_trace_toggle(void) {
     const uint64_t now=(uint64_t)GetTickCount64();
     int started=0;
     AcquireSRWLockExclusive(&azt_lock);
-    if(azdbg.active)azdbg_finish_locked("manual");
+    if(dlss_sr_preview_mode()){
+        if(azdbg.id)log_msg("PREVIEW F8_IGNORED reason=one_shot_already_started id=%u active=%d resolve=%llu qpc=%lld",azdbg.id,azdbg.active,azt_frame,azvis_qpc());
+        else if(!azdebug_preview_ready(&azpv_ready,azt_frame,now))
+            log_msg("PREVIEW F8_IGNORED reason=scene_not_ready streak=%u lastSuccessfulResolve=%llu currentResolve=%llu qpc=%lld",azpv_ready.streak,(unsigned long long)azpv_ready.last_resolve,azt_frame,azvis_qpc());
+        else started=debug_trace_begin_locked(now);
+    }else if(azdbg.active)azdbg_finish_locked("manual");
     else started=debug_trace_begin_locked(now);
     ReleaseSRWLockExclusive(&azt_lock);
     if(started)debug_rdc_trigger(now);
@@ -193,6 +198,7 @@ static void STDMETHODCALLTYPE dbg_execute(ID3D12CommandQueue *q,UINT n,ID3D12Com
         if(n>32)log_msg("DEBUG TRUNCATED id=%u section=submit_list",azdbg.id);
     }
     ReleaseSRWLockExclusive(&azt_lock);
+    visible_work_submit(q,n,lists);
     preview_execute(q,n,lists,dbg_real_execute);
     visible_trace_submit(q,n,lists);
 }

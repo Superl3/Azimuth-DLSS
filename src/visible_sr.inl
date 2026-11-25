@@ -125,7 +125,7 @@ static void visible_begin(AzvisFrame *v,ID3D12GraphicsCommandList *cl,ListState 
 }
 static void visible_composite(AzvisFrame *v,ID3D12GraphicsCommandList *cl,ListState *s,ID3D12Resource *native,unsigned long long resolve){
     if(!v->enabled||!v->pre_ready||v->list!=cl||v->recording!=s->trace_recording_id||!azvis_texture(native,1280,720)){
-        log_msg("VISIBLE SKIP resolve=%llu stage=composite reason=recording_or_native_surface",resolve);return;
+        log_msg("VISIBLE SKIP resolve=%llu stage=composite reason=recording_or_native_surface expectedList=%p actualList=%p expectedRecording=%llu actualRecording=%llu pre=%d native=%p",resolve,(void *)v->list,(void *)cl,v->recording,s->trace_recording_id,v->pre_ready,(void *)native);return;
     }
     azvis_copy_layer(cl,v->layers,2,native);
     hooks_transition(cl,v->layers,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -261,7 +261,7 @@ static int visible_finalize(AzvisFrame *v,ID3D12GraphicsCommandList *cl,ListStat
     if(!v->enabled||!v->pre_ready||!v->composite_ready||v->list!=cl||v->recording!=s->trace_recording_id||
        !azvis_texture(native,1280,720)||!azvis_texture(target,1920,1080)||s->vp_jittered||
        !azpv_adjacent_work(v->composite_work,s->trace_work_seq)){
-        log_msg("VISIBLE SKIP resolve=%llu stage=final reason=chain_recording_or_nonadjacent_work pre=%d composite=%d priorWork=%llu finalWork=%llu",resolve,v->pre_ready,v->composite_ready,v->composite_work,s->trace_work_seq);return 0;
+        log_msg("VISIBLE SKIP resolve=%llu stage=final reason=chain_recording_or_nonadjacent_work pre=%d composite=%d priorWork=%llu finalWork=%llu expectedList=%p actualList=%p expectedRecording=%llu actualRecording=%llu",resolve,v->pre_ready,v->composite_ready,v->composite_work,s->trace_work_seq,(void *)v->list,(void *)cl,v->recording,s->trace_recording_id);return 0;
     }
     ID3D12PipelineState *merge=NULL;
     AcquireSRWLockShared(&azvis_pso_lock);

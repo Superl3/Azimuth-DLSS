@@ -43,6 +43,7 @@ static unsigned azpv_count,azpv_batch_count;
 static UINT64 azpv_bytes;
 static volatile LONG azpv_queue_ready;
 static int azpv_enabled,azpv_postfx,azpv_done;
+static AzPreviewReady azpv_ready;
 static wchar_t azpv_dir[MAX_PATH];
 static char azpv_dirname[80];
 
@@ -163,10 +164,11 @@ static void preview_reap_live(unsigned long long retire_before){
     }
 }
 void hooks_preview_record(ID3D12GraphicsCommandList *cl,ID3D12Resource *color,ID3D12Resource *depth,
-                          ID3D12Resource *motion,ID3D12Resource *out,D3D12_RESOURCE_STATES read_state,int reset,int jitter_used,float jx,float jy) {
+                          ID3D12Resource *motion,ID3D12Resource *out,D3D12_RESOURCE_STATES read_state,int reset,int jitter_used,float jx,float jy,int fresh_mv) {
     if(!azpv_enabled||GetModuleHandleW(L"renderdoc.dll")||!cl||!g_device||
        cl->lpVtbl->GetType(cl)!=D3D12_COMMAND_LIST_TYPE_DIRECT||!InterlockedCompareExchange(&azpv_queue_ready,0,0))return;
     AcquireSRWLockExclusive(&azt_lock);
+    azdebug_preview_note(&azpv_ready,azt_frame+1,GetTickCount64(),fresh_mv&&!reset);
     int wanted=azdbg.active&&azdbg.id==1&&azdbg.observed<AZPV_GROUPS;
     int live=azvis_window_locked();
     unsigned long long resolve=azt_frame+1;
@@ -297,7 +299,11 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
                 }
             }
         }
-        if(g->visible.enabled&&bit==2&&chain&&!missing&&target)visible_composite(&g->visible,cl,s,target,resolve);
+        if(g->visible.enabled&&bit==2&&chain&&!missing&&target){
+            visible_composite(&g->visible,cl,s,target,resolve);
+            if(g->visible.composite_ready){s->trace_watch_resolve=resolve;s->trace_watch_count=0;s->trace_watch_active=1;
+                log_msg("VISIBLE WORK_WATCH resolve=%llu list=%p recording=%llu work=%llu composite=%p",resolve,(void *)cl,s->trace_recording_id,s->trace_work_seq,(void *)target);}
+        }
         if(bit==4)g->closed=1;
         if(g->visible.enabled&&bit==4){
             g->requested_mask|=1536u;

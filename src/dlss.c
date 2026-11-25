@@ -384,7 +384,7 @@ int dlss_run(ID3D12GraphicsCommandList *cl, ID3D12Resource *color, D3D12_RESOURC
     }
     if (ok && (decision == AZSR_EVALUATE_ONLY || decision == AZSR_ROUTE_OUTPUT)) {
         if (decision == AZSR_ROUTE_OUTPUT) sr_route_last_output = out_tex;
-        if(sr_preview_mode && decision==AZSR_EVALUATE_ONLY)hooks_preview_record(cl,color,depth,motion,out_tex,READ_STATE,need_reset,jitter_used,jitter_used?jx:0.0f,jitter_used?jy:0.0f);
+        if(sr_preview_mode && decision==AZSR_EVALUATE_ONLY)hooks_preview_record(cl,color,depth,motion,out_tex,READ_STATE,need_reset,jitter_used,jitter_used?jx:0.0f,jitter_used?jy:0.0f,fresh_mv);
         /* Offscreen verification: no copy to game, no screen jitter. Order repeated UAV writes. */
         hooks_transition(cl, out_tex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
         hooks_transition(cl, out_tex, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);

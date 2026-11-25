@@ -512,3 +512,30 @@ SR evidence, HUD diagnostics and first two groups (22 RAW maximum)
 remain unchanged. QPC frequency is logged for external correlation.
 
 Before F8 only the factory creation log and PSO diagnostics are active for the visible observer; draw/copy/barrier/submit lineage starts at the trial marker. summary.json includes visible_trial with request/result pairs, observed prior success on the same HWND, per-resolve stages and skip reasons. It never marks Present as verified from an in-process log alone. The optional CSV packaging is covered by a launcher fixture; value-only identity replacement and absence of DXGI interface calls are covered by CI regression tests.
+
+
+### fdc89e9 follow-up: one-shot readiness and work-tail diagnostics
+
+The SDR sample 2762 recorded composite work 184 and final work 186 in
+list 000001CDF1495520 recording 44756, then submitted on
+000001CDE7C64870. Work 185 is not identified by the old log; do not
+assume it is harmless. The adjacency policy is unchanged. The
+VISIBLE WORK_WATCH/WORK/WORK_BIND/WORK_BARRIER/WORK_SUBMIT records
+the previously counted methods and their identities, arguments,
+bound-only graphics resources, native barriers and actual queue order.
+The watch is bounded to 64 records per recording and reports truncation;
+unsupported API or shader accesses are not proven absent. Composite
+failure reports expected/actual recording identities. Creation-time
+game chain in the sample is 1280x720, not the 1920x1080 final RTV.
+Lineage draw diagnostics now inspect any texture size, and report
+creation-snapshot backbuffer writers; no bound-only edge authorizes
+routing or proves Present. No swapchain ref is retained.
+
+In preview mode F8 before a recent streak of three fresh successful SR
+resolves (without reset) is ignored rather than consuming the one-shot
+capture. This cannot prove gameplay; press F8 while actually driving.
+After the first accepted start, all further F8 presses are ignored
+until process exit. The 8-resolve RAW window and 10-second visible
+trial are independent. TRIAL_END logs candidate/routed/submitted counts
+and elapsed/chain-change reason. External PresentMon and screen video
+remain necessary to verify actual display.

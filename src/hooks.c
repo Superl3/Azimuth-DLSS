@@ -360,7 +360,9 @@ typedef struct {
     D3D12_GPU_DESCRIPTOR_HANDLE trace_compute_tables[AZRB_TABLES];
     D3D12_GPU_VIRTUAL_ADDRESS trace_graphics_cbv[AZRB_TABLES];
     uint64_t trace_graphics_constant_words[AZRB_TABLES];
-    unsigned long long trace_recording_id,trace_work_seq;
+    unsigned long long trace_recording_id,trace_work_seq,trace_watch_resolve;
+    unsigned trace_watch_count;
+    int trace_watch_active;
     D3D_PRIMITIVE_TOPOLOGY trace_topology;
     UINT trace_queries;
     int trace_predicated, trace_query_unknown;
@@ -695,7 +697,7 @@ static void STDMETHODCALLTYPE hook_ResourceBarrier(ID3D12GraphicsCommandList *cl
         }
     }
     real_ResourceBarrier(cl, n, b);
-    if(azvis_observing())visible_trace_barriers(cl,state_for(cl),n,b);
+    if(azvis_observing()){ListState *s=state_for(cl);visible_work_barriers(cl,s,n,b);visible_trace_barriers(cl,s,n,b);}
 }
 
 void hooks_transition(ID3D12GraphicsCommandList *cl, ID3D12Resource *r, D3D12_RESOURCE_STATES from,
@@ -1077,7 +1079,7 @@ static void STDMETHODCALLTYPE hook_DrawInstanced(ID3D12GraphicsCommandList *cl, 
     ListState *s = state_for(cl);
     ID3D12PipelineState *variant = NULL;
     int role = s ? pso_lookup(s->pso, &variant) : ROLE_NONE;
-    if(s&&azvis_observing())++s->trace_work_seq;
+    visible_count_work(cl,s,"DrawInstanced",NULL,NULL,vc,ic,sv,si);
     debug_trace_draw(cl,s,vc,role);
     if (role == ROLE_RESOLVE && s) {
         sr_trace_begin_resolve();
@@ -1106,7 +1108,7 @@ static void STDMETHODCALLTYPE hook_DrawIndexedInstanced(ID3D12GraphicsCommandLis
     ListState *s = state_for(cl);
     ID3D12PipelineState *variant = NULL;
     int role = s ? pso_lookup(s->pso, &variant) : ROLE_NONE;
-    if(s&&azvis_observing())++s->trace_work_seq;
+    visible_count_work(cl,s,"DrawIndexedInstanced",NULL,NULL,index_count,instance_count,start_index,(UINT)base_vertex);
     debug_trace_draw(cl,s,index_count,role);
     if (role == ROLE_RESOLVE && s) {
         sr_trace_begin_resolve();

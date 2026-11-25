@@ -30,6 +30,15 @@ int main(void){
     assert(azdebug_pass_kind(0,0,1,1,1,1,30,1)==1);
     assert(azdebug_pass_kind(0,0,0,0,0,0,3,1)==1);
     assert(azdebug_pass_kind(0,0,0,0,0,1,3,1)==0);
+    AzPreviewReady ready={0};
+    assert(!azdebug_preview_ready(&ready,0,100));
+    azdebug_preview_note(&ready,10,100,1);azdebug_preview_note(&ready,11,110,1);
+    assert(!azdebug_preview_ready(&ready,11,115));
+    azdebug_preview_note(&ready,12,120,1);
+    assert(azdebug_preview_ready(&ready,11,121)&&azdebug_preview_ready(&ready,12,121));
+    assert(!azdebug_preview_ready(&ready,13,121)&&!azdebug_preview_ready(&ready,12,621));
+    azdebug_preview_note(&ready,13,130,0);assert(!azdebug_preview_ready(&ready,13,131));
+    azdebug_preview_note(&ready,15,150,1);assert(ready.streak==1);
     puts("PASS: manual and automatic capture windows and prioritized postprocess policy");
     return 0;
 }
