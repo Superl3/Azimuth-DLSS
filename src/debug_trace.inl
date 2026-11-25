@@ -60,6 +60,7 @@ static void debug_rdc_trigger(uint64_t now) {
 }
 static int debug_trace_begin_locked(uint64_t now) {
     if(!azdebug_begin(&azdbg,azdbg_limit,now,azdbg_ms))return 0;
+    if(azvis_enabled&&azdbg.id==1){InterlockedExchange(&azvis_trace_active,1);log_msg("VISIBLE TRIAL_BEGIN firstResolveAfter=%llu qpc=%lld retainedSwapchainRefs=0",azt_frame,azvis_qpc());}
     azt_budget=4000;azt_resolve_logs=64;azt_copy_logs=0;
     azdbg_geometry=64;azdbg_velocity=64;azdbg_aux=2048;azdbg_aux_warned=0;
     azdbg_geom_count=0;azfg_general_rows=azfg_priority_rows=0;azfg_limit_logged=azfg_priority_limit_logged=0;

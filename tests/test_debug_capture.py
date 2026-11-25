@@ -40,6 +40,30 @@ DEBUG TRUNCATED id=2 section=aux
         self.assertTrue(b["truncation"])
         self.assertEqual(data["renderdoc_observations"][0]["nearest_capture_id"],1)
         self.assertEqual(summarize(text,"3840x2160")["debug_capture"]["capture_count"],2)
+    def test_visible_identity_only(self):
+        text="""VISIBLE SWAPCHAIN_REQUEST attempt=1 hwnd=AB qpc=1
+VISIBLE SWAPCHAIN_RESULT attempt=1 hwnd=AB hr=00000000 chain=AA qpc=2
+VISIBLE CHAIN attempt=1 hwnd=AB chain=AA retainedForTrial=0
+VISIBLE SWAPCHAIN_REQUEST attempt=2 hwnd=AB qpc=3
+VISIBLE SWAPCHAIN_RESULT attempt=2 hwnd=AB hr=80070005 chain=0 qpc=4
+VISIBLE SWAPCHAIN_REQUEST attempt=3 hwnd=AB qpc=5
+VISIBLE SWAPCHAIN_RESULT attempt=3 hwnd=AB hr=00000000 chain=BB qpc=6
+VISIBLE FINAL_CANDIDATE resolve=671 ps=a93721c4 routed=1
+VISIBLE FINAL_RECORDED resolve=671 target=01
+VISIBLE FINAL_SUBMITTED resolve=671 target=01
+VISIBLE FINAL_GPU_COMPLETE resolve=671 target=01
+VISIBLE PRESENT_BARRIER_SUBMITTED resolveCandidate=671 queueMatch=1 presentVerified=0
+VISIBLE SKIP resolve=672 stage=final reason=hdr_unsupported
+"""
+        result=parse_debug(text)["visible_trial"]
+        self.assertEqual(result["failed_creations"],1)
+        self.assertEqual(result["swapchain_attempts"][1]["prior_success_same_hwnd"],1)
+        self.assertEqual(result["swapchain_attempts"][2]["prior_success_same_hwnd"],1)
+        self.assertEqual(result["recorded_resolves"],1)
+        self.assertEqual(result["submitted_resolves"],1)
+        self.assertEqual(result["gpu_complete_resolves"],1)
+        self.assertEqual(result["skips_by_stage_reason"],{"final:hdr_unsupported":1})
+        self.assertFalse(result["actual_present_verified"])
     def test_fh2_postfx_chain(self):
         def draw(seq, pair, target, src=None, blend=0, other_list=None):
             return dict(seq=seq,resolve=9,list=other_list or "list1",ps=pair[0],vs=pair[1],

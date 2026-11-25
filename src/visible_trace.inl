@@ -10,6 +10,8 @@ static SRWLOCK azvis_trace_lock=SRWLOCK_INIT;
 static AzvisChainIdentity azvis_chains[AZVIS_CHAINS];
 static volatile LONG64 azvis_create_serial;
 static int azvis_trace_closed;
+static volatile LONG azvis_trace_active;
+static int azvis_observing(void){return InterlockedCompareExchange(&azvis_trace_active,0,0)!=0;}
 typedef struct {
     uintptr_t resource,list,queue;
     unsigned long long resolve,recording;
@@ -37,7 +39,7 @@ static uint64_t visible_create_begin(HWND hwnd,IUnknown *device,const DXGI_SWAP_
     ReleaseSRWLockShared(&azt_lock);
     if(begun){InterlockedExchange(&azvis_chain_changed,1);log_msg("VISIBLE TRIAL_DISABLED reason=swapchain_creation_during_trial attempt=%llu",(unsigned long long)attempt);}
     LARGE_INTEGER freq;QueryPerformanceFrequency(&freq);
-    log_msg("VISIBLE SWAPCHAIN_REQUEST attempt=%llu hwnd=%p deviceOrQueue=%p tid=%lu size=%ux%u fmt=%u buffers=%u effect=%u flags=%u fullscreenDesc=%d windowed=%d restrictRefs=0 qpc=%lld qpcFrequency=%lld",
+    log_msg("VISIBLE SWAPCHAIN_REQUEST attempt=%llu hwnd=%p deviceOrQueue=%p tid=%lu size=%ux%u fmt=%u buffers=%u effect=%u flags=%u fullscreenDesc=%d windowed=%d retainedRefs=0 qpc=%lld qpcFrequency=%lld",
         (unsigned long long)attempt,(void *)hwnd,(void *)device,(unsigned long)GetCurrentThreadId(),
         d?d->Width:0,d?d->Height:0,d?(unsigned)d->Format:0,d?d->BufferCount:0,d?(unsigned)d->SwapEffect:0,d?d->Flags:0,
         fs!=NULL,fs?fs->Windowed:1,azvis_qpc(),(long long)freq.QuadPart);
@@ -76,7 +78,7 @@ static void azvis_event(uintptr_t resource,ID3D12GraphicsCommandList *cl,unsigne
     *e=(AzvisEvent){resource,(uintptr_t)cl,0,resolve,recording,azvis_qpc(),0,0,copy,routed};
 }
 static void visible_note_final(uintptr_t target,uintptr_t source,ID3D12GraphicsCommandList *cl,unsigned long long recording,unsigned long long resolve,DWORD hash,int routed,unsigned missing){
-    if(!azvis_enabled)return;
+    if(!azvis_observing())return;
     AcquireSRWLockExclusive(&azvis_trace_lock);
     if(!azvis_trace_closed){
         AzvisBufferMatch m;int match=azvis_match_buffer(azvis_chains,target,&m);
@@ -87,13 +89,13 @@ static void visible_note_final(uintptr_t target,uintptr_t source,ID3D12GraphicsC
     ReleaseSRWLockExclusive(&azvis_trace_lock);
 }
 static void visible_note_hud(uintptr_t target,unsigned long long resolve){
-    if(!azvis_enabled||!target)return;
+    if(!azvis_observing()||!target)return;
     AcquireSRWLockExclusive(&azvis_trace_lock);
     azvis_hud_target=target;azvis_hud_resolve=resolve;
     ReleaseSRWLockExclusive(&azvis_trace_lock);
 }
 static void visible_trace_copy(ID3D12GraphicsCommandList *cl,ID3D12Resource *dst,ID3D12Resource *src,int full){
-    if(!azvis_enabled||!dst||!src||dst==src)return;
+    if(!azvis_observing()||!dst||!src||dst==src)return;
     unsigned long long resolve=0;
     AcquireSRWLockShared(&azvis_trace_lock);
     if(!azvis_trace_closed&&azvis_edge_logs<256){
@@ -119,7 +121,7 @@ static void visible_trace_copy(ID3D12GraphicsCommandList *cl,ID3D12Resource *dst
     ReleaseSRWLockExclusive(&azvis_trace_lock);
 }
 static void visible_trace_barriers(ID3D12GraphicsCommandList *cl,ListState *s,UINT n,const D3D12_RESOURCE_BARRIER *b){
-    if(!azvis_enabled||!s||!s->trace_recording_id||!b)return;
+    if(!azvis_observing()||!s||!s->trace_recording_id||!b)return;
     AcquireSRWLockShared(&azt_lock);
     int active=azdbg.id==1&&GetTickCount64()-azdbg.started_ms<AZVIS_MS+1000u;
     ReleaseSRWLockShared(&azt_lock);
@@ -148,7 +150,7 @@ static void visible_trace_barriers(ID3D12GraphicsCommandList *cl,ListState *s,UI
     ReleaseSRWLockExclusive(&azvis_trace_lock);
 }
 static void visible_trace_submit(ID3D12CommandQueue *q,UINT n,ID3D12CommandList *const *lists){
-    if(!azvis_enabled)return;
+    if(!azvis_observing())return;
     AcquireSRWLockExclusive(&azvis_trace_lock);
     if(!azvis_trace_closed)for(unsigned k=0;k<azvis_event_count;++k){
         AzvisEvent *e=&azvis_events[k];
@@ -177,7 +179,7 @@ static void visible_trace_submit(ID3D12CommandQueue *q,UINT n,ID3D12CommandList 
     ReleaseSRWLockExclusive(&azvis_trace_lock);
 }
 static void visible_trace_draw(ID3D12GraphicsCommandList *cl,ListState *s,UINT count,UINT instances,int indexed,UINT first,INT base,UINT first_instance){
-    if(!azvis_enabled||!s||s->num_rtv!=1)return;
+    if(!azvis_observing()||!s||s->num_rtv!=1)return;
     uintptr_t hud=0;unsigned long long hud_resolve=0;
     uintptr_t sources[AZVIS_EVENTS];unsigned long long resolves[AZVIS_EVENTS];unsigned source_count=0;
     AcquireSRWLockExclusive(&azvis_trace_lock);
@@ -237,7 +239,7 @@ done: ReleaseSRWLockExclusive(&azt_lock);
     if(hud_logged||edge_logged){AcquireSRWLockExclusive(&azvis_trace_lock);azvis_hud_logs+=hud_logged;azvis_edge_logs+=edge_logged;ReleaseSRWLockExclusive(&azvis_trace_lock);}
 }
 static void visible_poll_trial(void){
-    if(!azvis_enabled)return;
+    if(!azvis_observing())return;
     AcquireSRWLockShared(&azt_lock);
     int expired=azdbg.id==1&&GetTickCount64()-azdbg.started_ms>=AZVIS_MS+1000u;
     unsigned long long observed=azt_frame;
@@ -246,6 +248,7 @@ static void visible_poll_trial(void){
     AcquireSRWLockExclusive(&azvis_trace_lock);
     if(!azvis_trace_closed){
         azvis_trace_closed=1;
+        InterlockedExchange(&azvis_trace_active,0);
         log_msg("VISIBLE TRIAL_END resolve=%llu retainedSwapchainRefs=0 actualPresent=external_etw_or_video qpc=%lld",observed,azvis_qpc());
     }
     ReleaseSRWLockExclusive(&azvis_trace_lock);

@@ -25,6 +25,55 @@ SECTIONS={
     "queue_signals":"DEBUG SIGNAL ",
     "queue_waits":"DEBUG WAIT ",
 }
+def analyze_visible(text):
+    """Identity and submission observations, not proof of actual Present."""
+    attempts={}; frames={}; counts={}; skip_reasons={}
+    last_success_by_hwnd={}
+    for line in text.splitlines():
+        if not line.startswith("VISIBLE "): continue
+        parts=line.split()
+        if len(parts)<2: continue
+        tag=parts[1]; counts[tag]=counts.get(tag,0)+1
+        row=dict(re.findall(r"(\w+)=([^\s]+)",line))
+        if tag in ("SWAPCHAIN_REQUEST","SWAPCHAIN_RESULT","CHAIN") and row.get("attempt","").isdigit():
+            i=int(row["attempt"]); entry=attempts.setdefault(i,{"attempt":i})
+            entry[tag.lower()]=row
+            hwnd=row.get("hwnd")
+            if tag=="SWAPCHAIN_REQUEST":
+                entry["prior_success_same_hwnd"]=last_success_by_hwnd.get(hwnd)
+            elif tag=="SWAPCHAIN_RESULT":
+                try: success=int(row.get("hr","ffffffff"),16)<0x80000000
+                except ValueError: success=False
+                entry["success"]=success
+                if success and hwnd:last_success_by_hwnd[hwnd]=i
+        resolve=row.get("resolve",row.get("resolveCandidate",""))
+        if not resolve.isdigit() or int(resolve)==0: continue
+        n=int(resolve)
+        if tag in ("SRPOSTFX_READY","HUD_INPUT_READY","HUD_COMPOSITE_RECORDED","FINAL_RECORDED",
+                   "FINAL_SUBMITTED","FINAL_GPU_COMPLETE","FINAL_CANDIDATE","TARGET_SUBMITTED",
+                   "PRESENT_BARRIER","PRESENT_BARRIER_SUBMITTED","SKIP"):
+            frame=frames.setdefault(n,{"resolve":n,"stages":{},"skips":[]})
+            frame["stages"][tag]=frame["stages"].get(tag,0)+1
+            if tag=="SKIP":
+                reason=row.get("reason","unknown")
+                key=row.get("stage","unknown")+":"+reason
+                skip_reasons[key]=skip_reasons.get(key,0)+1
+                frame["skips"].append(row)
+            elif tag=="FINAL_CANDIDATE":
+                frame.setdefault("final_candidates",[]).append(row)
+            elif tag=="PRESENT_BARRIER_SUBMITTED":
+                frame.setdefault("submitted_present_barriers",[]).append(row)
+    results=list(frames.values())
+    return {"swapchain_attempts":list(attempts.values()),
+            "failed_creations":sum(x.get("success") is False for x in attempts.values()),
+            "counts":counts,"skips_by_stage_reason":skip_reasons,
+            "resolve_count_with_observations":len(results),
+            "recorded_resolves":sum("FINAL_RECORDED" in f["stages"] for f in results),
+            "submitted_resolves":sum("FINAL_SUBMITTED" in f["stages"] for f in results),
+            "gpu_complete_resolves":sum("FINAL_GPU_COMPLETE" in f["stages"] for f in results),
+            "frames":results,"actual_present_verified":False,
+            "warning":"Creation snapshots, PRESENT/COMMON transitions and submissions are candidates; external ETW/video required. No actual Present inferred."}
+
 def parse_debug(text, output=None):
     windows=[]; current=None; by_id={}
     startup={"queues":[],"swapchains":[],"backbuffers":[],"warnings":[]}
@@ -77,7 +126,7 @@ def parse_debug(text, output=None):
         if w["truncation"]:w["warnings"].append("Bounded log truncated; use GPU capture or a shorter window.")
         if not w["fg_discovery"]["draw_count"]:w["warnings"].append("No FG draw candidates; descriptor/PSO tracking may be incomplete.")
     preview=[line for line in text.splitlines() if line.startswith(("SR PREVIEW:","PREVIEW ","SR PROBE RESULT ","POSTFX REPLAY ","POSTFX SR_","VISIBLE "))]
-    return {"preview_observations":preview,"debug_ready":"DEBUG READY:" in text,"capture_count":len(windows),
+    return {"preview_observations":preview,"visible_trial":analyze_visible(text),"debug_ready":"DEBUG READY:" in text,"capture_count":len(windows),
             "startup":startup,"captures":windows,"renderdoc_observations":rdc,
             "warning":"CPU metadata is not a GPU capture or proof of resource contents. RenderDoc completion count is observational; inspect actual .rdc files. No guessed HUD/camera values and no routing/FG enablement."}
 

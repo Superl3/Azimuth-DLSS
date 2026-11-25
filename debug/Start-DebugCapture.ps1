@@ -217,8 +217,10 @@ try {
     if($PresentMonCsv){
         $pm=Get-Item -LiteralPath $PresentMonCsv -ErrorAction SilentlyContinue
         if($pm -and !$pm.PSIsContainer -and !($pm.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $pm.Length -gt 0 -and $pm.Length -le 67108864){
-            Copy-Item -LiteralPath $pm.FullName -Destination (Join-Path $stage 'presentmon.csv')
-            $presentMonPackaged=$true
+            try{
+                Copy-Item -LiteralPath $pm.FullName -Destination (Join-Path $stage 'presentmon.csv')
+                $presentMonPackaged=$true
+            }catch{Write-Warning 'PresentMon CSV could not be copied; preserving render evidence.'}
         }else{Write-Warning 'PresentMon CSV missing or invalid; preserving in-process evidence.'}
     }
     $previewFiles=@()

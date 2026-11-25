@@ -695,7 +695,7 @@ static void STDMETHODCALLTYPE hook_ResourceBarrier(ID3D12GraphicsCommandList *cl
         }
     }
     real_ResourceBarrier(cl, n, b);
-    if(azvis_enabled)visible_trace_barriers(cl,state_for(cl),n,b);
+    if(azvis_observing())visible_trace_barriers(cl,state_for(cl),n,b);
 }
 
 void hooks_transition(ID3D12GraphicsCommandList *cl, ID3D12Resource *r, D3D12_RESOURCE_STATES from,
@@ -1077,7 +1077,7 @@ static void STDMETHODCALLTYPE hook_DrawInstanced(ID3D12GraphicsCommandList *cl, 
     ListState *s = state_for(cl);
     ID3D12PipelineState *variant = NULL;
     int role = s ? pso_lookup(s->pso, &variant) : ROLE_NONE;
-    if(s&&azvis_enabled)++s->trace_work_seq;
+    if(s&&azvis_observing())++s->trace_work_seq;
     debug_trace_draw(cl,s,vc,role);
     if (role == ROLE_RESOLVE && s) {
         sr_trace_begin_resolve();
@@ -1106,7 +1106,7 @@ static void STDMETHODCALLTYPE hook_DrawIndexedInstanced(ID3D12GraphicsCommandLis
     ListState *s = state_for(cl);
     ID3D12PipelineState *variant = NULL;
     int role = s ? pso_lookup(s->pso, &variant) : ROLE_NONE;
-    if(s&&azvis_enabled)++s->trace_work_seq;
+    if(s&&azvis_observing())++s->trace_work_seq;
     debug_trace_draw(cl,s,index_count,role);
     if (role == ROLE_RESOLVE && s) {
         sr_trace_begin_resolve();

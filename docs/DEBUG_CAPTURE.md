@@ -485,7 +485,9 @@ identity with retainedForTrial=0; a successful replacement on the same
 HWND invalidates the prior observation. A new create attempt during the
 trial disables further visible replacement. Do not resize/recreate
 chains during this experimental capture (creation snapshots may become
-stale on resize; selected RAW readbacks still own references until exit).
+stale on resize; completed RAW readbacks release their source and buffer
+references after successful reset and fence completion, while ambiguous
+or failed GPU batches remain quarantined until exit).
 
 PRESENT_BARRIER and PRESENT_BARRIER_SUBMITTED record transitions to the
 aliased PRESENT/COMMON state, their command-list recording, matching
@@ -508,3 +510,5 @@ the 10-bit swapchain format. An observed HDR final shader produces
 reason=hdr_unsupported and keeps native output. Existing offscreen
 SR evidence, HUD diagnostics and first two groups (22 RAW maximum)
 remain unchanged. QPC frequency is logged for external correlation.
+
+Before F8 only the factory creation log and PSO diagnostics are active for the visible observer; draw/copy/barrier/submit lineage starts at the trial marker. summary.json includes visible_trial with request/result pairs, observed prior success on the same HWND, per-resolve stages and skip reasons. It never marks Present as verified from an in-process log alone. The optional CSV packaging is covered by a launcher fixture; value-only identity replacement and absence of DXGI interface calls are covered by CI regression tests.

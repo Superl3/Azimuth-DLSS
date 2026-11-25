@@ -421,6 +421,10 @@ static void preview_poll(void) {
                 for(unsigned k=0;k<b->count;++k){
                     if(preview_save(b,&b->shots[k]))++b->good;
                     else b->shots[k].name=NULL;
+                    /* Successful reset + completed fence: these readback
+                       references need not pin a game buffer until exit. */
+                    if(b->shots[k].source){ID3D12Resource_Release(b->shots[k].source);b->shots[k].source=NULL;}
+                    if(b->shots[k].buffer){ID3D12Resource_Release(b->shots[k].buffer);b->shots[k].buffer=NULL;}
                 }
                 b->life.state=b->good?PV_SAVED:PV_FAILED;
                 log_msg("PREVIEW SAVED resolve=%llu files=%u requested=%u fenceComplete=1 batch=%u recording=%llu",b->resolve,b->good,b->count,i+1,b->recording);

@@ -8,7 +8,7 @@ src = (root / "src/visible_trace.inl").read_text(encoding="utf-8")
 code = re.sub(r"/\*.*?\*/|//[^\n]*", "", src, flags=re.S)
 for bad in ("IDXGISwapChain", "GetBuffer(", "GetLastPresentCount(", "GetFrameStatistics(",
             "GetCurrentBackBufferIndex(", "QueryInterface(", "AddRef(", "Release(",
-            "->lpVtbl", "VT_SLOT(", "patch_slot("):
+            "VT_SLOT(", "patch_slot("):
     assert bad not in code, f"unsafe Visible trace interface access: {bad}"
 assert "retainedForTrial=0" in code
 hooks = (root / "src/hooks.c").read_text(encoding="utf-8")

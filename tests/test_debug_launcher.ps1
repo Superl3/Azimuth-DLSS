@@ -55,13 +55,17 @@ try {
       'PREVIEW COMPLETE groups=1 saved=1 failed=0 recordedFiles=1',
       'DEBUG END id=1 reason=resolve_limit resolves=8 lastResolve=2010') | Set-Content -LiteralPath $log
     $previewDest=Join-Path $root 'preview'
-    & $launcher -GameDir $game -Label 'preview-fixture' -Output '3840x1600' -RenderSetting 'test' -Preview -CollectOnly -Destination $previewDest
+    $presentCsv=Join-Path $root 'present.csv'
+    'Application,ProcessID,SwapChainAddress,CPUStartQPC' | Set-Content -LiteralPath $presentCsv
+    'azimuth.exe,1,0x1234,5678' | Add-Content -LiteralPath $presentCsv
+    & $launcher -GameDir $game -Label 'preview-fixture' -Output '3840x1600' -RenderSetting 'test' -Preview -CollectOnly -PresentMonCsv $presentCsv -Destination $previewDest
     $previewZip=@(Get-ChildItem -LiteralPath $previewDest -Filter '*.zip')
     $previewContents=Join-Path $root 'preview-contents'
     Expand-Archive -LiteralPath $previewZip[0].FullName -DestinationPath $previewContents
     if(!(Test-Path -LiteralPath (Join-Path $previewContents ('gpu-raw\'+$rawName)))){throw 'Missing preview raw texture.'}
     $previewMeta=Get-Content -LiteralPath (Join-Path $previewContents 'capture.json') -Raw | ConvertFrom-Json
     if($previewMeta.mode -ne 'preview' -or @($previewMeta.gpu_raw).Count -ne 1){throw 'Wrong preview metadata.'}
+    if(!$previewMeta.presentmon_csv_packaged -or !(Test-Path -LiteralPath (Join-Path $previewContents 'presentmon.csv'))){throw 'Missing optional external Present evidence.'}
     'PASS: automatic launcher packaging, failure evidence, and bounded preview raw texture fixture'
 } finally {
     $resolved = (Resolve-Path -LiteralPath $root).Path
