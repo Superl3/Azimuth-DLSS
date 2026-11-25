@@ -57,6 +57,35 @@ int main(void){
     assert(azrb_finish_limit(&l,base,&total,&mask,&req,AZRB_FALLBACK_LIMIT)==AZRB_FINISH_MISSING);
     l=layout();l.valid=0;
     assert(azrb_rebase(&l,original,50000,&mask,&req)==AZRB_REBASE_LAYOUT);
-    puts("PASS: exact bindings, legacy/physical/extended plans, bounds, aliases and fail-closed diagnostics");
+    /* The independent schema resolver can recover a valid physical
+       plan when an unrelated table range defeated full-span parsing. */
+    AzrbSchemaRow schema[]={
+        {0,AZRB_PS,AZRB_SRV,0,0,12,0,AZRB_TABLE},
+        {1,AZRB_PS,AZRB_CBV,1,0,1,0,AZRB_DIRECT},
+        {2,AZRB_PS,AZRB_CBV,13,0,1,0,AZRB_DIRECT},
+        {0,AZRB_PS,AZRB_SAMPLER,0,0,1,0,AZRB_STATIC},
+        {1,AZRB_PS,AZRB_SAMPLER,1,0,1,0,AZRB_STATIC},
+        {3,AZRB_VS,AZRB_SRV,0,0,UINT32_MAX,5,AZRB_TABLE},
+        {4,AZRB_VS,AZRB_CBV,0,0,1,0,AZRB_DIRECT},
+        {5,AZRB_VS,AZRB_CBV,1,0,1,0,AZRB_DIRECT},
+        {6,AZRB_VS,AZRB_CBV,13,0,1,0,AZRB_DIRECT},
+        {7,AZRB_PS,AZRB_SRV,0,1,UINT32_MAX,UINT32_MAX,AZRB_TABLE}
+    };
+    unsigned rows=(unsigned)(sizeof(schema)/sizeof(schema[0]));
+    original[3]=100;
+    assert(azrb_project_schema(&l,schema,rows,8,0,0,&req));
+    assert(azrb_rebase(&l,original,256,&mask,&req)==AZRB_REBASE_OK);
+    assert(!azrb_project_schema(&l,schema,rows,8,0,1,&req));
+    assert(!azrb_project_schema(&l,schema,rows,8,0x400,0,&req));
+    assert(!azrb_project_schema(&l,schema,rows,33,0,0,&req));
+    schema[5].offset=UINT32_MAX;
+    assert(!azrb_project_schema(&l,schema,rows,8,0,0,&req)&&req==16);
+    schema[5].offset=5;
+    schema[0].count=11;
+    assert(!azrb_project_schema(&l,schema,rows,8,0,0,&req)&&req==11);
+    schema[0].count=12;
+    schema[9]=(AzrbSchemaRow){7,AZRB_PS,AZRB_SRV,0,0,1,0,AZRB_TABLE};
+    assert(!azrb_project_schema(&l,schema,rows,8,0,0,&req)&&req==0);
+    puts("PASS: exact bindings, legacy/physical/extended plans, schema projection, bounds, aliases and fail-closed diagnostics");
     return 0;
 }

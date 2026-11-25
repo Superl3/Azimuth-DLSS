@@ -6,7 +6,7 @@
 #define AZRP_SCHEMA_ROWS 128
 /* Metadata belongs to the actual COM object, not a reused pointer. */
 static const GUID azrp_layout_key={0x5c5901a7,0xf1b5,0x4bce,{0x91,0x15,0x37,0x86,0x7c,0xa3,0x92,0xd4}};
-typedef struct {UINT root,visibility,type,reg,space,count,offset,kind;} AzrpSchemaRow;
+typedef AzrbSchemaRow AzrpSchemaRow;
 typedef struct {AzrbLayout layout;UINT version,flags,parameters,rows,overflow;AzrpSchemaRow row[AZRP_SCHEMA_ROWS];} AzrpRootEvidence;
 static void azrp_schema_add(AzrpRootEvidence *e,UINT root,UINT vis,UINT type,UINT reg,UINT space,UINT count,UINT offset,UINT kind){
     if(e->rows>=AZRP_SCHEMA_ROWS){e->overflow=1;return;}
@@ -220,6 +220,17 @@ static int azrp_prepare_bindings(ListState *s,ID3D12Resource *scene,ID3D12Resour
     AzrbFinish a=azrb_finish_detail(l,base_a,&total_a,&mask_a,&bad_a);
     AzrbFinish c=azrb_finish_limit(l,base_c,&total_c,&mask_c,&bad_c,AZRB_FALLBACK_LIMIT);
     if(a!=AZRB_FINISH_OK)azrp_log_layout_failure(s->trace_graphics_rs,l,a,bad_a,resolve,"replay");
+    AzrbLayout physical_layout;unsigned project_bad=UINT32_MAX;int projected=0;
+    /* If the full-layout parser rejected the root, independently resolve
+       the shader requirements against the saved original ranges. Only the
+       same-capacity physical plan may use this projected layout. */
+    uint32_t unused_base[AZRB_TABLES],unused_total=0,unused_mask=0;unsigned unused_req;
+    AzrbFinish semantic=azrb_finish_limit(l,unused_base,&unused_total,&unused_mask,&unused_req,0);
+    if(semantic!=AZRB_FINISH_OK&&object_known){
+        projected=azrb_project_schema(&physical_layout,evidence.row,evidence.rows,evidence.parameters,evidence.flags,evidence.overflow,&project_bad);
+        log_msg("POSTFX SR_SCHEMA_PROJECT resolve=%llu original=%s projected=%d req=%u",resolve,azrb_finish_name(semantic),projected,project_bad);
+        if(projected)l=&physical_layout;
+    }
     for(unsigned i=0;i<AZRB_TABLES;++i){
         base_b[i]=UINT32_MAX;
         if(heap_ok&&(s->trace_tables_mask&(1u<<i))){
@@ -267,7 +278,7 @@ static int azrp_prepare_bindings(ListState *s,ID3D12Resource *scene,ID3D12Resour
             physical,source[i]?source[i]->shadow:0,source[i]?source[i]->shadow_type:UINT_MAX,source[i]?(void *)source[i]->res:NULL,ok,reason);
     }
     int common=bindings_ok&&graphics_ok&&compute_ok&&heap_ok&&!azt_incomplete&&!errors&&producer_ready&&snapshot&&scene&&draw_ready;
-    int available[3]={a==AZRB_FINISH_OK&&!strict_errors,b==AZRB_REBASE_OK,c==AZRB_FINISH_OK};
+    int available[3]={!projected&&a==AZRB_FINISH_OK&&!strict_errors,b==AZRB_REBASE_OK,!projected&&c==AZRB_FINISH_OK};
     log_msg("POSTFX SR_PLAN resolve=%llu path=A_compact layout=%s req=%u entries=%u descriptorErrors=0x%05x common=%d candidate=%d",
         resolve,azrb_finish_name(a),bad_a,total_a,errors|strict_errors,common,available[0]);
     log_msg("POSTFX SR_PLAN resolve=%llu path=B_physical layout=%s req=%u entries=%u descriptorErrors=0x%05x common=%d candidate=%d",
@@ -317,7 +328,7 @@ static int azrp_prepare_bindings(ListState *s,ID3D12Resource *scene,ID3D12Resour
             out->mask|=1u<<q->root;
         }
         log_msg("POSTFX SR_BINDINGS resolve=%llu path=%u entries=%u root=%p tables=0x%08x shadowUsed=%u layoutSource=%s",
-            resolve,out->path,total,(void *)s->trace_graphics_rs,out->mask,azrp_shadow_used,object_known?"object":"cache");
+            resolve,out->path,total,(void *)s->trace_graphics_rs,out->mask,azrp_shadow_used,projected?"schema_projection":object_known?"object":"cache");
         ReleaseSRWLockExclusive(&azt_lock);return 1;
     }
     log_msg("POSTFX SR_REPLAY SKIP resolve=%llu reason=%s root=%p",resolve,

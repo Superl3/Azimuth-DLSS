@@ -12,6 +12,7 @@ enum {AZRB_SRV=0,AZRB_UAV=1,AZRB_CBV=2,AZRB_SAMPLER=3};
 enum {AZRB_ALL=0,AZRB_VS=1,AZRB_PS=5};
 enum {AZRB_UNBOUND=0,AZRB_TABLE=1,AZRB_DIRECT=2,AZRB_STATIC=3};
 typedef struct {unsigned stage,type,reg,mode,root,offset;} AzrbReq;
+typedef struct {uint32_t root,visibility,type,reg,space,count,offset,kind;} AzrbSchemaRow;
 typedef struct {
     AzrbReq req[AZRB_REQS];
     uint32_t span[AZRB_TABLES];
@@ -116,6 +117,45 @@ static inline AzrbFinish azrb_finish_limit(const AzrbLayout *l,uint32_t base[AZR
 }
 static inline AzrbFinish azrb_finish_detail(const AzrbLayout *l,uint32_t base[AZRB_TABLES],uint32_t *total,uint32_t *mask,unsigned *req_index) {
     return azrb_finish_limit(l,base,total,mask,req_index,AZRB_HEAP_LIMIT);
+}
+/* Independently project ONLY the exact shader requirements from a full
+   serialized-root schema. This is usable exclusively with physical
+   rebasing: it does not reserve the full declared table extents.
+   Unrelated ranges cannot invalidate the plan, but no required binding
+   may be missing or ambiguous. The caller must preserve the actual
+   original heap capacity and root signature, and prove restoration.
+   Reject incomplete schemas and direct heap indexing. */
+static inline int azrb_project_schema(AzrbLayout *out,const AzrbSchemaRow *rows,unsigned count,
+                                       unsigned parameters,unsigned flags,int incomplete,unsigned *bad) {
+    azrb_init(out);*bad=UINT32_MAX;
+    if(incomplete||parameters>AZRB_TABLES||(flags&0xc00u)||!rows||!count||count>128){out->valid=0;return 0;}
+    for(unsigned i=0;i<AZRB_REQS;++i){
+        AzrbReq *q=&out->req[i];
+        unsigned matches=0;
+        for(unsigned j=0;j<count;++j){
+            const AzrbSchemaRow *x=&rows[j];
+            if(x->space||x->type!=q->type||!azrb_vis(x->visibility,q->stage))continue;
+            if(x->kind==AZRB_TABLE){
+                if(q->reg<x->reg||q->reg-x->reg>=x->count)continue;
+                uint64_t slot=(uint64_t)x->offset+q->reg-x->reg;
+                unsigned kind=x->type==AZRB_SAMPLER?2u:1u;
+                if(x->root>=parameters||slot>=UINT32_MAX||(out->kind[x->root]&&out->kind[x->root]!=kind)){
+                    *bad=i;out->valid=0;return 0;
+                }
+                out->kind[x->root]=kind;
+                if(slot+1>out->span[x->root])out->span[x->root]=(uint32_t)(slot+1);
+                azrb_assign(out,q,AZRB_TABLE,x->root,(uint32_t)slot);
+                ++matches;
+            }else if(x->reg==q->reg&&(x->kind==AZRB_DIRECT||x->kind==AZRB_STATIC||x->kind==4)){
+                if(x->kind!=AZRB_STATIC&&x->root>=parameters){*bad=i;out->valid=0;return 0;}
+                azrb_assign(out,q,x->kind==AZRB_STATIC?AZRB_STATIC:AZRB_DIRECT,x->kind==AZRB_STATIC?0:x->root,0);
+                ++matches;
+            }
+        }
+        if(matches!=1||!out->valid){*bad=i;out->valid=0;return 0;}
+    }
+    uint32_t base[AZRB_TABLES],total=0,mask=0;
+    return azrb_finish_limit(out,base,&total,&mask,bad,0)==AZRB_FINISH_OK;
 }
 /* Rebase all referenced original table starts into a heap with the SAME
    physical capacity and indices. Unlike packing, shared/overlapping ranges

@@ -362,3 +362,5 @@ This is still offscreen SR postprocess, not visible output or FG. An
 independent root signature/PSO is not implemented; it requires complete
 direct root-argument and state restoration tracking. The existing
 launcher and ZIP format are unchanged.
+
+When semantic validation of the full-layout parser fails, the physical plan additionally attempts independent schema projection of all 20 actual shader requirements. It is permitted only with a complete recorded original schema (no truncation), supported parameter count and no direct indexing flags; each required register must resolve uniquely. The projection cannot be used for packed layouts, which require full spans. SR_SCHEMA_PROJECT and layoutSource=schema_projection identify this alternative. Missing, ambiguous or physically aliased requirements still reject execution. This does not create a different root signature.
