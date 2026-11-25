@@ -71,3 +71,93 @@ output size, and a quality mode whose queried input limits include
 The next 1080p probe and debug capture ZIPs used matching game/proxy SHA-256. Probe color, depth and reconstructed R16G16_FLOAT MV were 2592x1080; all 12 logged decisions were fresh=1, top_left=1 and decision=1. NGX Quality optimal=2560x1067, min=1920x800, max=3840x1600; actual input accepted. `SR PROBE EVALUATED 2592x1080 -> 3840x1600 (OFFSCREEN ONLY)` appeared, exit code 0, no logged evaluation failure. This verifies successful API return at least once, not GPU completion or image quality. No game output was replaced.
 
 Three F8 windows completed, 24 resolve intervals. Each known shader pair occurred 24 times; all 24 intervals matched scene identity -> first t0 -> second t0 -> third t0, in recording order within the same observed list. The final t2 is another distinct 2592x1080 format-24 bound texture in 24/24 intervals; HUD role unknown. None of 181 recorded copy edges matches the final candidate targets or creation-time backbuffer snapshots. 1,613 FG draws all layout=0, 898 input truncation markers; no queue submissions or GPU capture. Actual sampling, camera constants and present path need verification. Targeted disassembly now available as an optional local capture; no visible SR or FG enablement.
+
+
+## Third capture: selected shader disassembly and 16:9 overlay boundary
+
+The third local capture reports actual 1920x1080 scene/depth and both
+swapchains, with 960x540 native velocity, not the earlier ultrawide
+2592x1080 scene -> 3840x1600 candidate path. Five completed F8 windows,
+40 recognized resolve intervals, exit code zero. Six selected shader
+assembly files are available privately, not in this repository.
+
+Disassembly establishes these facts:
+
+- Scene resolve 1549a8f9 samples/loads source color, sample mask and
+  depth and writes color and depth; the branch handling multisample
+  data uses additional filmic-related math. Verify the actual HDR
+  dynamic range and exposure instead of assuming all resolve outputs
+  are untouched linear scene radiance.
+- Native velocity 8a12870f uses 2x2 depth/stencil gather, selects
+  reprojection rows 30--33 plus the stencil-derived index and clamps
+  vector magnitude. The existing full-resolution replay intentionally
+  replaces the gather/clamp and outputs UV-space motion. Validate units,
+  edge/disocclusion and jitter against actual adjacent frames. The
+  native half-resolution velocity is still needed for game's motion blur.
+- 479be24a really uses scene t0, bloom, light rays, velocity t3, lens
+  flare, stencil, alpha buffers/depth, world depth and color grading.
+  The translated shader's declared registers differ from some original
+  reflection comments (e.g. structured t6 vs original t7). Trust the
+  executable instructions and actual descriptor bindings, not stale
+  reflection names alone. It performs normalized UV sampling, integer
+  loads using SV_POSITION for render-domain auxiliary textures, and
+  contains a literal 1920x1080 velocity-to-pixel conversion. Its output
+  includes color transformation and an sRGB-like transfer; verify the
+  actual HDR/color-space contract in the capture.
+- a7840ad0 is only an LOD-zero t0 sample and return, not complex
+  composition. Its VS forwards input UV. It cannot substitute directly
+  for high-resolution HDR tone mapping.
+- In this run, the third candidate is a93721c4-5975a343-749f00dc-e74366c0
+  with VS 79d0ca68-15da8827-24fc6096-35dd7508. It consumes a7840ad0's
+  output at t0 and writes another 1920x1080 format-24 texture. The
+  ultrawide variant 577d52ef was not observed; neither final PS
+  assembly was included. Do not equate them or presume t2 is UI.
+
+All 40 recognized intervals have same-list observed chain from 479be24a
+through a7840ad0 to a93721c4. In between first two, the original
+postprocess target receives 33--56 more draws per interval; all these
+observed draws use blending. Some bind small atlas-like textures, and
+some use derived blurred intermediates. Dominant candidates include
+e792b40f, 6fe1ad18, dceb99b4. This is stronger evidence for an overlay
+boundary just after 479be24a than the prior t2 UI speculation.
+It does NOT prove all such draws are HUD, nor that the first candidate
+is display-space HUD-less color compatible with FG. Compare actual
+texture contents before and after these draws in a GPU capture.
+88 copy records reach observed creation-time backbuffer identities,
+but none directly links the final candidate's two target pointers to
+them; actual presentation/queue execution remains unverified.
+
+### Next integration decision
+
+Keep original scene/velocity/depth rendering low-resolution. First
+validate offscreen SR output pixels with jitter and temporal data; then
+replay the actual postprocess at display resolution into separate
+resources. Bind reconstructed HDR t0, preserve original bloom/blur
+inputs and native velocity in their own coordinate domain. Integer
+loads that address low-resolution auxiliaries need output-to-render
+pixel mapping; normalized samples should remain normalized. Do not
+blindly scale the 1920x1080 reference literal or every texture/constant:
+verify its artistic meaning and each resource's actual size. Preserve
+alpha/depth/stencil semantics and transfer function. Use a separate
+output-size RTV/view chain and restore all original state. No direct
+copy of linear HDR to R10G10B10A2 or generic replacement of all SRVs.
+Before enabling visible SR, prove final copy/composition and draw/UI
+depth-stencil compatibility at output size.
+
+For FG, capture display-space color before the first confirmed HUD
+draw, then compare post-HUD color and identify separate overlay
+resources or replayable draw state. Preserve game-generated UI rather
+than temporally reconstruct UI pixels. Existing motion-vector
+limitations on rotating wheels and foliage remain; use targeted
+geometry replay only after identifying stable draw/object history.
+Do not invent camera constants or FG frame tokens.
+
+Descriptor trace failure now specifically occurs at azt_slot, after
+the first three windows. The fourth/fifth are entirely incomplete.
+This could be capacity, hash clustering or retained generations, not
+proof of a specific cause. Increase bounded table/probe and improve
+hash mixing; report used/capacity at each F8 begin and overflow.
+No live entries are evicted and the visible-route fail-closed gates
+remain unchanged. Add exact alternate final pair to priority capture
+and an offline chain analyzer. These changes are diagnostics only.
+No proprietary shader text, game data or GPU capture is committed.

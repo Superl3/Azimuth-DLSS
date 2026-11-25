@@ -7,7 +7,8 @@
 #include <stdlib.h>
 
 #define AZT_HEAPS 512
-#define AZT_DESCS 131072
+#define AZT_DESCS 524288
+#define AZT_DESC_PROBE 128
 #define AZT_ROOTS 512
 #define AZT_PSOS 8192
 #define AZT_RANGES 64
@@ -66,6 +67,8 @@ typedef struct {
 typedef struct { ID3D12Resource *res; ID3D12GraphicsCommandList *list; unsigned long long recording; int known; D3D12_RESOURCE_STATES state; } AztState;
 static AztHeap azt_heaps[AZT_HEAPS];
 static AztDesc azt_descs[AZT_DESCS];
+static unsigned azt_desc_used;
+static int azt_desc_warned;
 static AztRoot azt_roots[AZT_ROOTS];
 static AztPso azt_psos[AZT_PSOS];
 static AztState azt_states[AZT_STATES];
@@ -182,16 +185,25 @@ static AztHeap *azt_heap_for_cpu(SIZE_T h, UINT type) {
 }
 static AztDesc *azt_slot(AztHeap *h, SIZE_T cpu, int insert) {
     if (!h) return NULL;
-    unsigned i=azt_hashptr((UINT64)cpu ^ h->generation, AZT_DESCS-1);
-    for (unsigned k=0;k<AZT_PROBE;++k) {
+    /* Aligned contiguous descriptor handles need a stronger mix than
+       the pointer hash. Retain generation identity; do not evict live
+       entries or pretend a missing descriptor is valid. */
+    UINT64 key=(UINT64)cpu ^ (h->generation*0x9e3779b97f4a7c15ull);
+    key^=key>>33; key*=0xff51afd7ed558ccdull;
+    key^=key>>33; key*=0xc4ceb9fe1a85ec53ull; key^=key>>33;
+    unsigned i=(unsigned)key&(AZT_DESCS-1);
+    for (unsigned k=0;k<AZT_DESC_PROBE;++k) {
         AztDesc *d=&azt_descs[(i+k)&(AZT_DESCS-1)];
         if (d->handle==cpu && d->generation==h->generation) return d;
         if (!d->generation) {
             if (!insert) return NULL;
-            d->handle=cpu; d->generation=h->generation; return d;
+            d->handle=cpu; d->generation=h->generation; ++azt_desc_used; return d;
         }
     }
-    if (insert) azt_overflow();
+    if (insert) {
+        if(!azt_desc_warned++)log_msg("SR TRACE descriptor capacity used=%u/%u probe=%u",azt_desc_used,(unsigned)AZT_DESCS,(unsigned)AZT_DESC_PROBE);
+        azt_overflow();
+    }
     return NULL;
 }
 static void sr_trace_heap(ID3D12Device *dev, ID3D12DescriptorHeap *heap, const D3D12_DESCRIPTOR_HEAP_DESC *desc) {

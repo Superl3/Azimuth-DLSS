@@ -57,5 +57,17 @@ int main(void){
     sr_trace_queue(&more[0],&qd);assert(azt_direct_count==5);
     /* Heap pointer reused: previous generation cannot resolve an old descriptor. */
     hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;hd.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;sr_trace_heap(&dev,&vis,&hd);assert(!azt_slot(azt_heap_for_ptr(&vis),dest_cpu.ptr,0));
-    puts("PASS: metadata propagation, root ranges, real route predicate/copy, stale handles, write/reset/queue rejection (host doubles)");return 0;
+    /* Sequential aligned descriptor churn exceeded the old global capacity.
+       Use metadata only, no real resources or GPU; never remove live entries. */
+    AztHeap churn={0};churn.generation=++azt_generation;
+    unsigned before=azt_desc_used;
+    for(unsigned i=0;i<160000;++i) {
+        SIZE_T handle=(SIZE_T)0x10000000u+(SIZE_T)i*32u;
+        AztDesc *slot=azt_slot(&churn,handle,1);assert(slot&&slot->generation==churn.generation);
+    }
+    assert(!azt_incomplete&&azt_desc_used==before+160000u);
+    for(unsigned i=0;i<160000;i+=97)assert(azt_slot(&churn,(SIZE_T)0x10000000u+(SIZE_T)i*32u,0));
+    ++churn.generation;
+    assert(!azt_slot(&churn,(SIZE_T)0x10000000u,0));
+    puts("PASS: metadata propagation, route gates, stale handles and 160000 aligned descriptor entries (host doubles)");return 0;
 }

@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 
 from analyze_sr_trace import parse as parse_sr
-from analyze_fg_trace import parse_fg
+from analyze_fg_trace import parse_fg, analyze_fh2_postfx
 
 BEGIN=re.compile(r"^DEBUG BEGIN id=(\d+) firstResolveAfter=(\d+) limit=(\d+) timeoutMs=(\d+)")
 END=re.compile(r"^DEBUG END id=(\d+) reason=(\w+) resolves=(\d+) lastResolve=(\d+)")
@@ -61,6 +61,7 @@ def parse_debug(text, output=None):
         w["resolve_records"]=sum(line.startswith("SR TRACE RESOLVE ") for line in lines)
         w["sr_candidates"]=parse_sr(segment,output)
         w["fg_discovery"]=parse_fg("FG TRACE ONLY\n"+"\n".join(startup["swapchains"])+"\n"+segment)
+        w["fh2_postfx"]=analyze_fh2_postfx(w["fg_discovery"]["passes"])
         w["truncation"]=[line for line in lines if "TRUNCATED" in line or "truncated" in line]
         if not w["complete"]:w["warnings"].append("No end marker; game closed or trace interrupted.")
         if not w["resolve_records"]:w["warnings"].append("No recognized scene resolve in window; capture may be menu/loading or unsupported profile.")

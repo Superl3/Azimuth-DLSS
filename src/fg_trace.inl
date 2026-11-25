@@ -75,14 +75,16 @@ static int azfg_known_candidate(const AztPso *p) {
     static const DWORD ps[][4]={
         {0x479be24a,0x12d3a1cc,0x5ae78b8d,0xe91827a4},
         {0xa7840ad0,0xc7ff485a,0xbaaba36a,0xf2b83b22},
-        {0x577d52ef,0x933f3888,0x157f3b5e,0xe0935945}
+        {0x577d52ef,0x933f3888,0x157f3b5e,0xe0935945},
+        {0xa93721c4,0x5975a343,0x749f00dc,0xe74366c0}
     };
     static const DWORD vs[][4]={
         {0x2098e1f9,0x8e0d8b8e,0x7bdf6434,0x4ec0d391},
         {0x2b57aba8,0x08891572,0xded78132,0x0c122cb6},
+        {0x79d0ca68,0x15da8827,0x24fc6096,0x35dd7508},
         {0x79d0ca68,0x15da8827,0x24fc6096,0x35dd7508}
     };
-    for(unsigned i=0;i<3;++i)if(!memcmp(p->hash,ps[i],16)&&!memcmp(p->vs_hash,vs[i],16))return 1;
+    for(unsigned i=0;i<sizeof(ps)/sizeof(ps[0]);++i)if(!memcmp(p->hash,ps[i],16)&&!memcmp(p->vs_hash,vs[i],16))return 1;
     return 0;
 }
 static void fg_trace_draw(ID3D12GraphicsCommandList *cl,ListState *s,UINT count,UINT instances,int role,int indexed) {

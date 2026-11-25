@@ -77,6 +77,7 @@ static void debug_trace_toggle(void) {
         azdbg_geometry=64;azdbg_velocity=64;azdbg_aux=2048;azdbg_aux_warned=0;
         azdbg_geom_count=0;azfg_general_rows=azfg_priority_rows=0;azfg_limit_logged=azfg_priority_limit_logged=0;
         log_msg("DEBUG BEGIN id=%u firstResolveAfter=%llu limit=%u timeoutMs=%u",azdbg.id,azt_frame,azdbg_limit,azdbg_ms);
+        log_msg("DEBUG DESCRIPTOR_STATS id=%u used=%u capacity=%u incomplete=%d",azdbg.id,azt_desc_used,(unsigned)AZT_DESCS,azt_incomplete);
         started=1;
     }
     ReleaseSRWLockExclusive(&azt_lock);

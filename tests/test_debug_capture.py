@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"tools"))
 from analyze_debug_trace import parse_debug
+from analyze_fg_trace import analyze_fh2_postfx,FH2_POSTFX,FH2_COPY,FH2_FINAL
 from capture_sr import trace_env,summarize
 
 class DebugTests(unittest.TestCase):
@@ -35,6 +36,27 @@ DEBUG TRUNCATED id=2 section=aux
         self.assertTrue(b["truncation"])
         self.assertEqual(data["renderdoc_observations"][0]["nearest_capture_id"],1)
         self.assertEqual(summarize(text,"3840x2160")["debug_capture"]["capture_count"],2)
+    def test_fh2_postfx_chain(self):
+        def draw(seq, pair, target, src=None, blend=0, other_list=None):
+            return dict(seq=seq,resolve=9,list=other_list or "list1",ps=pair[0],vs=pair[1],
+                        target=target,size="1920x1080",format=24,vertices_or_indices=3,
+                        instances=1,indexed=0,blend=blend,depth=0,dsv=0,layout=0,
+                        inputs=[] if src is None else [dict(register="0",space="0",resource=src,scene="0")])
+        for final in FH2_FINAL:
+            a=draw(1,FH2_POSTFX,"scene","hdr")
+            a["inputs"][0]["scene"]="1"
+            overlay=draw(2,("1","2"),"scene",blend=1)
+            b=draw(3,FH2_COPY,"copy","scene")
+            c=draw(4,final,"final","copy")
+            result=analyze_fh2_postfx([a,overlay,b,c])
+            self.assertEqual(result["matched_chains"],1)
+            self.assertEqual(result["blend_draw_range"],[1,1])
+            self.assertEqual(result["chains"][0]["first_blend_seq"],2)
+            self.assertTrue(result["chains"][0]["scene_t0_identity"])
+            self.assertFalse(result["chains"][0]["layouts_complete"])
+            self.assertEqual(analyze_fh2_postfx([a,overlay,b,dict(c,list="list2")])["matched_chains"],0)
+            self.assertEqual(analyze_fh2_postfx([a,b,dict(c,inputs=[])])["matched_chains"],0)
+            self.assertEqual(analyze_fh2_postfx([a,b,dict(b,seq=5),c])["ambiguous_chains"],1)
     def test_env(self):
         with patch.dict(os.environ,{"AZIMUTH_DEBUG_RENDERDOC":"1","AZIMUTH_SR_ROUTE_CONFIRMED":"1","AZIMUTH_FG_TRACE":"1"}):
             env=trace_env("debug","3840x1600","quality",4000)
