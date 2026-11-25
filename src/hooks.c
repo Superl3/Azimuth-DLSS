@@ -507,7 +507,9 @@ static HRESULT STDMETHODCALLTYPE hook_Reset(ID3D12GraphicsCommandList *cl, ID3D1
         memset((char *)s + sizeof(s->list), 0, sizeof(*s) - sizeof(s->list));
         s->pso = pso;
     }
-    return real_Reset(cl, a, pso);
+    HRESULT hr=real_Reset(cl,a,pso);
+    if(SUCCEEDED(hr))preview_reset(cl);
+    return hr;
 }
 
 static void STDMETHODCALLTYPE hook_SetPipelineState(ID3D12GraphicsCommandList *cl, ID3D12PipelineState *pso) {
@@ -1008,6 +1010,7 @@ static void STDMETHODCALLTYPE hook_DrawInstanced(ID3D12GraphicsCommandList *cl, 
     fg_trace_draw(cl,s,vc,ic,role,0);
     if (sr_trace_draw(cl,s,vc,ic,role,sv==0 && si==0)) return;
     real_DrawInstanced(cl, vc, ic, sv, si);
+    if(role==ROLE_NONE && vc==3 && ic==1 && sv==0 && si==0)preview_after_draw(cl,s);
 }
 
 static void STDMETHODCALLTYPE hook_DrawIndexedInstanced(ID3D12GraphicsCommandList *cl, UINT index_count,
@@ -1111,7 +1114,7 @@ static void poll_f11(void) {
         last = now;
         return;
     }
-    if (now && !last && !dlss_sr_trace_only()) {
+    if (now && !last && !dlss_sr_trace_only() && !dlss_sr_preview_mode()) {
         dlss_toggle();
     }
     last = now;

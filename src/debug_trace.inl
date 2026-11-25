@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include "../third_party/renderdoc/renderdoc_app.h"
 #include "debug_shader_dump.inl"
+#include "preview_capture.inl"
 #define AZDBG_GEOM_MAX 64
 typedef struct AzdbgGeom {UINT cw,ch,dw,dh,vw,vh; int cf,df;} AzdbgGeom;
 static AzdbgGeom azdbg_geom[AZDBG_GEOM_MAX];
@@ -19,6 +20,7 @@ static uint64_t azdbg_rdc_started;
 static void debug_trace_init(void) {
     if(!dlss_sr_debug_mode())return;
     debug_shader_dump_init();
+    preview_init();
     UINT n=dlss_debug_ini_uint(L"Resolves",8);
     if(n>=1 && n<=64)azdbg_limit=n;
     n=dlss_debug_ini_uint(L"TimeoutMs",8000);
@@ -74,6 +76,7 @@ static void debug_trace_poll(void) {
     ReleaseSRWLockExclusive(&azt_lock);
     /* RenderDoc API is only called on the existing hotkey thread. */
     if(started)debug_rdc_trigger(now);
+    preview_poll();
     if(azdbg_rdc_pending && azdbg_rdc_api){
         uint32_t count=azdbg_rdc_api->GetNumCaptures();
         if(count>azdbg_rdc_seen && !azdbg_rdc_api->IsFrameCapturing()){
@@ -185,7 +188,7 @@ static void STDMETHODCALLTYPE dbg_execute(ID3D12CommandQueue *q,UINT n,ID3D12Com
         if(n>32)log_msg("DEBUG TRUNCATED id=%u section=submit_list",azdbg.id);
     }
     ReleaseSRWLockExclusive(&azt_lock);
-    dbg_real_execute(q,n,lists);
+    preview_execute(q,n,lists,dbg_real_execute);
 }
 static HRESULT STDMETHODCALLTYPE dbg_signal(ID3D12CommandQueue *q,ID3D12Fence *f,UINT64 value) {
     HRESULT hr=dbg_real_signal(q,f,value);
@@ -201,8 +204,12 @@ static HRESULT STDMETHODCALLTYPE dbg_wait(ID3D12CommandQueue *q,ID3D12Fence *f,U
     ReleaseSRWLockExclusive(&azt_lock);
     return hr;
 }
-static void debug_trace_queue_hook(ID3D12CommandQueue *q) {
-    if(!dlss_sr_debug_mode() || dlss_debug_ini_uint(L"QueueTrace",0)!=1 || !q)return;
+static void debug_trace_queue_hook(ID3D12CommandQueue *q,const D3D12_COMMAND_QUEUE_DESC *desc) {
+    if(!dlss_sr_debug_mode() || !q || !desc)return;
+    char b[8]; DWORD n=GetEnvironmentVariableA("AZIMUTH_DEBUG_QUEUE_TRACE",b,sizeof(b));
+    int trace=n?(n==1&&b[0]=='1'):dlss_debug_ini_uint(L"QueueTrace",0)==1;
+    int preview=dlss_sr_preview_mode()&&azpv_enabled&&desc->Type==D3D12_COMMAND_LIST_TYPE_DIRECT;
+    if(GetModuleHandleW(L"renderdoc.dll") || (!trace&&!preview))return;
     /* Optional: off by default to avoid conflicts with capture/overlay wrappers. */
     AcquireSRWLockExclusive(&azt_lock);
 #define DBG_QUEUE_HOOK(method,hook,orig) do { \
@@ -211,8 +218,9 @@ static void debug_trace_queue_hook(ID3D12CommandQueue *q) {
     else log_msg("DEBUG QUEUE wrapper differs; skipped " #method); \
 } while(0)
     DBG_QUEUE_HOOK(ExecuteCommandLists,dbg_execute,dbg_real_execute);
-    DBG_QUEUE_HOOK(Signal,dbg_signal,dbg_real_signal);
-    DBG_QUEUE_HOOK(Wait,dbg_wait,dbg_real_wait);
+    if(trace){DBG_QUEUE_HOOK(Signal,dbg_signal,dbg_real_signal);DBG_QUEUE_HOOK(Wait,dbg_wait,dbg_real_wait);}
+    if(preview && *VT_SLOT(q,ID3D12CommandQueueVtbl,ExecuteCommandLists)==(void *)dbg_execute)
+        InterlockedExchange(&azpv_queue_ready,1);
 #undef DBG_QUEUE_HOOK
     ReleaseSRWLockExclusive(&azt_lock);
 }

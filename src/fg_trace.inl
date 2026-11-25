@@ -19,7 +19,7 @@ static AzfgChain azfg_chain[AZFG_CHAINS];
 static void fg_trace_init(void) {
     char yes[8];
     DWORD n=GetEnvironmentVariableA("AZIMUTH_FG_TRACE",yes,sizeof(yes));
-    if (!dlss_sr_trace_only() || (!dlss_sr_debug_mode() && (n!=1 || yes[0]!='1'))) return;
+    if (!dlss_sr_debug_mode() && (!dlss_sr_trace_only() || n!=1 || yes[0]!='1')) return;
     UINT x;
     if (azt_env_uint("AZIMUTH_FG_TRACE_START",&x) && x>=1 && x<=1000000) azfg_start=x;
     if (azt_env_uint("AZIMUTH_FG_TRACE_RESOLVES",&x) && x>=1 && x<=64) azfg_resolves=x;

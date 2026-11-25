@@ -50,7 +50,7 @@ static AzSRMode sr_mode = AZSR_DLAA;
 static AzSRQuality sr_quality = AZSR_QUALITY;
 static AzSRSize sr_output, sr_render, sr_swapchain;
 static int sr_armed, sr_blocked, sr_optimal_checked;
-static int sr_route_jitter, sr_trace_only, sr_debug_mode;
+static int sr_route_jitter, sr_trace_only, sr_debug_mode, sr_preview_mode;
 static volatile LONG sr_route_visible;
 static ID3D12Resource *sr_route_last_output;
 static unsigned sr_log_budget = 12;
@@ -74,6 +74,7 @@ static void sr_read_config(void) {
     if (!strcmp(b, "trace") || !strcmp(b,"debug")) { sr_mode = AZSR_DIAGNOSTIC; sr_trace_only = 1; sr_debug_mode = !strcmp(b,"debug"); log_msg("SR TRACE ONLY: no DLAA/NGX dispatch or injected motion replay"); }
     else if (!strcmp(b, "diagnostic")) sr_mode = AZSR_DIAGNOSTIC;
     else if (!strcmp(b, "probe")) sr_mode = AZSR_PROBE;
+    else if (!strcmp(b,"preview")) { sr_mode=AZSR_PROBE; sr_debug_mode=sr_preview_mode=1; log_msg("SR PREVIEW: offscreen NGX and bounded diagnostics; no visible replacement or jitter"); }
     else if (!strcmp(b, "padded")) sr_mode = AZSR_PADDED;
     else if (!strcmp(b, "route")) sr_mode = AZSR_ROUTE;
     else if (strcmp(b, "dlaa")) log_msg("SR: unknown mode; retaining DLAA");
@@ -116,6 +117,7 @@ int dlss_sr_jitter_size(unsigned w, unsigned h) {
 
 int dlss_sr_trace_only(void) { return sr_trace_only; }
 int dlss_sr_debug_mode(void) { return sr_debug_mode; }
+int dlss_sr_preview_mode(void) { return sr_preview_mode; }
 ID3D12Resource *dlss_sr_route_output(void) { return sr_route_last_output; }
 void dlss_sr_route_result(int displayed) {
     InterlockedExchange(&sr_route_visible, displayed != 0);
@@ -376,6 +378,7 @@ int dlss_run(ID3D12GraphicsCommandList *cl, ID3D12Resource *color, D3D12_RESOURC
     }
     if (ok && (decision == AZSR_EVALUATE_ONLY || decision == AZSR_ROUTE_OUTPUT)) {
         if (decision == AZSR_ROUTE_OUTPUT) sr_route_last_output = out_tex;
+        if(sr_preview_mode && decision==AZSR_EVALUATE_ONLY)hooks_preview_record(cl,color,depth,motion,out_tex,READ_STATE,need_reset);
         /* Offscreen verification: no copy to game, no screen jitter. Order repeated UAV writes. */
         hooks_transition(cl, out_tex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
         hooks_transition(cl, out_tex, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);

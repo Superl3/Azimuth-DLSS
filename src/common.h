@@ -18,6 +18,8 @@ void dlss_sr_note_swapchain(unsigned w, unsigned h);
 int dlss_sr_jitter_size(unsigned w, unsigned h);
 int dlss_sr_trace_only(void);
 int dlss_sr_debug_mode(void);
+int dlss_sr_preview_mode(void);
+void hooks_preview_record(ID3D12GraphicsCommandList *cl,ID3D12Resource *color,ID3D12Resource *depth,ID3D12Resource *motion,ID3D12Resource *out,D3D12_RESOURCE_STATES read_state,int reset);
 unsigned dlss_debug_ini_uint(const wchar_t *key,unsigned fallback);
 ID3D12Resource *dlss_sr_route_output(void);
 void dlss_sr_route_result(int displayed);

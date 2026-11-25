@@ -23,7 +23,7 @@ static void(STDMETHODCALLTYPE *real_EndQuery)(ID3D12GraphicsCommandList *,ID3D12
 
 static HRESULT STDMETHODCALLTYPE trace_CreateCommandQueue(ID3D12Device *dev,const D3D12_COMMAND_QUEUE_DESC *d,REFIID riid,void **out) {
     HRESULT hr=real_CreateCommandQueue(dev,d,riid,out);
-    if(SUCCEEDED(hr)&&out&&*out){ID3D12CommandQueue *q=NULL;if(SUCCEEDED(IUnknown_QueryInterface((IUnknown *)*out,&IID_ID3D12CommandQueue,(void **)&q))){sr_trace_queue(q,d);debug_trace_queue_hook(q);ID3D12CommandQueue_Release(q);}}
+    if(SUCCEEDED(hr)&&out&&*out){ID3D12CommandQueue *q=NULL;if(SUCCEEDED(IUnknown_QueryInterface((IUnknown *)*out,&IID_ID3D12CommandQueue,(void **)&q))){sr_trace_queue(q,d);debug_trace_queue_hook(q,d);ID3D12CommandQueue_Release(q);}}
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE trace_CreateDescriptorHeap(ID3D12Device *dev,const D3D12_DESCRIPTOR_HEAP_DESC *d,REFIID riid,void **out) {
