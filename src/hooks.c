@@ -347,6 +347,7 @@ typedef struct {
     /* Separate tracking so the legacy DLAA restore path is not changed. */
     ID3D12RootSignature *trace_graphics_rs;
     UINT trace_tables_mask,trace_compute_mask;
+    int trace_bindings_uncertain;
     D3D12_GPU_DESCRIPTOR_HANDLE trace_compute_tables[32];
     unsigned long long trace_recording_id;
     D3D_PRIMITIVE_TOPOLOGY trace_topology;
@@ -582,6 +583,7 @@ static void STDMETHODCALLTYPE hook_SetDescriptorHeaps(ID3D12GraphicsCommandList 
     ListState *s = state_for(cl);
     if (s) {
         UINT tracked_n = n > 2 ? 2 : n;
+        if(n>2||(n&&!h))s->trace_bindings_uncertain=1;
         if (tracked_n != s->num_heaps || (tracked_n && (!h || memcmp(s->heaps,h,tracked_n*sizeof(*h))))){
             s->trace_tables_mask = 0;s->trace_compute_mask=0;
         }
@@ -602,14 +604,14 @@ static void STDMETHODCALLTYPE hook_SetComputeRootSignature(ID3D12GraphicsCommand
 
 static void STDMETHODCALLTYPE hook_SetComputeRootDescriptorTable(ID3D12GraphicsCommandList *cl,UINT index,D3D12_GPU_DESCRIPTOR_HANDLE base){
     ListState *s=state_for(cl);
-    if(s&&index<32){s->trace_compute_tables[index]=base;s->trace_compute_mask|=1u<<index;}
+    if(s&&index<32&&base.ptr){s->trace_compute_tables[index]=base;s->trace_compute_mask|=1u<<index;}
+    else if(s)s->trace_bindings_uncertain=1;
     real_SetComputeRootDescriptorTable(cl,index,base);
 }
 static void STDMETHODCALLTYPE hook_SetGraphicsRootSignature(ID3D12GraphicsCommandList *cl, ID3D12RootSignature *rs) {
     ListState *s = state_for(cl);
     if (s) {
-        s->tables_mask = 0;
-        s->trace_tables_mask=0;
+        if(!azrp_sr_enabled||s->trace_graphics_rs!=rs){s->tables_mask=0;s->trace_tables_mask=0;}
         s->trace_graphics_rs=rs;
     }
     real_SetGraphicsRootSignature(cl, rs);
@@ -618,6 +620,7 @@ static void STDMETHODCALLTYPE hook_SetGraphicsRootSignature(ID3D12GraphicsComman
 static void STDMETHODCALLTYPE hook_SetGraphicsRootDescriptorTable(ID3D12GraphicsCommandList *cl, UINT index,
                                                                   D3D12_GPU_DESCRIPTOR_HANDLE base) {
     ListState *s = state_for(cl);
+    if(s&&(index>=32||!base.ptr))s->trace_bindings_uncertain=1;
     if (s && index < 32) {
         s->tables[index] = base;
         s->tables_mask |= 1u << index;

@@ -19,6 +19,7 @@ int main(void){
     assert(azrb_finish(&l,base,&total,&mask)&&total==18&&base[3]==12&&mask==9);
     l.req[16].root=l.req[0].root;l.req[16].offset=l.req[0].offset;
     assert(!azrb_finish(&l,base,&total,&mask));
+    l=layout();l.req[3].root=l.req[0].root;l.req[3].offset=l.req[0].offset;assert(!azrb_finish(&l,base,&total,&mask));
     l=layout();l.req[3].mode=0;assert(!azrb_finish(&l,base,&total,&mask));
     l=layout();l.span[3]=AZRB_HEAP_LIMIT;assert(!azrb_finish(&l,base,&total,&mask));
     l=layout();azrb_range(&l,8,AZRB_ALL,AZRB_SRV,0,0,1,0);assert(!azrb_finish(&l,base,&total,&mask));

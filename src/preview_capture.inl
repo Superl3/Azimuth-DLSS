@@ -126,10 +126,9 @@ static ID3D12Resource *preview_sr_snapshot(ID3D12GraphicsCommandList *cl,ID3D12R
 static int preview_sr_ready(const AzpvGroup *g,ID3D12GraphicsCommandList *cl,unsigned long long recording) {
     if(!g->sr_snapshot||!g->core_batch)return 0;
     const AzpvBatch *b=g->core_batch;
-    if(b->list==cl&&azpv_can_append(b->life,b->recording,recording))return 1;
-    if(b->life.state!=PV_SUBMITTED&&b->life.state!=PV_SAVED)return 0;
-    UINT64 value=b->fence->lpVtbl->GetCompletedValue(b->fence);
-    return value>=1&&value!=UINT64_MAX;
+    UINT64 value=0;
+    if(b->life.state==PV_SUBMITTED||b->life.state==PV_SAVED)value=b->fence->lpVtbl->GetCompletedValue(b->fence);
+    return azpv_source_ready(b->life,b->recording,recording,b->list==cl,value);
 }
 void hooks_preview_record(ID3D12GraphicsCommandList *cl,ID3D12Resource *color,ID3D12Resource *depth,
                           ID3D12Resource *motion,ID3D12Resource *out,D3D12_RESOURCE_STATES read_state,int reset,int jitter_used,float jx,float jy) {

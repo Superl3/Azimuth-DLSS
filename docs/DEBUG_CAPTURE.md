@@ -298,3 +298,5 @@ save f*-srpostfx-1920x1080-fmt24.raw along with native replay and
 original stages. See POSTFX SR_LAYOUT, SR_BINDINGS and SR_REPLAY SKIP.
 Up to 18 textures under the existing 256 MiB readback cap. No FG,
 UI recomposition, actual camera constant values, or present takeover.
+
+The SR replay additionally rejects every alias of PS t0, requires all original graphics/compute descriptor table bindings to be accounted for before switching heaps, and checks that a separate SR producer recording has been reset and its fence completed. A producer on the same still-recording list may be used in order. These strict gates can legitimately skip the experiment; the recorded reason is evidence to improve the next implementation, not permission to bypass GPU synchronization. The native replay remains independent of descriptor mirroring.

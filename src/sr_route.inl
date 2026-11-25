@@ -53,7 +53,8 @@ typedef struct { UINT root, offset, count, reg, space; } AztRange;
 typedef struct {
     ID3D12RootSignature *rs;
     UINT count;
-    int complete;
+    int complete,table_layout_known;
+    UINT tables_all;
     AztRange ranges[AZT_RANGES];
 } AztRoot;
 typedef struct {
@@ -307,8 +308,10 @@ static void sr_trace_root(ID3D12RootSignature *rs,const void *blob,SIZE_T bytes)
     if(d->Version==D3D_ROOT_SIGNATURE_VERSION_1_0) {
         const D3D12_ROOT_SIGNATURE_DESC *rd=&d->Desc_1_0;
         if(rd->NumParameters>32 || ((UINT)rd->Flags & 0x400u)) v.complete=0;
+        v.table_layout_known=rd->NumParameters<=32;
         for(UINT i=0;i<rd->NumParameters && i<32;++i) {
             const D3D12_ROOT_PARAMETER *p=&rd->pParameters[i];
+            if(p->ParameterType==D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE)v.tables_all|=1u<<i;
             if(p->ParameterType!=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE || (p->ShaderVisibility!=D3D12_SHADER_VISIBILITY_PIXEL && p->ShaderVisibility!=D3D12_SHADER_VISIBILITY_ALL)) continue;
             UINT next=0;
             for(UINT j=0;j<p->DescriptorTable.NumDescriptorRanges;++j) {
@@ -319,8 +322,10 @@ static void sr_trace_root(ID3D12RootSignature *rs,const void *blob,SIZE_T bytes)
     } else if(d->Version==D3D_ROOT_SIGNATURE_VERSION_1_1) {
         const D3D12_ROOT_SIGNATURE_DESC1 *rd=&d->Desc_1_1;
         if(rd->NumParameters>32 || ((UINT)rd->Flags & 0x400u)) v.complete=0;
+        v.table_layout_known=rd->NumParameters<=32;
         for(UINT i=0;i<rd->NumParameters && i<32;++i) {
             const D3D12_ROOT_PARAMETER1 *p=&rd->pParameters[i];
+            if(p->ParameterType==D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE)v.tables_all|=1u<<i;
             if(p->ParameterType!=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE || (p->ShaderVisibility!=D3D12_SHADER_VISIBILITY_PIXEL && p->ShaderVisibility!=D3D12_SHADER_VISIBILITY_ALL)) continue;
             UINT next=0;
             for(UINT j=0;j<p->DescriptorTable.NumDescriptorRanges;++j) {

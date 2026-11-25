@@ -66,6 +66,10 @@ static inline void azrb_direct(AzrbLayout *l,unsigned root,unsigned vis,unsigned
 static inline int azrb_finish(const AzrbLayout *l,uint32_t base[AZRB_TABLES],uint32_t *total,uint32_t *mask) {
     if(!l->valid||l->req[0].mode!=AZRB_TABLE||l->req[16].mode!=AZRB_TABLE||
        (l->req[0].root==l->req[16].root&&l->req[0].offset==l->req[16].offset))return 0;
+    /* No other required binding may alias the substituted PS t0 slot,
+       including differently typed descriptors or shared stage tables. */
+    for(unsigned i=1;i<AZRB_REQS;++i)
+        if(l->req[i].mode==AZRB_TABLE&&l->req[i].root==l->req[0].root&&l->req[i].offset==l->req[0].offset)return 0;
     *total=0;*mask=0;memset(base,0,AZRB_TABLES*sizeof(*base));
     for(unsigned i=0;i<AZRB_REQS;++i){
         const AzrbReq *r=&l->req[i];

@@ -134,7 +134,9 @@ static void azrp_note_root(ID3D12RootSignature *rs,const void *blob,SIZE_T bytes
    shader registers, with Tier 3 unreferenced slots never accessed. */
 static int azrp_prepare_bindings(ListState *s,ID3D12Resource *scene,ID3D12Resource *snapshot,AzrpBindings *out,unsigned long long resolve){
     if(!azrp_sr_enabled||!s||!scene||!snapshot||!real_SetComputeRootDescriptorTable||
-       !s->trace_graphics_rs||!s->num_heaps||s->num_heaps>2)return 0;
+       !s->trace_graphics_rs||!s->num_heaps||s->num_heaps>2||s->trace_bindings_uncertain){
+        log_msg("POSTFX SR_REPLAY SKIP resolve=%llu reason=unknown_original_bindings",resolve);return 0;
+    }
     memset(out,0,sizeof(*out));
     D3D12_DESCRIPTOR_HEAP_DESC hd={0};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     hd.NumDescriptors=AZRB_HEAP_LIMIT;hd.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
@@ -148,6 +150,12 @@ static int azrp_prepare_bindings(ListState *s,ID3D12Resource *scene,ID3D12Resour
     for(unsigned i=0;i<azrp_root_count;++i)if(azrp_roots[i].rs==s->trace_graphics_rs){l=&azrp_roots[i].layout;break;}
     uint32_t base[AZRB_TABLES],total,mask;
     if(!l||!azrb_finish(l,base,&total,&mask)||azt_incomplete)goto done;
+    AztRoot *gr=azt_root_slot(s->trace_graphics_rs,0);
+    if(!gr||!gr->table_layout_known||(s->trace_tables_mask&gr->tables_all)!=gr->tables_all){reason="graphics_restore_unproven";goto done;}
+    if(s->compute_rs){
+        AztRoot *cr=azt_root_slot(s->compute_rs,0);
+        if(!cr||!cr->table_layout_known||(s->trace_compute_mask&cr->tables_all)!=cr->tables_all){reason="compute_restore_unproven";goto done;}
+    }
     AztHeap *orig=NULL;
     for(UINT i=0;i<s->num_heaps;++i){
         AztHeap *h=azt_heap_for_ptr(s->heaps[i]);

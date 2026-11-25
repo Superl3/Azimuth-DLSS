@@ -17,4 +17,10 @@ static inline void azpv_on_submit(AzpvBatchLife *b,unsigned matches,int signaled
 static inline int azpv_can_map(AzpvBatchLife b,uint64_t completed) {
     return b.state==PV_SUBMITTED&&!b.current&&completed>=1&&completed!=UINT64_MAX;
 }
+/* A private SR snapshot is immutable only after the producer recording
+   is retired and its fence completes, or earlier in the same recording. */
+static inline int azpv_source_ready(AzpvBatchLife b,uint64_t producer,uint64_t consumer,int same_list,uint64_t completed) {
+    if(same_list&&azpv_can_append(b,producer,consumer))return 1;
+    return (b.state==PV_SUBMITTED||b.state==PV_SAVED)&&!b.current&&completed>=1&&completed!=UINT64_MAX;
+}
 #endif

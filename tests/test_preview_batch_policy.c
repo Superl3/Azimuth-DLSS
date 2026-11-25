@@ -23,6 +23,11 @@ int main(void) {
     assert(signal.state==PV_FAILED);
     AzpvBatchLife multiple={PV_RECORDED,1};azpv_on_submit(&multiple,2,1);
     assert(multiple.state==PV_FAILED);
-    puts("PASS: independent recording batches, reset, submit, repeated submit and fence policy");
+    assert(azpv_source_ready((AzpvBatchLife){PV_RECORDED,1},5,5,1,0));
+    assert(!azpv_source_ready((AzpvBatchLife){PV_SUBMITTED,1},5,6,1,1));
+    assert(!azpv_source_ready((AzpvBatchLife){PV_SUBMITTED,0},5,6,1,0));
+    assert(azpv_source_ready((AzpvBatchLife){PV_SUBMITTED,0},5,6,1,1));
+    assert(!azpv_source_ready((AzpvBatchLife){PV_FAILED,0},5,6,1,1));
+    puts("PASS: independent recording batches, reset, submit, repeated submit, immutable SR source and fence policy");
     return 0;
 }
