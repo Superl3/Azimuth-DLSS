@@ -21,7 +21,9 @@ typedef struct {
     int state,list_current;
     uint64_t started;
     AzpvShot shots[AZPV_SHOTS];
-    ID3D12Resource *scene,*postfx,*composite;
+    ID3D12Resource *scene;
+    uintptr_t postfx,composite; /* same-list/resolve identities only */
+    unsigned postfx_seen;
 } AzpvGroup;
 static SRWLOCK azpv_lock=SRWLOCK_INIT;
 static AzpvGroup azpv_groups[AZPV_GROUPS];
@@ -74,7 +76,7 @@ static int preview_add(AzpvGroup *g,ID3D12Resource *res,D3D12_RESOURCE_STATES st
     return 1;
 }
 void hooks_preview_record(ID3D12GraphicsCommandList *cl,ID3D12Resource *color,ID3D12Resource *depth,
-                          ID3D12Resource *motion,ID3D12Resource *out,D3D12_RESOURCE_STATES read_state,int reset) {
+                          ID3D12Resource *motion,ID3D12Resource *out,D3D12_RESOURCE_STATES read_state,int reset,int jitter_used,float jx,float jy) {
     if(!azpv_enabled||GetModuleHandleW(L"renderdoc.dll")||!cl||!g_device||
        cl->lpVtbl->GetType(cl)!=D3D12_COMMAND_LIST_TYPE_DIRECT||!InterlockedCompareExchange(&azpv_queue_ready,0,0))return;
     AcquireSRWLockExclusive(&azt_lock);
@@ -91,7 +93,7 @@ void hooks_preview_record(ID3D12GraphicsCommandList *cl,ID3D12Resource *color,ID
         g->state=PV_FAILED;log_msg("PREVIEW FAILED resolve=%llu reason=fence_create",resolve);goto done;
     }
     ID3D12GraphicsCommandList_AddRef(cl);g->list=cl;g->list_current=1;g->state=PV_RECORDED;g->scene=color;
-    log_msg("PREVIEW GROUP resolve=%llu reset=%d jitter=0 list=%p",resolve,reset,(void *)cl);
+    log_msg("PREVIEW GROUP resolve=%llu reset=%d jitter=%d list=%p jitterX=%.7f jitterY=%.7f",resolve,reset,jitter_used,(void *)cl,(double)jx,(double)jy);
     if(!preview_add(g,color,read_state,"color"))log_msg("PREVIEW SKIP resolve=%llu stage=color",resolve);
     if(!preview_add(g,depth,read_state,"depth"))log_msg("PREVIEW SKIP resolve=%llu stage=depth",resolve);
     if(!preview_add(g,motion,read_state,"mv"))log_msg("PREVIEW SKIP resolve=%llu stage=mv",resolve);
@@ -101,50 +103,72 @@ done: ReleaseSRWLockExclusive(&azpv_lock);
 }
 /* Opt-in snapshots of exact observed fullscreen passes only. Require
    matching live RTV metadata and a known RT state in this recording. */
-static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s) {
-    if(!azpv_enabled||!azpv_postfx||!s||s->num_rtv!=1||s->has_dsv||s->num_vp!=1||
-       s->num_sc!=1||s->trace_predicated||s->trace_queries||s->trace_query_unknown||
-       s->trace_topology!=D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST)return;
-    ID3D12Resource *target=NULL,*input=NULL;DWORD hash=0;unsigned long long resolve=0;
+static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int start_zero) {
+    if(!azpv_enabled||!azpv_postfx||!s)return;
+    ID3D12Resource *target=NULL,*input=NULL;
+    uintptr_t identity=0;DWORD hash=0;unsigned long long resolve=0;
+    unsigned missing=0,found=0;int known=0,recording_match=0,state_value=-1;
+    UINT nr=s->num_rtv,nv=s->num_vp,ns=s->num_sc;
+    /* Failure bits are diagnostic; no weaker resource-state inference. */
     AcquireSRWLockExclusive(&azt_lock);
-    if(azdbg.active&&azdbg.id==1&&azdbg.observed<=AZPV_GROUPS&&!azt_incomplete){
+    if(azdbg.active&&azdbg.id==1&&azdbg.observed<=AZPV_GROUPS){
         AztPso *p=azt_pso_slot(s->pso,0);
-        AztRoot *r=azt_root_slot(s->trace_graphics_rs,0);
-        AztDesc *t=azt_slot(azt_heap_for_cpu(s->rtv[0].ptr,D3D12_DESCRIPTOR_HEAP_TYPE_RTV),s->rtv[0].ptr,0);
-        const ViewEntry *v=view_find(s->rtv[0].ptr);
-        AztState *st=t&&t->res?azt_state(t->res,0):NULL;
-        if(p&&r&&p->rs==s->trace_graphics_rs&&azfg_known_candidate(p)&&!p->blend_enabled&&!p->depth_enabled&&
-           t&&t->res&&v&&v->resource==t->res&&t->simple&&t->format==DXGI_FORMAT_R10G10B10A2_UNORM&&
-           st&&st->known&&st->state==D3D12_RESOURCE_STATE_RENDER_TARGET&&st->list==cl&&
-           s->trace_recording_id&&st->recording==s->trace_recording_id&&
-           s->vp[0].TopLeftX==0&&s->vp[0].TopLeftY==0&&s->vp[0].Width==(float)t->desc.Width&&s->vp[0].Height==(float)t->desc.Height&&
-           s->sc[0].left==0&&s->sc[0].top==0&&s->sc[0].right>=(LONG)t->desc.Width&&s->sc[0].bottom>=(LONG)t->desc.Height){
-            unsigned found=0;
-            for(UINT i=0;i<r->count;++i)if(r->ranges[i].reg==0&&r->ranges[i].space==0&&r->ranges[i].count){
-                AztDesc *a=azt_bound_srv(s,&r->ranges[i],0);if(a&&a->res){input=a->res;++found;}
-            }
-            if(found==1){target=t->res;hash=p->hash[0];resolve=azt_frame;ID3D12Resource_AddRef(target);}
+        if(p&&azfg_known_candidate(p)){
+            hash=p->hash[0];resolve=azt_frame;
+            AztRoot *r=azt_root_slot(s->trace_graphics_rs,0);
+            AztDesc *t=nr==1?azt_slot(azt_heap_for_cpu(s->rtv[0].ptr,D3D12_DESCRIPTOR_HEAP_TYPE_RTV),s->rtv[0].ptr,0):NULL;
+            const ViewEntry *live=nr==1?view_find(s->rtv[0].ptr):NULL;
+            AztState *st=t&&t->res?azt_state(t->res,0):NULL;
+            if(azt_incomplete)missing|=1u;
+            if(!start_zero||nr!=1||s->has_dsv||nv!=1||ns!=1||s->trace_predicated||s->trace_queries||s->trace_query_unknown||
+               s->trace_topology!=D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST)missing|=2u;
+            if(!r||p->rs!=s->trace_graphics_rs||p->blend_enabled||p->depth_enabled||
+               p->color_write_mask!=D3D12_COLOR_WRITE_ENABLE_ALL)missing|=4u;
+            if(!t||!t->res||!live||live->resource!=t->res||!t->simple||
+               t->format!=DXGI_FORMAT_R10G10B10A2_UNORM)missing|=8u;
+            if(t&&t->res&&live&&live->resource==t->res&&t->format==DXGI_FORMAT_R10G10B10A2_UNORM)
+                identity=(uintptr_t)t->res;
+            known=st&&st->known;
+            if(st)state_value=(int)st->state;
+            recording_match=st&&st->list==cl&&s->trace_recording_id&&st->recording==s->trace_recording_id;
+            if(!known||state_value!=(int)D3D12_RESOURCE_STATE_RENDER_TARGET||!recording_match)missing|=16u;
+            if(!t||nv!=1||ns!=1||s->vp[0].TopLeftX!=0||s->vp[0].TopLeftY!=0||
+               s->vp[0].Width!=(float)t->desc.Width||s->vp[0].Height!=(float)t->desc.Height||
+               s->sc[0].left!=0||s->sc[0].top!=0||s->sc[0].right<(LONG)t->desc.Width||s->sc[0].bottom<(LONG)t->desc.Height)missing|=32u;
+            if(r&&p->rs==s->trace_graphics_rs)for(UINT i=0;i<r->count;++i)
+                if(r->ranges[i].reg==0&&r->ranges[i].space==0&&r->ranges[i].count){
+                    AztDesc *a=azt_bound_srv(s,&r->ranges[i],0);
+                    if(a&&a->res){input=a->res;++found;}
+                }
+            if(found!=1)missing|=64u;
+            if(!missing){target=t->res;ID3D12Resource_AddRef(target);}
         }
     }
     ReleaseSRWLockExclusive(&azt_lock);
-    if(!target)return;
+    if(!hash)return;
     AcquireSRWLockExclusive(&azpv_lock);
     for(unsigned i=0;i<azpv_count;++i){
         AzpvGroup *g=&azpv_groups[i];
         if(g->state!=PV_RECORDED||!g->list_current||g->list!=cl||g->resolve!=resolve)continue;
-        const char *name=NULL;
-        if(hash==0x479be24a&&!g->postfx&&input==g->scene)name="preoverlay";
-        else if(hash==0xa7840ad0&&g->postfx&&!g->composite&&input==g->postfx)name="composite";
-        else if((hash==0x577d52ef||hash==0xa93721c4)&&g->composite&&input==g->composite)name="final";
-        if(!name)continue;
-        int seen=0;for(unsigned k=0;k<g->count;++k)if(!strcmp(g->shots[k].name,name))seen=1;
-        if(!seen&&preview_add(g,target,D3D12_RESOURCE_STATE_RENDER_TARGET,name)){
-            if(hash==0x479be24a)g->postfx=target;
-            if(hash==0xa7840ad0)g->composite=target;
+        unsigned bit=hash==0x479be24a?1u:hash==0xa7840ad0?2u:4u;
+        if(g->postfx_seen&bit)continue;
+        g->postfx_seen|=bit;
+        const char *name=bit==1?"preoverlay":bit==2?"composite":"final";
+        uintptr_t expected=bit==1?(uintptr_t)g->scene:bit==2?g->postfx:g->composite;
+        int chain=identity&&expected&&found==1&&(uintptr_t)input==expected;
+        /* Identity correlation must not depend on the upstream readback
+           succeeding. This does not establish a resource lifetime or state. */
+        if(chain&&!(missing&(1u|4u|8u|64u))){
+            if(bit==1)g->postfx=identity;
+            if(bit==2)g->composite=identity;
         }
+        log_msg("PREVIEW POSTFX_GATE resolve=%llu stage=%s missing=0x%02x chain=%d rtv=%u vp=%u sc=%u topology=%u state=%d known=%d recording=%d t0matches=%u startZero=%d",
+            resolve,name,missing,chain,nr,nv,ns,(unsigned)s->trace_topology,state_value,known,recording_match,found,start_zero);
+        if(chain&&!missing&&target&&preview_add(g,target,D3D12_RESOURCE_STATE_RENDER_TARGET,name))continue;
+        log_msg("PREVIEW SKIP resolve=%llu stage=%s reason=%s",resolve,name,missing?"gate":!chain?"identity_chain":"readback_allocation");
     }
     ReleaseSRWLockExclusive(&azpv_lock);
-    ID3D12Resource_Release(target);
+    if(target)ID3D12Resource_Release(target);
 }
 static void preview_reset(ID3D12GraphicsCommandList *cl) {
     if(!azpv_enabled)return;

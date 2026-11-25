@@ -231,3 +231,35 @@ output transform. First validate the actual offscreen NGX image;
 an API success return is not an image-quality measurement. No new
 runtime rendering changes in this commit. The next high-value
 evidence is actual GPU pixels/constants, not another broad F8 trace.
+
+
+## First fence-completed SR pixel capture: 720p SDR
+
+The local capture of resolves 2601/2602 produced all 8 core raw
+textures, both groups fence-complete and exit code 0. Actual scene and
+NGX input 1280x720, output 1920x1080, Quality optimal exactly 1280x720.
+Both scene and SR packed R11G11B10 pixels are finite. Depth float
+samples finite, range 0.6644..1.0; this static sample does not prove
+near/far convention. Reconstructed R16G16 motion bytes identical,
+median magnitude ~0.00112 render pixels, max ~0.00150; scene pixels
+94.83% identical across resolves, depth 99.53% identical. Captured
+scene is essentially stationary, not a dynamic motion validation.
+No jitter, history reset=0. Resolve 2601 maximum color channel
+25.5 input vs 4.8125 output; approximate Rec.709-weighted mean RGB
+luma 0.07683 vs 0.07213. Sparse highlight attenuation may be ordinary
+reconstruction filtering or signal/exposure interpretation; not proof
+of HDR clipping, color error, or native-reference quality.
+
+8/8 observed SDR upscaling chains 1280x720 -> 1280x720 -> 1920x1080.
+25--33 same-target intervening blends per interval. No native HDR
+t2 path in this capture. Postfx option was on but saved zero postprocess
+textures; original gate failed or chain was not armed. Actual reason
+not present in old log. All 223 observed submission records are CPU
+observations; core copies were submitted on the same recorded producer
+list and its observed direct queue, and private fences completed.
+Do not infer actual Present ownership or universal queue safety.
+The next build adds opt-in viewport jitter and reports each postprocess
+gate, allowing independently safe downstream snapshots after upstream
+readback failure. No visible SR routing, high-resolution shader replay
+or FG backend is implemented. No captured raw pixels or game shaders
+are committed.

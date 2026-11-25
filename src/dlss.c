@@ -50,7 +50,7 @@ static AzSRMode sr_mode = AZSR_DLAA;
 static AzSRQuality sr_quality = AZSR_QUALITY;
 static AzSRSize sr_output, sr_render, sr_swapchain;
 static int sr_armed, sr_blocked, sr_optimal_checked;
-static int sr_route_jitter, sr_trace_only, sr_debug_mode, sr_preview_mode;
+static int sr_route_jitter, sr_trace_only, sr_debug_mode, sr_preview_mode, sr_preview_jitter;
 static volatile LONG sr_route_visible;
 static ID3D12Resource *sr_route_last_output;
 static unsigned sr_log_budget = 12;
@@ -74,7 +74,7 @@ static void sr_read_config(void) {
     if (!strcmp(b, "trace") || !strcmp(b,"debug")) { sr_mode = AZSR_DIAGNOSTIC; sr_trace_only = 1; sr_debug_mode = !strcmp(b,"debug"); log_msg("SR TRACE ONLY: no DLAA/NGX dispatch or injected motion replay"); }
     else if (!strcmp(b, "diagnostic")) sr_mode = AZSR_DIAGNOSTIC;
     else if (!strcmp(b, "probe")) sr_mode = AZSR_PROBE;
-    else if (!strcmp(b,"preview")) { sr_mode=AZSR_PROBE; sr_debug_mode=sr_preview_mode=1; log_msg("SR PREVIEW: offscreen NGX and bounded diagnostics; no visible replacement or jitter"); }
+    else if (!strcmp(b,"preview")) { sr_mode=AZSR_PROBE; sr_debug_mode=sr_preview_mode=1; log_msg("SR PREVIEW: offscreen NGX and bounded diagnostics; no visible SR replacement"); }
     else if (!strcmp(b, "padded")) sr_mode = AZSR_PADDED;
     else if (!strcmp(b, "route")) sr_mode = AZSR_ROUTE;
     else if (strcmp(b, "dlaa")) log_msg("SR: unknown mode; retaining DLAA");
@@ -93,6 +93,11 @@ static void sr_read_config(void) {
         else if (!strcmp(b, "performance")) sr_quality = AZSR_PERFORMANCE;
         else sr_blocked = 1;
     }
+    if(sr_preview_mode){
+        n=GetEnvironmentVariableA("AZIMUTH_DEBUG_PREVIEW_JITTER",b,sizeof(b));
+        sr_preview_jitter=n==1&&b[0]=='1';
+        log_msg("PREVIEW TEMPORAL viewportJitter=%d (experimental; original displayed scene may be jittered)",sr_preview_jitter);
+    }
     if (sr_mode == AZSR_ROUTE) {
         n = GetEnvironmentVariableA("AZIMUTH_SR_ROUTE_JITTER", b, sizeof(b));
         sr_route_jitter = n == 1 && b[0] == '1';
@@ -108,7 +113,8 @@ void dlss_sr_note_swapchain(unsigned w, unsigned h) {
     if (sr_mode != AZSR_DLAA) log_msg("SR observed swapchain: %ux%u", w, h);
 }
 int dlss_sr_jitter_size(unsigned w, unsigned h) {
-    if (sr_mode == AZSR_PROBE || sr_trace_only) return 0;
+    if (sr_trace_only) return 0;
+    if (sr_mode == AZSR_PROBE) return sr_preview_mode&&sr_preview_jitter&&sr_armed&&!sr_blocked&&w==sr_render.w&&h==sr_render.h;
     if (sr_mode == AZSR_ROUTE) return sr_route_jitter && InterlockedCompareExchange(&sr_route_visible,0,0) &&
         sr_armed && !sr_blocked && w == sr_render.w && h == sr_render.h;
     if (sr_mode == AZSR_PADDED) return sr_armed && !sr_blocked && w == sr_render.w && h == sr_render.h;
@@ -198,7 +204,7 @@ void dlss_toggle(void) {
 
 
 int dlss_jitter(float *x, float *y) {
-    if (!enabled || !jitter_live || !ngx_ready || sr_trace_only || sr_mode == AZSR_PROBE || sr_blocked) {
+    if (!enabled || !jitter_live || !ngx_ready || sr_trace_only || (sr_mode == AZSR_PROBE && !(sr_preview_mode&&sr_preview_jitter)) || sr_blocked) {
         return 0;
     }
     *x = jx;
@@ -378,7 +384,7 @@ int dlss_run(ID3D12GraphicsCommandList *cl, ID3D12Resource *color, D3D12_RESOURC
     }
     if (ok && (decision == AZSR_EVALUATE_ONLY || decision == AZSR_ROUTE_OUTPUT)) {
         if (decision == AZSR_ROUTE_OUTPUT) sr_route_last_output = out_tex;
-        if(sr_preview_mode && decision==AZSR_EVALUATE_ONLY)hooks_preview_record(cl,color,depth,motion,out_tex,READ_STATE,need_reset);
+        if(sr_preview_mode && decision==AZSR_EVALUATE_ONLY)hooks_preview_record(cl,color,depth,motion,out_tex,READ_STATE,need_reset,jitter_used,jitter_used?jx:0.0f,jitter_used?jy:0.0f);
         /* Offscreen verification: no copy to game, no screen jitter. Order repeated UAV writes. */
         hooks_transition(cl, out_tex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
         hooks_transition(cl, out_tex, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);

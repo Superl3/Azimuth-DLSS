@@ -1010,7 +1010,7 @@ static void STDMETHODCALLTYPE hook_DrawInstanced(ID3D12GraphicsCommandList *cl, 
     fg_trace_draw(cl,s,vc,ic,role,0);
     if (sr_trace_draw(cl,s,vc,ic,role,sv==0 && si==0)) return;
     real_DrawInstanced(cl, vc, ic, sv, si);
-    if(role==ROLE_NONE && vc==3 && ic==1 && sv==0 && si==0)preview_after_draw(cl,s);
+    if(role==ROLE_NONE && vc==3 && ic==1)preview_after_draw(cl,s,sv==0&&si==0);
 }
 
 static void STDMETHODCALLTYPE hook_DrawIndexedInstanced(ID3D12GraphicsCommandList *cl, UINT index_count,

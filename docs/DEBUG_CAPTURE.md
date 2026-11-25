@@ -211,3 +211,30 @@ and DXGI resource format in the filename. They contain game imagery;
 review ZIP locally before sharing privately. No capture content is
 automatically uploaded. Metadata, logs and optional shader assembly
 are included even if GPU texture capture partially fails.
+
+
+### Temporal test after first successful actual preview
+
+The 720p SDR preview saved all eight core raw textures in resolves
+2601 and 2602, both fences completed. However the scene was nearly
+stationary (identical MV bytes, maximum motion ~0.0015 render pixels).
+For the next test use the same low resolution, while *actually driving*
+or rotating the chase camera. Prefer manual F8 in motion rather than
+a resolve-number trigger while parked:
+
+    Start-DebugCapture.cmd -Preview -PreviewPostFx -PreviewJitter -ShaderDisasm -Output 1920x1080
+
+-PreviewJitter is explicitly opt-in. It uses the existing DLAA viewport
+jitter mechanism only after a successful probe has armed the exact render
+size. The original displayed scene may jitter, but SR output is still
+offscreen. Jitter used and actual offsets are logged per captured resolve.
+This is a comparison experiment, not a validated projection/motion-vector
+contract. With no flag the baseline remains unjittered.
+
+All three native postprocess snapshots were missing in the first preview.
+New PREVIEW POSTFX_GATE records report missing bits: 0x01 global metadata,
+0x02 draw/topology/query, 0x04 root/PSO, 0x08 target/view, 0x10 exact
+recording state, 0x20 viewport/scissor, 0x40 t0 binding. A later stage
+may save even if the earlier one failed to save, when its identity chain
+and its own state are verified. These are original-game snapshots, not
+SR-replayed postprocess results. No state gate was relaxed.
