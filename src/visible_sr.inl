@@ -5,6 +5,7 @@
 #include "visible_merge_shader.h"
 #define AZVIS_PSO_MAX 8
 #define AZVIS_MS 10000u
+#define AZPV_CAPTURE_COUNT 2u
 static int azvis_enabled;
 static SRWLOCK azvis_pso_lock=SRWLOCK_INIT;
 static struct {ID3D12PipelineState *original,*merge;} azvis_psos[AZVIS_PSO_MAX];
@@ -12,7 +13,8 @@ static unsigned azvis_pso_count;
 typedef struct {
     int enabled,pre_ready,composite_ready,routed;
     ID3D12GraphicsCommandList *list;
-    unsigned long long recording;
+    unsigned long long recording,composite_work;
+    uintptr_t target_id;
     AzrpSurface sr_surface;
     ID3D12Resource *layers,*merged;
     ID3D12DescriptorHeap *rtv,*heap;
@@ -42,7 +44,21 @@ static int azvis_final_pair(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *d){
         !memcmp((const BYTE *)d->PS.pShaderBytecode+4,ps,16)&&!memcmp((const BYTE *)d->VS.pShaderBytecode+4,vs,16);
 }
 static void visible_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *d,ID3D12PipelineState *pso){
-    if(!azvis_enabled||!pso||!azvis_final_pair(d))return;
+    if(!azvis_enabled||!pso||!d)return;
+    AztPso candidate;memset(&candidate,0,sizeof(candidate));
+    if(azsd_hash(&d->PS,candidate.hash)&&azsd_hash(&d->VS,candidate.vs_hash)&&azsd_hud_candidate(&candidate)){
+        const D3D12_RENDER_TARGET_BLEND_DESC *b=&d->BlendState.RenderTarget[0];
+        const D3D12_DEPTH_STENCIL_DESC *ds=&d->DepthStencilState;
+        log_msg("VISIBLE HUD_PSO pso=%p ps=%08lx-%08lx-%08lx-%08lx vs=%08lx-%08lx-%08lx-%08lx blend=%d src=%d dst=%d op=%d srcAlpha=%d dstAlpha=%d opAlpha=%d writeMask=%u depth=%d depthWrite=%d depthFunc=%d stencil=%d stencilReadMask=%u stencilWriteMask=%u front=%d,%d,%d,%d back=%d,%d,%d,%d dsvFmt=%d samples=%u inputElements=%u",
+            (void *)pso,(unsigned long)candidate.hash[0],(unsigned long)candidate.hash[1],(unsigned long)candidate.hash[2],(unsigned long)candidate.hash[3],
+            (unsigned long)candidate.vs_hash[0],(unsigned long)candidate.vs_hash[1],(unsigned long)candidate.vs_hash[2],(unsigned long)candidate.vs_hash[3],
+            b->BlendEnable,(int)b->SrcBlend,(int)b->DestBlend,(int)b->BlendOp,(int)b->SrcBlendAlpha,(int)b->DestBlendAlpha,(int)b->BlendOpAlpha,(unsigned)b->RenderTargetWriteMask,
+            ds->DepthEnable,(int)ds->DepthWriteMask,(int)ds->DepthFunc,ds->StencilEnable,(unsigned)ds->StencilReadMask,(unsigned)ds->StencilWriteMask,
+            (int)ds->FrontFace.StencilFailOp,(int)ds->FrontFace.StencilDepthFailOp,(int)ds->FrontFace.StencilPassOp,(int)ds->FrontFace.StencilFunc,
+            (int)ds->BackFace.StencilFailOp,(int)ds->BackFace.StencilDepthFailOp,(int)ds->BackFace.StencilPassOp,(int)ds->BackFace.StencilFunc,
+            (int)d->DSVFormat,d->SampleDesc.Count,d->InputLayout.NumElements);
+    }
+    if(!azvis_final_pair(d))return;
     const D3D12_RENDER_TARGET_BLEND_DESC *b=&d->BlendState.RenderTarget[0];
     if(!d->pRootSignature||d->NumRenderTargets!=1||d->RTVFormats[0]!=DXGI_FORMAT_R10G10B10A2_UNORM||
        d->DSVFormat!=DXGI_FORMAT_UNKNOWN||d->DepthStencilState.DepthEnable||d->DepthStencilState.StencilEnable||
@@ -112,7 +128,7 @@ static void visible_composite(AzvisFrame *v,ID3D12GraphicsCommandList *cl,ListSt
     }
     azvis_copy_layer(cl,v->layers,2,native);
     hooks_transition(cl,v->layers,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    v->composite_ready=1;
+    v->composite_ready=1;v->composite_work=s->trace_work_seq;
     log_msg("VISIBLE HUD_INPUT_READY resolve=%llu list=%p recording=%llu native=%p",resolve,(void *)cl,v->recording,(void *)native);
 }
 /* Resolve only the original final shader's three declared bindings:
@@ -154,6 +170,10 @@ static int azvis_final_bindings(ListState *s,ID3D12Resource *native,AzvisFrame *
         log_msg("VISIBLE SKIP resolve=%llu stage=final reason=root_schema",resolve);return 0;
     }
     AzvisReg t0={0},t1={0},s0={0};UINT n0=0,n1=0;
+    if(azdbg.active&&azdbg.observed<=AZPV_CAPTURE_COUNT){
+        log_msg("VISIBLE FINAL_SCHEMA resolve=%llu root=%p parameters=%u rows=%u flags=0x%x",resolve,(void *)s->trace_graphics_rs,e.parameters,e.rows,e.flags);
+        for(UINT i=0;i<e.rows;++i){const AzrpSchemaRow *x=&e.row[i];log_msg("VISIBLE FINAL_SCHEMA_ROW resolve=%llu index=%u vis=%u type=%u reg=%u space=%u count=%u offset=%u kind=%u",resolve,x->root,x->visibility,x->type,x->reg,x->space,x->count,x->offset,x->kind);}
+    }
     if(!azvis_reg(&e,AZRB_SRV,0,&t0)||!azvis_reg(&e,AZRB_SRV,1,&t1)||!azvis_reg(&e,AZRB_SAMPLER,0,&s0)||
        t0.mode!=AZRB_TABLE||t1.mode!=AZRB_TABLE||!azvis_table_span(&e,t0.root,&n0)||
        (t0.root!=t1.root&&!azvis_table_span(&e,t1.root,&n1))||
@@ -184,10 +204,11 @@ static int azvis_final_bindings(ListState *s,ID3D12Resource *native,AzvisFrame *
         reason="final_descriptor_bounds";goto done;
     }
     AztDesc *scene=azt_slot(original,(SIZE_T)h0,0),*curve=azt_slot(original,(SIZE_T)h1,0);
+    log_msg("VISIBLE FINAL_REQ resolve=%llu t0=%p expected=%p t0Fmt=%u t0Simple=%u curve=%p curveDim=%u curveWidth=%llu curveShadow=%d curveType=%u",resolve,scene?(void *)scene->res:NULL,(void *)native,scene?(unsigned)scene->format:0,scene?scene->simple:0,curve?(void *)curve->res:NULL,curve?(unsigned)curve->desc.Dimension:0,curve?(unsigned long long)curve->desc.Width:0,curve?curve->shadow_valid:0,curve?curve->shadow_type:0);
     if(!scene||scene->res!=native||!scene->simple||scene->format!=DXGI_FORMAT_R10G10B10A2_UNORM||
        scene->desc.Width!=1280||scene->desc.Height!=720){reason="final_t0_identity";goto done;}
     if(!curve||!curve->res||!curve->shadow_valid||!curve->shadow||curve->shadow_type!=AZRB_SRV||
-       curve->desc.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE1D||curve->desc.Width<1025||curve->desc.DepthOrArraySize!=1){
+       curve->desc.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE1D||!curve->desc.Width||curve->desc.DepthOrArraySize!=1){
         reason="native_curve_shadow";goto done;
     }
     UINT total=n0+n1,base1=t0.root==t1.root?0:n0;
@@ -225,8 +246,9 @@ static void azvis_set_tables(ID3D12GraphicsCommandList *cl,const AzrpBindings *b
 }
 static int visible_finalize(AzvisFrame *v,ID3D12GraphicsCommandList *cl,ListState *s,ID3D12Resource *native,ID3D12Resource *target,unsigned long long resolve){
     if(!v->enabled||!v->pre_ready||!v->composite_ready||v->list!=cl||v->recording!=s->trace_recording_id||
-       !azvis_texture(native,1280,720)||!azvis_texture(target,1920,1080)||s->vp_jittered){
-        log_msg("VISIBLE SKIP resolve=%llu stage=final reason=chain_or_recording",resolve);return 0;
+       !azvis_texture(native,1280,720)||!azvis_texture(target,1920,1080)||s->vp_jittered||
+       !azpv_adjacent_work(v->composite_work,s->trace_work_seq)){
+        log_msg("VISIBLE SKIP resolve=%llu stage=final reason=chain_recording_or_nonadjacent_work",resolve);return 0;
     }
     ID3D12PipelineState *merge=NULL;
     AcquireSRWLockShared(&azvis_pso_lock);
@@ -261,7 +283,7 @@ static int visible_finalize(AzvisFrame *v,ID3D12GraphicsCommandList *cl,ListStat
         if(s->trace_compute_mask&azrb_bit(i))real_SetComputeRootDescriptorTable(cl,i,s->trace_compute_tables[i]);
     }
     LARGE_INTEGER qpc;QueryPerformanceCounter(&qpc);
-    v->routed=1;
+    v->routed=1;v->target_id=(uintptr_t)target;
     log_msg("VISIBLE FINAL_RECORDED resolve=%llu list=%p recording=%llu target=%p qpc=%lld nativeFinalShader=1 presentVerified=0",resolve,(void *)cl,v->recording,(void *)target,(long long)qpc.QuadPart);
     return 1;
 }

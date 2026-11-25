@@ -5,7 +5,9 @@
 #include "../third_party/renderdoc/renderdoc_app.h"
 #include "debug_shader_dump.inl"
 #include "postfx_replay.inl"
+#include "preview_batch_policy.h"
 #include "visible_sr.inl"
+#include "visible_trace.inl"
 #include "preview_capture.inl"
 #define AZDBG_GEOM_MAX 64
 typedef struct AzdbgGeom {UINT cw,ch,dw,dh,vw,vh; int cf,df;} AzdbgGeom;
@@ -191,6 +193,7 @@ static void STDMETHODCALLTYPE dbg_execute(ID3D12CommandQueue *q,UINT n,ID3D12Com
     }
     ReleaseSRWLockExclusive(&azt_lock);
     preview_execute(q,n,lists,dbg_real_execute);
+    visible_trace_submit(q,n,lists);
 }
 static HRESULT STDMETHODCALLTYPE dbg_signal(ID3D12CommandQueue *q,ID3D12Fence *f,UINT64 value) {
     HRESULT hr=dbg_real_signal(q,f,value);

@@ -194,7 +194,7 @@ try {
     if($ShaderDisasm){
         $rows = [regex]::Matches($content,'(?m)^DEBUG SHADER_DUMP directory=(azimuth_shader_debug_\d+_\d+) file=([pv]s-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{8}){3}\.asm\.txt) bytes=(\d+)\r?$')
         foreach($row in $rows){
-            if($shaderFiles.Count -ge 16){break}
+            if($shaderFiles.Count -ge 40){break}
             $folder = Join-Path $game $row.Groups[1].Value
             $name = $row.Groups[2].Value
             $source = Join-Path $folder $name

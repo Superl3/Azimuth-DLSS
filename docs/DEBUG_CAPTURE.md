@@ -449,3 +449,30 @@ slot until exit. No queue waits. Once the trial window ends, native
 output continues. Current offscreen quality and native HUD pixels
 remain the fallback. The Windows shader compiler fixture compiles
 the new merge PS; real PSO and final target routing need GPU testing.
+
+
+The trial also logs VISIBLE HUD_PSO (full blend and depth/stencil state),
+HUD_DRAW and bounded HUD_BIND rows, with locally disassembled observed
+HUD and auxiliary shaders (max 40 files). This evidence is for a future
+exact high-resolution HUD replay, not authorization to replay arbitrary
+UI draws. Require the final native draw to be immediately adjacent to
+the captured copy in the same physical recording; intervening tracked
+native draws, copies, dispatches and writes invalidate the merge.
+A live group is not recyclable merely because its producer fence
+completed: it must have seen the final pass or a later resolve, and
+all recordings must be retired and fence-complete.
+
+VISIBLE FINAL_SUBMITTED and FINAL_GPU_COMPLETE distinguish recording,
+actual queue submission and fence completion. VISIBLE EDGE records
+candidate downstream copies and bound-only draws. VISIBLE PRESENT_COUNT
+samples actual DXGI GetLastPresentCount and GetFrameStatistics, live
+current-backbuffer index and identity, and QPC. A one-count interval
+with a matching previous buffer and observed submission is reported as
+a candidate resolve association, not proof of exact scan-out. This
+avoids the known Steam-overlay recursion risk of patching Present.
+The explicit trial temporarily retains up to four swapchain interfaces
+(no retained backbuffer refs) and releases them after the 10-second
+window plus one second. Do not resize/recreate swapchains in this alpha
+test; a retained swapchain interface may delay destruction. If no
+identity match is found, capture actual desktop/game screen video or
+external PresentMon evidence to establish display, not just final RAW.

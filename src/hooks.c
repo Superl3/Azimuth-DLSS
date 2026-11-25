@@ -360,7 +360,7 @@ typedef struct {
     D3D12_GPU_DESCRIPTOR_HANDLE trace_compute_tables[AZRB_TABLES];
     D3D12_GPU_VIRTUAL_ADDRESS trace_graphics_cbv[AZRB_TABLES];
     uint64_t trace_graphics_constant_words[AZRB_TABLES];
-    unsigned long long trace_recording_id;
+    unsigned long long trace_recording_id,trace_work_seq;
     D3D_PRIMITIVE_TOPOLOGY trace_topology;
     UINT trace_queries;
     int trace_predicated, trace_query_unknown;
@@ -1076,6 +1076,7 @@ static void STDMETHODCALLTYPE hook_DrawInstanced(ID3D12GraphicsCommandList *cl, 
     ListState *s = state_for(cl);
     ID3D12PipelineState *variant = NULL;
     int role = s ? pso_lookup(s->pso, &variant) : ROLE_NONE;
+    if(s&&azvis_enabled)++s->trace_work_seq;
     debug_trace_draw(cl,s,vc,role);
     if (role == ROLE_RESOLVE && s) {
         sr_trace_begin_resolve();
@@ -1092,7 +1093,10 @@ static void STDMETHODCALLTYPE hook_DrawInstanced(ID3D12GraphicsCommandList *cl, 
     fg_trace_draw(cl,s,vc,ic,role,0);
     if (sr_trace_draw(cl,s,vc,ic,role,sv==0 && si==0)) return;
     real_DrawInstanced(cl, vc, ic, sv, si);
-    if(role==ROLE_NONE && vc==3 && ic==1)preview_after_draw(cl,s,sv==0&&si==0);
+    if(role==ROLE_NONE){
+        visible_trace_draw(cl,s,vc,ic,0,sv,0,si);
+        if(vc==3&&ic==1)preview_after_draw(cl,s,sv==0&&si==0);
+    }
 }
 
 static void STDMETHODCALLTYPE hook_DrawIndexedInstanced(ID3D12GraphicsCommandList *cl, UINT index_count,
@@ -1101,6 +1105,7 @@ static void STDMETHODCALLTYPE hook_DrawIndexedInstanced(ID3D12GraphicsCommandLis
     ListState *s = state_for(cl);
     ID3D12PipelineState *variant = NULL;
     int role = s ? pso_lookup(s->pso, &variant) : ROLE_NONE;
+    if(s&&azvis_enabled)++s->trace_work_seq;
     debug_trace_draw(cl,s,index_count,role);
     if (role == ROLE_RESOLVE && s) {
         sr_trace_begin_resolve();
@@ -1120,6 +1125,7 @@ static void STDMETHODCALLTYPE hook_DrawIndexedInstanced(ID3D12GraphicsCommandLis
     fg_trace_draw(cl,s,index_count,instance_count,role,1);
     if (sr_trace_draw(cl,s,index_count,instance_count,role,start_index==0 && base_vertex==0 && start_instance==0)) return;
     real_DrawIndexedInstanced(cl, index_count, instance_count, start_index, base_vertex, start_instance);
+    if(role==ROLE_NONE)visible_trace_draw(cl,s,index_count,instance_count,1,start_index,base_vertex,start_instance);
 }
 
 /* ---------------------------------------------------------------- device hooks */
@@ -1255,6 +1261,7 @@ static HRESULT STDMETHODCALLTYPE hook_CreateSwapChainForHwnd(IDXGIFactory2 *f, I
         log_msg("swap chain %ux%u format %d hooked", desc->Width, desc->Height, (int)desc->Format);
         dlss_sr_note_swapchain(desc->Width, desc->Height);
         fg_trace_swapchain(*sc, device);
+        visible_swapchain(*sc,device);
     }
     return hr;
 }

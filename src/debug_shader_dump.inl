@@ -1,6 +1,6 @@
 /* Opt-in local disassembly of recognized temporal passes and exact FH2
    postprocess candidates. Does not issue GPU commands or upload data. */
-#define AZSD_LIMIT 16
+#define AZSD_LIMIT 40
 #define AZSD_MAX_BYTES (1024u*1024u)
 static SRWLOCK azsd_lock=SRWLOCK_INIT;
 static int azsd_enabled,azsd_folder_ready;
@@ -76,11 +76,19 @@ static void azsd_dump(const D3D12_SHADER_BYTECODE *s,char stage,const DWORD hash
     }else log_msg("DEBUG SHADER_DUMP skipped file=%s (size or path limit)",filename);
     ID3D10Blob_Release(code);
 }
+/* Diagnostic selection only: observed 671/672 overlay and small
+   auxiliary pass hashes. Never use these prefixes to authorize draws. */
+static int azsd_hud_candidate(const AztPso *p){
+    static const DWORD ps[]={0x117c5517,0x5d0b144f,0x63e8c8ed,0x6fe1ad18,0xb276dc3a,0xdceb99b4,0xe792b40f,0xe86fb202,0x2c4e97c6,0xcd61498f,0xf28be0e9};
+    for(unsigned i=0;i<sizeof(ps)/sizeof(ps[0]);++i)if(p->hash[0]==ps[i])return 1;
+    return 0;
+}
 static void debug_shader_dump_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc,int role) {
     if(!azsd_enabled||!desc)return;
     AztPso candidate;memset(&candidate,0,sizeof(candidate));
     if(!azsd_hash(&desc->PS,candidate.hash)||!azsd_hash(&desc->VS,candidate.vs_hash))return;
-    if(role==ROLE_NONE&&!azfg_known_candidate(&candidate))return;
+    char visible[8];DWORD n=GetEnvironmentVariableA("AZIMUTH_DEBUG_VISIBLE_SR",visible,sizeof(visible));
+    if(role==ROLE_NONE&&!azfg_known_candidate(&candidate)&&!(n==1&&visible[0]=='1'&&azsd_hud_candidate(&candidate)))return;
     AcquireSRWLockExclusive(&azsd_lock);
     azsd_dump(&desc->PS,'p',candidate.hash);azsd_dump(&desc->VS,'v',candidate.vs_hash);
     ReleaseSRWLockExclusive(&azsd_lock);

@@ -194,7 +194,7 @@ static int azrp_restore_ok(const ListState *s,const AztRoot *root,uint64_t bound
    descriptor identity, producer and complete restoration gates. No path
    switches the game's root signature or writes a game descriptor.
    Preflight logs independent failures even when execution is blocked. */
-static int azrp_prepare_bindings(ListState *s,ID3D12Resource *scene,ID3D12Resource *snapshot,AzrpBindings *out,unsigned long long resolve,int producer_ready,int draw_ready){
+static int azrp_prepare_bindings(ListState *s,ID3D12Resource *scene,ID3D12Resource *snapshot,AzrpBindings *out,unsigned long long resolve,int producer_ready,int draw_ready,int verbose){
     memset(out,0,sizeof(*out));
     if(!azrp_sr_enabled||!s)return 0;
     AzrpRootEvidence evidence;memset(&evidence,0,sizeof(evidence));
@@ -214,7 +214,7 @@ static int azrp_prepare_bindings(ListState *s,ID3D12Resource *scene,ID3D12Resour
     uint64_t cv=azrp_valid_tables(s,cr,s->trace_compute_mask,s->trace_compute_tables);
     int graphics_ok=azrp_restore_ok(s,gr,s->trace_tables_mask,gv);
     int compute_ok=s->compute_rs?azrp_restore_ok(s,cr,s->trace_compute_mask,cv):s->trace_bindings_known&&!s->trace_bindings_uncertain&&!s->trace_compute_mask;
-    log_msg("POSTFX SR_RESTORE resolve=%llu epochKnown=%d uncertain=%d graphicsDeclared=0x%016llx graphicsBound=0x%016llx graphicsValid=0x%016llx graphicsUnbound=0x%016llx computeDeclared=0x%016llx computeBound=0x%016llx computeValid=0x%016llx computeUnbound=0x%016llx",
+    if(verbose)log_msg("POSTFX SR_RESTORE resolve=%llu epochKnown=%d uncertain=%d graphicsDeclared=0x%016llx graphicsBound=0x%016llx graphicsValid=0x%016llx graphicsUnbound=0x%016llx computeDeclared=0x%016llx computeBound=0x%016llx computeValid=0x%016llx computeUnbound=0x%016llx",
         resolve,s->trace_bindings_known,s->trace_bindings_uncertain,(unsigned long long)(gr?gr->tables_all:0),(unsigned long long)s->trace_tables_mask,(unsigned long long)gv,
         (unsigned long long)(gr?gr->tables_all&~s->trace_tables_mask:0),(unsigned long long)(cr?cr->tables_all:0),(unsigned long long)s->trace_compute_mask,(unsigned long long)cv,
         (unsigned long long)(cr?cr->tables_all&~s->trace_compute_mask:0));
@@ -229,16 +229,16 @@ static int azrp_prepare_bindings(ListState *s,ID3D12Resource *scene,ID3D12Resour
         }
     }
     int heap_ok=orig&&orig->gpu&&orig->inc==azrp_shadow_inc&&!duplicate;
-    log_msg("POSTFX SR_PREFLIGHT resolve=%llu root=%p registered=%d objectLayout=%d registryCount=%u registryCapacity=%u traceIncomplete=%d descriptorUsed=%u graphicsRestore=%d graphicsMask=0x%016llx graphicsRequired=0x%016llx computeRestore=%d computeMask=0x%016llx computeRequired=0x%016llx bindings=%d heap=%d heapCount=%u producerReady=%d snapshot=%d drawReady=%d",
+    if(verbose)log_msg("POSTFX SR_PREFLIGHT resolve=%llu root=%p registered=%d objectLayout=%d registryCount=%u registryCapacity=%u traceIncomplete=%d descriptorUsed=%u graphicsRestore=%d graphicsMask=0x%016llx graphicsRequired=0x%016llx computeRestore=%d computeMask=0x%016llx computeRequired=0x%016llx bindings=%d heap=%d heapCount=%u producerReady=%d snapshot=%d drawReady=%d",
         resolve,(void *)s->trace_graphics_rs,cached!=NULL,object_known,azrp_root_count,(unsigned)AZRP_ROOTS,azt_incomplete,azt_desc_used,
         graphics_ok,(unsigned long long)s->trace_tables_mask,(unsigned long long)(gr?gr->tables_all:0),compute_ok,(unsigned long long)s->trace_compute_mask,(unsigned long long)(cr?cr->tables_all:0),
         bindings_ok,heap_ok,orig?orig->count:0,producer_ready,snapshot!=NULL,draw_ready);
     if(object_known){
-        log_msg("POSTFX SR_SCHEMA resolve=%llu root=%p version=%u flags=0x%x parameters=%u rows=%u truncated=%u",
+        if(verbose)log_msg("POSTFX SR_SCHEMA resolve=%llu root=%p version=%u flags=0x%x parameters=%u rows=%u truncated=%u",
             resolve,(void *)s->trace_graphics_rs,evidence.version,evidence.flags,evidence.parameters,evidence.rows,evidence.overflow);
         for(UINT i=0;i<evidence.rows;++i){
             const AzrpSchemaRow *x=&evidence.row[i];
-            log_msg("POSTFX SR_SCHEMA_ROW resolve=%llu root=%p index=%u vis=%u type=%u reg=%u space=%u count=%u offset=%u kind=%u",
+            if(verbose)log_msg("POSTFX SR_SCHEMA_ROW resolve=%llu root=%p index=%u vis=%u type=%u reg=%u space=%u count=%u offset=%u kind=%u",
                 resolve,(void *)s->trace_graphics_rs,x->root,x->visibility,x->type,x->reg,x->space,x->count,x->offset,x->kind);
         }
     }
@@ -251,7 +251,7 @@ static int azrp_prepare_bindings(ListState *s,ID3D12Resource *scene,ID3D12Resour
     unsigned bad_a,bad_b,bad_c;
     AzrbFinish a=azrb_finish_detail(l,base_a,&total_a,&mask_a,&bad_a);
     AzrbFinish c=azrb_finish_limit(l,base_c,&total_c,&mask_c,&bad_c,AZRB_FALLBACK_LIMIT);
-    if(a!=AZRB_FINISH_OK)azrp_log_layout_failure(s->trace_graphics_rs,l,a,bad_a,resolve,"replay");
+    if(verbose&&a!=AZRB_FINISH_OK)azrp_log_layout_failure(s->trace_graphics_rs,l,a,bad_a,resolve,"replay");
     AzrbLayout physical_layout;unsigned project_bad=UINT32_MAX;int projected=0;
     /* If the full-layout parser rejected the root, independently resolve
        the shader requirements against the saved original ranges. Only the
@@ -260,7 +260,7 @@ static int azrp_prepare_bindings(ListState *s,ID3D12Resource *scene,ID3D12Resour
     AzrbFinish semantic=azrb_finish_limit(l,unused_base,&unused_total,&unused_mask,&unused_req,0);
     if(semantic!=AZRB_FINISH_OK&&object_known){
         projected=azrb_project_schema(&physical_layout,evidence.row,evidence.rows,evidence.parameters,evidence.flags,evidence.overflow,&project_bad);
-        log_msg("POSTFX SR_SCHEMA_PROJECT resolve=%llu original=%s projected=%d req=%u",resolve,azrb_finish_name(semantic),projected,project_bad);
+        if(verbose)log_msg("POSTFX SR_SCHEMA_PROJECT resolve=%llu original=%s projected=%d req=%u",resolve,azrb_finish_name(semantic),projected,project_bad);
         if(projected)l=&physical_layout;
     }
     for(unsigned i=0;i<AZRB_TABLES;++i){
@@ -315,18 +315,18 @@ static int azrp_prepare_bindings(ListState *s,ID3D12Resource *scene,ID3D12Resour
             }
         }
         if(!ok)errors|=1u<<i;
-        if(q->mode==AZRB_DIRECT||q->mode==AZRB_CONSTANT)log_msg("POSTFX SR_ROOT_ARG resolve=%llu req=%u index=%u mode=%u cbv=0x%016llx words=0x%016llx observed=%d",resolve,i,q->root,q->mode,(unsigned long long)(q->root<AZRB_TABLES&&q->mode==AZRB_DIRECT?s->trace_graphics_cbv[q->root]:0),(unsigned long long)(q->root<AZRB_TABLES?s->trace_graphics_constant_words[q->root]:0),ok);
-        log_msg("POSTFX SR_REQ resolve=%llu root=%p req=%u stage=%u type=%u reg=%u mode=%u tableRoot=%u offset=%u span=%u physical=%u shadow=%u shadowType=%u resource=%p ok=%d reason=%s",
+        if(verbose&&(q->mode==AZRB_DIRECT||q->mode==AZRB_CONSTANT))log_msg("POSTFX SR_ROOT_ARG resolve=%llu req=%u index=%u mode=%u cbv=0x%016llx words=0x%016llx observed=%d",resolve,i,q->root,q->mode,(unsigned long long)(q->root<AZRB_TABLES&&q->mode==AZRB_DIRECT?s->trace_graphics_cbv[q->root]:0),(unsigned long long)(q->root<AZRB_TABLES?s->trace_graphics_constant_words[q->root]:0),ok);
+        if(verbose)log_msg("POSTFX SR_REQ resolve=%llu root=%p req=%u stage=%u type=%u reg=%u mode=%u tableRoot=%u offset=%u span=%u physical=%u shadow=%u shadowType=%u resource=%p ok=%d reason=%s",
             resolve,(void *)s->trace_graphics_rs,i,q->stage,q->type,q->reg,q->mode,q->root,q->offset,q->root<AZRB_TABLES?l->span[q->root]:0,
             physical,source[i]?source[i]->shadow:0,source[i]?source[i]->shadow_type:UINT_MAX,source[i]?(void *)source[i]->res:NULL,ok,reason);
     }
     int common=bindings_ok&&graphics_ok&&compute_ok&&heap_ok&&!azt_incomplete&&!errors&&producer_ready&&snapshot&&scene&&draw_ready;
     int available[3]={!projected&&a==AZRB_FINISH_OK&&!strict_errors,b==AZRB_REBASE_OK,!projected&&c==AZRB_FINISH_OK};
-    log_msg("POSTFX SR_PLAN resolve=%llu path=A_compact layout=%s req=%u entries=%u descriptorErrors=0x%05x common=%d candidate=%d",
+    if(verbose)log_msg("POSTFX SR_PLAN resolve=%llu path=A_compact layout=%s req=%u entries=%u descriptorErrors=0x%05x common=%d candidate=%d",
         resolve,azrb_finish_name(a),bad_a,total_a,errors|strict_errors,common,available[0]);
-    log_msg("POSTFX SR_PLAN resolve=%llu path=B_physical layout=%s req=%u entries=%u descriptorErrors=0x%05x common=%d candidate=%d",
+    if(verbose)log_msg("POSTFX SR_PLAN resolve=%llu path=B_physical layout=%s req=%u entries=%u descriptorErrors=0x%05x common=%d candidate=%d",
         resolve,azrb_rebase_name(b),bad_b,orig?orig->count:0,errors,common,available[1]);
-    log_msg("POSTFX SR_PLAN resolve=%llu path=C_extended layout=%s req=%u entries=%u descriptorErrors=0x%05x common=%d candidate=%d",
+    if(verbose)log_msg("POSTFX SR_PLAN resolve=%llu path=C_extended layout=%s req=%u entries=%u descriptorErrors=0x%05x common=%d candidate=%d",
         resolve,azrb_finish_name(c),bad_c,total_c,errors,common,available[2]);
     if(!common){
         const char *reason=azt_incomplete?"trace_incomplete":!draw_ready?"original_draw_gate":!producer_ready||!snapshot?"producer_not_ready":

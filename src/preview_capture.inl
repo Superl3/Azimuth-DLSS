@@ -2,7 +2,7 @@
    recording has its own batch and completion fence. A reused COM pointer
    is not a recording identity. Readback never guesses queue/state. */
 #include "preview_batch_policy.h"
-#define AZPV_GROUPS 2
+#define AZPV_GROUPS AZPV_CAPTURE_COUNT
 #define AZPV_SHOTS 11
 #define AZPV_LIVE 4
 #define AZPV_TOTAL (AZPV_GROUPS+AZPV_LIVE)
@@ -33,7 +33,7 @@ typedef struct {
     ID3D12Resource *scene,*sr_snapshot; /* retained to process exit */
     AzpvBatch *core_batch;
     uintptr_t postfx,composite;
-    unsigned postfx_seen,requested_mask;
+    unsigned postfx_seen,requested_mask,closed;
     AzvisFrame visible;
 } AzpvGroup;
 static SRWLOCK azpv_lock=SRWLOCK_INIT;
@@ -62,7 +62,7 @@ static int preview_format(DXGI_FORMAT f) {
            f==DXGI_FORMAT_R10G10B10A2_TYPELESS||f==DXGI_FORMAT_R10G10B10A2_UNORM;
 }
 static int preview_add(AzpvBatch *g,ID3D12Resource *res,D3D12_RESOURCE_STATES state,const char *name) {
-    if(!res||g->count>=AZPV_SHOTS)return 0;
+    if(!res||!real_CopyTextureRegion||g->count>=AZPV_SHOTS)return 0;
     D3D12_RESOURCE_DESC d;res->lpVtbl->GetDesc(res,&d);
     if(d.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D||!d.Width||d.Width>7680||
        !d.Height||d.Height>4320||d.DepthOrArraySize!=1||d.MipLevels!=1||
@@ -83,7 +83,7 @@ static int preview_add(AzpvBatch *g,ID3D12Resource *res,D3D12_RESOURCE_STATES st
     src.pResource=res;src.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;src.SubresourceIndex=0;
     dst.pResource=s.buffer;dst.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;dst.PlacedFootprint=s.footprint;
     if(state!=D3D12_RESOURCE_STATE_COPY_SOURCE)hooks_transition(g->list,res,state,D3D12_RESOURCE_STATE_COPY_SOURCE);
-    g->list->lpVtbl->CopyTextureRegion(g->list,&dst,0,0,0,&src,NULL);
+    real_CopyTextureRegion(g->list,&dst,0,0,0,&src,NULL);
     if(state!=D3D12_RESOURCE_STATE_COPY_SOURCE)hooks_transition(g->list,res,D3D12_RESOURCE_STATE_COPY_SOURCE,state);
     g->shots[g->count++]=s;azpv_bytes+=s.total;
     log_msg("PREVIEW RECORD resolve=%llu stage=%s size=%ux%u format=%u bytes=%llu",g->resolve,name,s.w,s.h,s.format,(unsigned long long)s.total);
@@ -140,9 +140,9 @@ static int preview_sr_ready(const AzpvGroup *g,ID3D12GraphicsCommandList *cl,uns
 /* Only live groups are recycled. Both recordings must be retired and
    complete. Failed or repeated submissions quarantine the slot until
    exit; never free a resource on an ambiguous fence. */
-static void preview_reap_live(void){
+static void preview_reap_live(unsigned long long retire_before){
     for(unsigned g=AZPV_GROUPS;g<AZPV_TOTAL;++g){
-        AzpvGroup *p=&azpv_groups[g];if(!p->resolve)continue;
+        AzpvGroup *p=&azpv_groups[g];if(!azpv_group_retirable(p->resolve,retire_before,p->closed))continue;
         int ready=1;
         for(unsigned i=0;i<azpv_batch_count;++i){
             AzpvBatch *b=&azpv_batches[i];
@@ -155,6 +155,7 @@ static void preview_reap_live(void){
             if(!b->life.state||b->group!=g)continue;
             ID3D12Fence_Release(b->fence);ID3D12GraphicsCommandList_Release(b->list);memset(b,0,sizeof(*b));
         }
+        if(p->visible.routed)log_msg("VISIBLE FINAL_GPU_COMPLETE resolve=%llu target=%p liveSlot=%u",p->resolve,(void *)p->visible.target_id,g);
         if(p->scene)ID3D12Resource_Release(p->scene);
         if(p->sr_snapshot)ID3D12Resource_Release(p->sr_snapshot);
         visible_release(&p->visible);
@@ -175,7 +176,7 @@ void hooks_preview_record(ID3D12GraphicsCommandList *cl,ID3D12Resource *color,ID
     ReleaseSRWLockExclusive(&azt_lock);
     if(!wanted&&!live)return;
     AcquireSRWLockExclusive(&azpv_lock);
-    preview_reap_live();
+    preview_reap_live(resolve);
     for(unsigned i=0;i<AZPV_TOTAL;++i)if(azpv_groups[i].resolve==resolve)goto done;
     unsigned group=AZPV_TOTAL;
     if(wanted&&azpv_count<AZPV_GROUPS&&!azpv_done)group=azpv_count++;
@@ -255,7 +256,7 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
         /* Identity correlation must not depend on the upstream readback
            succeeding. This does not establish a resource lifetime or state. */
         if(chain&&!(missing&(1u|4u|8u|64u))){
-            if(bit==1)g->postfx=identity;
+            if(bit==1){g->postfx=identity;if(capture)visible_note_hud(identity,resolve);}
             if(bit==2)g->composite=identity;
         }
         log_msg("PREVIEW POSTFX_GATE resolve=%llu stage=%s missing=0x%02x chain=%d rtv=%u vp=%u sc=%u topology=%u state=%d known=%d recording=%d t0matches=%u startZero=%d",
@@ -284,7 +285,7 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
                 AzrpBindings bindings;
                 /* Independent preflight runs even when the producer or
                    draw gate prevents any replay work. */
-                if(azrp_prepare_bindings(s,g->scene,g->sr_snapshot,&bindings,resolve,producer_ready,draw_ready&&batch!=NULL)){
+                if(azrp_prepare_bindings(s,g->scene,g->sr_snapshot,&bindings,resolve,producer_ready,draw_ready&&batch!=NULL,capture)){
                     ID3D12Resource *image=postfx_replay_draw(cl,s,resolve,&bindings,g->visible.enabled?&g->visible.sr_surface:NULL);
                     if(!image){ID3D12DescriptorHeap_Release(bindings.heap);log_msg("POSTFX SR_REPLAY SKIP resolve=%llu reason=draw path=%u",resolve,bindings.path);}
                     else{
@@ -296,12 +297,14 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
             }
         }
         if(g->visible.enabled&&bit==2&&chain&&!missing&&target)visible_composite(&g->visible,cl,s,target,resolve);
+        if(bit==4)g->closed=1;
         if(g->visible.enabled&&bit==4){
             g->requested_mask|=1536u;
             if(hash==0xa93721c4&&chain&&!missing&&target&&g->visible.pre_ready&&g->visible.composite_ready&&
                g->visible.list==cl&&g->visible.recording==s->trace_recording_id){
                 AzpvBatch *batch=preview_batch(i,cl,s->trace_recording_id);
                 if(batch&&visible_finalize(&g->visible,cl,s,input,target,resolve)){
+                    visible_note_final(target,cl,s->trace_recording_id,resolve);
                     if(capture){
                         if(!preview_add(batch,g->visible.merged,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,"visiblehud"))log_msg("VISIBLE SKIP resolve=%llu stage=visiblehud reason=readback",resolve);
                         if(!preview_add(batch,target,D3D12_RESOURCE_STATE_RENDER_TARGET,"visiblefinal"))log_msg("VISIBLE SKIP resolve=%llu stage=visiblefinal reason=readback",resolve);
@@ -348,6 +351,8 @@ static void preview_execute(ID3D12CommandQueue *q,UINT n,ID3D12CommandList *cons
         else{
             b->queue=(uintptr_t)q;
             log_msg("PREVIEW SUBMITTED resolve=%llu queue=%p list=%p batch=%u recording=%llu",b->resolve,(void *)q,(void *)b->list,i+1,b->recording);
+            AzvisFrame *v=&azpv_groups[b->group].visible;
+            if(v->routed&&v->recording==b->recording&&v->list==b->list)log_msg("VISIBLE FINAL_SUBMITTED resolve=%llu target=%p queue=%p list=%p recording=%llu fence=%p qpc=%lld",b->resolve,(void *)v->target_id,(void *)q,(void *)b->list,b->recording,(void *)b->fence,azvis_qpc());
         }
     }
     ReleaseSRWLockExclusive(&azpv_lock);
@@ -390,9 +395,11 @@ static void preview_poll(void) {
     if(!dlss_sr_preview_mode())return;
     AcquireSRWLockExclusive(&azt_lock);
     int ended=azdbg.id!=0&&!azdbg.active;
+    unsigned long long retire_before=azt_frame;
     ReleaseSRWLockExclusive(&azt_lock);
+    visible_poll_present();
     AcquireSRWLockExclusive(&azpv_lock);
-    preview_reap_live();
+    preview_reap_live(retire_before);
     if(azpv_done)goto done;
     unsigned pending=0,files=0,good_groups=0,failed_groups=0;
     unsigned saved_mask[AZPV_GROUPS]={0};
@@ -413,6 +420,8 @@ static void preview_poll(void) {
                 }
                 b->life.state=b->good?PV_SAVED:PV_FAILED;
                 log_msg("PREVIEW SAVED resolve=%llu files=%u requested=%u fenceComplete=1 batch=%u recording=%llu",b->resolve,b->good,b->count,i+1,b->recording);
+                AzvisFrame *v=&azpv_groups[b->group].visible;
+                if(v->routed&&v->recording==b->recording&&v->list==b->list)log_msg("VISIBLE FINAL_GPU_COMPLETE resolve=%llu target=%p batch=%u",b->resolve,(void *)v->target_id,i+1);
             }
         }
         if((b->life.state==PV_RECORDED||b->life.state==PV_SUBMITTED)&&now-b->started>=20000){

@@ -28,6 +28,13 @@ int main(void) {
     assert(!azpv_source_ready((AzpvBatchLife){PV_SUBMITTED,0},5,6,1,0));
     assert(azpv_source_ready((AzpvBatchLife){PV_SUBMITTED,0},5,6,1,1));
     assert(!azpv_source_ready((AzpvBatchLife){PV_FAILED,0},5,6,1,1));
+    assert(!azpv_group_retirable(671,671,0));
+    assert(azpv_group_retirable(671,672,0));
+    assert(azpv_group_retirable(671,671,1));
+    assert(!azpv_group_retirable(0,672,1));
+    assert(azpv_adjacent_work(88,89));
+    assert(!azpv_adjacent_work(88,90));
+    assert(!azpv_adjacent_work(UINT64_MAX,0));
     puts("PASS: independent recording batches, reset, submit, repeated submit, immutable SR source and fence policy");
     return 0;
 }
