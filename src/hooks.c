@@ -14,6 +14,7 @@
 
 #include "game_profile.h"
 #include "common.h"
+#include "replay_binding_policy.h"
 
 HMODULE proxy_system_dxgi(void);
 
@@ -122,6 +123,11 @@ static void(STDMETHODCALLTYPE *real_SetComputeRootSignature)(ID3D12GraphicsComma
 static void(STDMETHODCALLTYPE *real_SetGraphicsRootSignature)(ID3D12GraphicsCommandList *, ID3D12RootSignature *);
 static void(STDMETHODCALLTYPE *real_SetGraphicsRootDescriptorTable)(ID3D12GraphicsCommandList *, UINT, D3D12_GPU_DESCRIPTOR_HANDLE);
 static void(STDMETHODCALLTYPE *real_SetComputeRootDescriptorTable)(ID3D12GraphicsCommandList *,UINT,D3D12_GPU_DESCRIPTOR_HANDLE);
+static void(STDMETHODCALLTYPE *real_SetGraphicsRootConstantBufferView)(ID3D12GraphicsCommandList *,UINT,D3D12_GPU_VIRTUAL_ADDRESS);
+static void(STDMETHODCALLTYPE *real_SetGraphicsRoot32BitConstant)(ID3D12GraphicsCommandList *,UINT,UINT,UINT);
+static void(STDMETHODCALLTYPE *real_SetGraphicsRoot32BitConstants)(ID3D12GraphicsCommandList *,UINT,UINT,const void *,UINT);
+static void(STDMETHODCALLTYPE *real_ClearState)(ID3D12GraphicsCommandList *,ID3D12PipelineState *);
+static HRESULT(STDMETHODCALLTYPE *real_CreateDescriptorHeap)(ID3D12Device *,const D3D12_DESCRIPTOR_HEAP_DESC *,REFIID,void **);
 static void(STDMETHODCALLTYPE *real_CreateShaderResourceView)(ID3D12Device *,ID3D12Resource *,const D3D12_SHADER_RESOURCE_VIEW_DESC *,D3D12_CPU_DESCRIPTOR_HANDLE);
 static void(STDMETHODCALLTYPE *real_CreateUnorderedAccessView)(ID3D12Device *,ID3D12Resource *,ID3D12Resource *,const D3D12_UNORDERED_ACCESS_VIEW_DESC *,D3D12_CPU_DESCRIPTOR_HANDLE);
 static void(STDMETHODCALLTYPE *real_CreateConstantBufferView)(ID3D12Device *,const D3D12_CONSTANT_BUFFER_VIEW_DESC *,D3D12_CPU_DESCRIPTOR_HANDLE);
@@ -343,12 +349,14 @@ typedef struct {
     ID3D12DescriptorHeap *heaps[2];
     ID3D12RootSignature *compute_rs;
     UINT tables_mask;
-    D3D12_GPU_DESCRIPTOR_HANDLE tables[32];
+    D3D12_GPU_DESCRIPTOR_HANDLE tables[AZRB_TABLES];
     /* Separate tracking so the legacy DLAA restore path is not changed. */
     ID3D12RootSignature *trace_graphics_rs;
-    UINT trace_tables_mask,trace_compute_mask;
-    int trace_bindings_uncertain;
-    D3D12_GPU_DESCRIPTOR_HANDLE trace_compute_tables[32];
+    uint64_t trace_tables_mask,trace_compute_mask,trace_graphics_cbv_mask;
+    int trace_bindings_uncertain,trace_bindings_known;
+    D3D12_GPU_DESCRIPTOR_HANDLE trace_compute_tables[AZRB_TABLES];
+    D3D12_GPU_VIRTUAL_ADDRESS trace_graphics_cbv[AZRB_TABLES];
+    uint64_t trace_graphics_constant_words[AZRB_TABLES];
     unsigned long long trace_recording_id;
     D3D_PRIMITIVE_TOPOLOGY trace_topology;
     UINT trace_queries;
@@ -517,7 +525,7 @@ static HRESULT STDMETHODCALLTYPE hook_Reset(ID3D12GraphicsCommandList *cl, ID3D1
         s->pso = pso;
     }
     HRESULT hr=real_Reset(cl,a,pso);
-    if(SUCCEEDED(hr))preview_reset(cl);
+    if(SUCCEEDED(hr)){if(s)s->trace_bindings_known=1;preview_reset(cl);}
     return hr;
 }
 
@@ -604,14 +612,17 @@ static void STDMETHODCALLTYPE hook_SetComputeRootSignature(ID3D12GraphicsCommand
 
 static void STDMETHODCALLTYPE hook_SetComputeRootDescriptorTable(ID3D12GraphicsCommandList *cl,UINT index,D3D12_GPU_DESCRIPTOR_HANDLE base){
     ListState *s=state_for(cl);
-    if(s&&index<32&&base.ptr){s->trace_compute_tables[index]=base;s->trace_compute_mask|=1u<<index;}
+    if(s&&index<AZRB_TABLES&&base.ptr){s->trace_compute_tables[index]=base;s->trace_compute_mask|=azrb_bit(index);}
     else if(s)s->trace_bindings_uncertain=1;
     real_SetComputeRootDescriptorTable(cl,index,base);
 }
 static void STDMETHODCALLTYPE hook_SetGraphicsRootSignature(ID3D12GraphicsCommandList *cl, ID3D12RootSignature *rs) {
     ListState *s = state_for(cl);
     if (s) {
-        if(!azrp_sr_enabled||s->trace_graphics_rs!=rs){s->tables_mask=0;s->trace_tables_mask=0;}
+        if(!azrp_sr_enabled||s->trace_graphics_rs!=rs){
+            s->tables_mask=0;s->trace_tables_mask=0;s->trace_graphics_cbv_mask=0;
+            memset(s->trace_graphics_constant_words,0,sizeof(s->trace_graphics_constant_words));
+        }
         s->trace_graphics_rs=rs;
     }
     real_SetGraphicsRootSignature(cl, rs);
@@ -620,13 +631,49 @@ static void STDMETHODCALLTYPE hook_SetGraphicsRootSignature(ID3D12GraphicsComman
 static void STDMETHODCALLTYPE hook_SetGraphicsRootDescriptorTable(ID3D12GraphicsCommandList *cl, UINT index,
                                                                   D3D12_GPU_DESCRIPTOR_HANDLE base) {
     ListState *s = state_for(cl);
-    if(s&&(index>=32||!base.ptr))s->trace_bindings_uncertain=1;
-    if (s && index < 32) {
-        s->tables[index] = base;
-        s->tables_mask |= 1u << index;
-        s->trace_tables_mask |= 1u << index;
+    if(s&&(index>=AZRB_TABLES||!base.ptr))s->trace_bindings_uncertain=1;
+    if(s&&index<AZRB_TABLES){
+        s->tables[index]=base;
+        if(index<32)s->tables_mask|=1u<<index;
+        if(base.ptr)s->trace_tables_mask|=azrb_bit(index);
+        else s->trace_tables_mask&=~azrb_bit(index);
     }
     real_SetGraphicsRootDescriptorTable(cl, index, base);
+}
+/* Native direct arguments do not depend on a descriptor heap. Track their
+   presence instead of inventing a CPU descriptor for a root CBV. */
+static void STDMETHODCALLTYPE hook_SetGraphicsRootConstantBufferView(ID3D12GraphicsCommandList *cl,UINT index,D3D12_GPU_VIRTUAL_ADDRESS va){
+    ListState *s=state_for(cl);
+    if(s&&index<AZRB_TABLES){
+        s->trace_graphics_cbv[index]=va;
+        if(va&&!(va&255u))s->trace_graphics_cbv_mask|=azrb_bit(index);
+        else s->trace_graphics_cbv_mask&=~azrb_bit(index);
+    }else if(s)s->trace_bindings_uncertain=1;
+    real_SetGraphicsRootConstantBufferView(cl,index,va);
+}
+static void STDMETHODCALLTYPE hook_SetGraphicsRoot32BitConstant(ID3D12GraphicsCommandList *cl,UINT index,UINT value,UINT offset){
+    ListState *s=state_for(cl);uint64_t words=azrb_words(offset,1);
+    if(s&&index<AZRB_TABLES&&words)s->trace_graphics_constant_words[index]|=words;
+    else if(s)s->trace_bindings_uncertain=1;
+    real_SetGraphicsRoot32BitConstant(cl,index,value,offset);
+}
+static void STDMETHODCALLTYPE hook_SetGraphicsRoot32BitConstants(ID3D12GraphicsCommandList *cl,UINT index,UINT count,const void *data,UINT offset){
+    ListState *s=state_for(cl);uint64_t words=azrb_words(offset,count);
+    if(s&&index<AZRB_TABLES&&words&&data)s->trace_graphics_constant_words[index]|=words;
+    else if(s&&count)s->trace_bindings_uncertain=1;
+    real_SetGraphicsRoot32BitConstants(cl,index,count,data,offset);
+}
+static void STDMETHODCALLTYPE hook_ClearState(ID3D12GraphicsCommandList *cl,ID3D12PipelineState *pso){
+    real_ClearState(cl,pso);
+    ListState *s=state_for(cl);
+    if(s){
+        /* ClearState does not close or reset the physical recording.
+           Retain its ID but require a new Reset for replay certainty. */
+        unsigned long long recording=s->trace_recording_id;
+        memset((char *)s+sizeof(s->list),0,sizeof(*s)-sizeof(s->list));
+        s->trace_recording_id=recording;s->pso=pso;
+        s->trace_bindings_uncertain=1;s->trace_query_unknown=1;
+    }
 }
 
 static void STDMETHODCALLTYPE hook_ResourceBarrier(ID3D12GraphicsCommandList *cl, UINT n, const D3D12_RESOURCE_BARRIER *b) {
@@ -666,14 +713,16 @@ static void restore_after_dlss(ID3D12GraphicsCommandList *cl, ListState *s) {
     }
     if (s->compute_rs) {
         real_SetComputeRootSignature(cl, s->compute_rs);
-        if(azrp_sr_enabled&&real_SetComputeRootDescriptorTable)for(UINT i=0;i<32;++i)
-            if(s->trace_compute_mask&(1u<<i))real_SetComputeRootDescriptorTable(cl,i,s->trace_compute_tables[i]);
+        if(azrp_sr_enabled&&real_SetComputeRootDescriptorTable)for(UINT i=0;i<AZRB_TABLES;++i)
+            if(s->trace_compute_mask&azrb_bit(i))real_SetComputeRootDescriptorTable(cl,i,s->trace_compute_tables[i]);
     }
     for (UINT i = 0; i < 32; ++i) {
         if (s->tables_mask & (1u << i)) {
             real_SetGraphicsRootDescriptorTable(cl, i, s->tables[i]);
         }
     }
+    if(azrp_sr_enabled&&s->trace_graphics_rs)for(UINT i=32;i<AZRB_TABLES;++i)
+        if(s->trace_tables_mask&azrb_bit(i))real_SetGraphicsRootDescriptorTable(cl,i,s->tables[i]);
     real_SetPipelineState(cl, s->pso);
 }
 
@@ -997,7 +1046,17 @@ static void run_dlss(ID3D12GraphicsCommandList *cl, ListState *s) {
     InterlockedExchange(&scene_depth_state, depth_state);
     if (s->trace_graphics_rs != saved.trace_graphics_rs) {
         saved.trace_graphics_rs=NULL; saved.trace_tables_mask=0;
-    } else saved.trace_tables_mask &= saved.tables_mask;
+        saved.trace_bindings_uncertain=1;
+    } else if(!azrp_sr_enabled) saved.trace_tables_mask &= saved.tables_mask;
+    if(azrp_sr_enabled){
+        /* NGX may change direct root arguments. This legacy restoration
+           is not proof of their values; require subsequent native binds
+           before accepting the SR replay. If a root signature changed,
+           an entire recording is uncertain until reset. */
+        saved.trace_graphics_cbv_mask=0;
+        memset(saved.trace_graphics_constant_words,0,sizeof(saved.trace_graphics_constant_words));
+        if(s->compute_rs!=saved.compute_rs||s->trace_bindings_uncertain)saved.trace_bindings_uncertain=1;
+    }
     *s = saved;
     restore_after_dlss(cl, s);
 
@@ -1075,7 +1134,13 @@ static void hook_command_list(ID3D12GraphicsCommandList *cl) {
     patch_slot(VT_SLOT(cl, ID3D12GraphicsCommandListVtbl, SetComputeRootSignature), (void *)hook_SetComputeRootSignature, (void **)&real_SetComputeRootSignature);
     patch_slot(VT_SLOT(cl, ID3D12GraphicsCommandListVtbl, SetGraphicsRootSignature), (void *)hook_SetGraphicsRootSignature, (void **)&real_SetGraphicsRootSignature);
     patch_slot(VT_SLOT(cl, ID3D12GraphicsCommandListVtbl, SetGraphicsRootDescriptorTable), (void *)hook_SetGraphicsRootDescriptorTable, (void **)&real_SetGraphicsRootDescriptorTable);
-    if(azrp_sr_enabled)patch_slot(VT_SLOT(cl, ID3D12GraphicsCommandListVtbl, SetComputeRootDescriptorTable),(void *)hook_SetComputeRootDescriptorTable,(void **)&real_SetComputeRootDescriptorTable);
+    if(azrp_sr_enabled){
+        patch_slot(VT_SLOT(cl,ID3D12GraphicsCommandListVtbl,SetComputeRootDescriptorTable),(void *)hook_SetComputeRootDescriptorTable,(void **)&real_SetComputeRootDescriptorTable);
+        patch_slot(VT_SLOT(cl,ID3D12GraphicsCommandListVtbl,SetGraphicsRootConstantBufferView),(void *)hook_SetGraphicsRootConstantBufferView,(void **)&real_SetGraphicsRootConstantBufferView);
+        patch_slot(VT_SLOT(cl,ID3D12GraphicsCommandListVtbl,SetGraphicsRoot32BitConstant),(void *)hook_SetGraphicsRoot32BitConstant,(void **)&real_SetGraphicsRoot32BitConstant);
+        patch_slot(VT_SLOT(cl,ID3D12GraphicsCommandListVtbl,SetGraphicsRoot32BitConstants),(void *)hook_SetGraphicsRoot32BitConstants,(void **)&real_SetGraphicsRoot32BitConstants);
+        patch_slot(VT_SLOT(cl,ID3D12GraphicsCommandListVtbl,ClearState),(void *)hook_ClearState,(void **)&real_ClearState);
+    }
     sr_trace_hook_list(cl);
 }
 
@@ -1091,7 +1156,7 @@ static HRESULT STDMETHODCALLTYPE hook_CreateCommandList(ID3D12Device *dev, UINT 
             ListState *s = state_for(cl);
             if (s) {
                 if (sr_trace_enabled()) memset((char *)s + sizeof(s->list),0,sizeof(*s)-sizeof(s->list));
-                s->pso = pso;
+                s->pso = pso;s->trace_bindings_known=1;
             }
             ID3D12GraphicsCommandList_Release(cl);
         }

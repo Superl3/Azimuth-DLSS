@@ -3,14 +3,26 @@
 #include <stdint.h>
 #include <string.h>
 #define AZRB_REQS 20u
-#define AZRB_TABLES 32u
+#define AZRB_TABLES 64u
 #define AZRB_HEAP_LIMIT 32768u
 /* D3D12 Tier 3 permits up to one million descriptors in a shader-visible
    resource heap. Bound fallback memory; allocate the actual required count. */
 #define AZRB_FALLBACK_LIMIT 1000000u
 enum {AZRB_SRV=0,AZRB_UAV=1,AZRB_CBV=2,AZRB_SAMPLER=3};
 enum {AZRB_ALL=0,AZRB_VS=1,AZRB_PS=5};
-enum {AZRB_UNBOUND=0,AZRB_TABLE=1,AZRB_DIRECT=2,AZRB_STATIC=3};
+enum {AZRB_UNBOUND=0,AZRB_TABLE=1,AZRB_DIRECT=2,AZRB_STATIC=3,AZRB_CONSTANT=4};
+/* D3D12 root signatures have a 64-DWORD budget, hence at most 64 parameters. */
+static inline uint64_t azrb_bit(unsigned index){return index<AZRB_TABLES?UINT64_C(1)<<index:0;}
+/* A complete epoch starts at successful Reset or CreateCommandList.
+   Undefined, never-bound tables do not need fabricated handles. Every
+   table that actually was bound must be legal and restorable. */
+static inline int azrb_restore_mask_ok(int epoch_known,int uncertain,uint64_t declared,uint64_t bound,uint64_t validated){
+    return epoch_known&&!uncertain&&!(bound&~declared)&&!(bound&~validated);
+}
+static inline uint64_t azrb_words(unsigned first,unsigned count){
+    if(!count||first>=64||count>64-first)return 0;
+    return (count==64?UINT64_MAX:(UINT64_C(1)<<count)-1)<<first;
+}
 typedef struct {unsigned stage,type,reg,mode,root,offset;} AzrbReq;
 typedef struct {uint32_t root,visibility,type,reg,space,count,offset,kind;} AzrbSchemaRow;
 typedef struct {
@@ -60,6 +72,7 @@ static inline void azrb_range(AzrbLayout *l,unsigned root,unsigned vis,unsigned 
 }
 static inline void azrb_direct(AzrbLayout *l,unsigned root,unsigned vis,unsigned type,unsigned reg,unsigned space,unsigned mode) {
     if(space)return;
+    if(mode!=AZRB_STATIC&&root>=AZRB_TABLES){l->valid=0;return;}
     for(unsigned i=0;i<AZRB_REQS;++i){
         AzrbReq *r=&l->req[i];
         if(r->type==type&&r->reg==reg&&azrb_vis(vis,r->stage))azrb_assign(l,r,mode,root,0);
@@ -89,7 +102,7 @@ static inline const char *azrb_finish_name(AzrbFinish status) {
     return "unknown";
 }
 /* Same acceptance policy as azrb_finish; req_index is diagnostic only. */
-static inline AzrbFinish azrb_finish_limit(const AzrbLayout *l,uint32_t base[AZRB_TABLES],uint32_t *total,uint32_t *mask,unsigned *req_index,uint32_t limit) {
+static inline AzrbFinish azrb_finish_limit(const AzrbLayout *l,uint32_t base[AZRB_TABLES],uint32_t *total,uint64_t *mask,unsigned *req_index,uint32_t limit) {
     *req_index=UINT32_MAX;
     if(!l->valid)return AZRB_FINISH_INVALID;
     if(l->req[0].mode!=AZRB_TABLE){*req_index=0;return AZRB_FINISH_PS_T0;}
@@ -107,15 +120,15 @@ static inline AzrbFinish azrb_finish_limit(const AzrbLayout *l,uint32_t base[AZR
         if(r->mode!=AZRB_TABLE)continue;
         if(r->root>=AZRB_TABLES||r->offset>=l->span[r->root]||!l->kind[r->root]){*req_index=i;return AZRB_FINISH_TABLE;}
         if(l->kind[r->root]!=1)continue;
-        if(*mask&(1u<<r->root))continue;
+        if(*mask&(azrb_bit(r->root)))continue;
         uint32_t n=l->span[r->root];
         if(!n||(limit&&n>limit-*total)){*req_index=i;return AZRB_FINISH_SPAN;}
         if(limit){base[r->root]=*total;*total+=n;}
-        *mask|=1u<<r->root;
+        *mask|=azrb_bit(r->root);
     }
     return *mask!=0?AZRB_FINISH_OK:AZRB_FINISH_EMPTY;
 }
-static inline AzrbFinish azrb_finish_detail(const AzrbLayout *l,uint32_t base[AZRB_TABLES],uint32_t *total,uint32_t *mask,unsigned *req_index) {
+static inline AzrbFinish azrb_finish_detail(const AzrbLayout *l,uint32_t base[AZRB_TABLES],uint32_t *total,uint64_t *mask,unsigned *req_index) {
     return azrb_finish_limit(l,base,total,mask,req_index,AZRB_HEAP_LIMIT);
 }
 /* Independently project ONLY the exact shader requirements from a full
@@ -146,15 +159,15 @@ static inline int azrb_project_schema(AzrbLayout *out,const AzrbSchemaRow *rows,
                 if(slot+1>out->span[x->root])out->span[x->root]=(uint32_t)(slot+1);
                 azrb_assign(out,q,AZRB_TABLE,x->root,(uint32_t)slot);
                 ++matches;
-            }else if(x->reg==q->reg&&(x->kind==AZRB_DIRECT||x->kind==AZRB_STATIC||x->kind==4)){
+            }else if(x->reg==q->reg&&(x->kind==AZRB_DIRECT||x->kind==AZRB_STATIC||x->kind==AZRB_CONSTANT)){
                 if(x->kind!=AZRB_STATIC&&x->root>=parameters){*bad=i;out->valid=0;return 0;}
-                azrb_assign(out,q,x->kind==AZRB_STATIC?AZRB_STATIC:AZRB_DIRECT,x->kind==AZRB_STATIC?0:x->root,0);
+                azrb_assign(out,q,x->kind,x->kind==AZRB_STATIC?0:x->root,0);
                 ++matches;
             }
         }
         if(matches!=1||!out->valid){*bad=i;out->valid=0;return 0;}
     }
-    uint32_t base[AZRB_TABLES],total=0,mask=0;
+    uint32_t base[AZRB_TABLES],total=0;uint64_t mask=0;
     return azrb_finish_limit(out,base,&total,&mask,bad,0)==AZRB_FINISH_OK;
 }
 /* Rebase all referenced original table starts into a heap with the SAME
@@ -162,7 +175,7 @@ static inline int azrb_project_schema(AzrbLayout *out,const AzrbSchemaRow *rows,
    need no duplicate span. Exact required slots still must fit. Reject
    physical aliasing of the replacement slot even across different tables. */
 typedef enum {AZRB_REBASE_OK=0,AZRB_REBASE_LAYOUT,AZRB_REBASE_CAPACITY,AZRB_REBASE_BOUNDS,AZRB_REBASE_ALIAS} AzrbRebase;
-static inline AzrbRebase azrb_rebase(const AzrbLayout *l,const uint32_t original[AZRB_TABLES],uint32_t heap_count,uint32_t *mask,unsigned *bad) {
+static inline AzrbRebase azrb_rebase(const AzrbLayout *l,const uint32_t original[AZRB_TABLES],uint32_t heap_count,uint64_t *mask,unsigned *bad) {
     uint32_t unused[AZRB_TABLES],total=0;
     *bad=UINT32_MAX;
     if(azrb_finish_limit(l,unused,&total,mask,bad,0)!=AZRB_FINISH_OK)return AZRB_REBASE_LAYOUT;
@@ -189,7 +202,7 @@ static inline const char *azrb_rebase_name(AzrbRebase r) {
     }
     return "unknown";
 }
-static inline int azrb_finish(const AzrbLayout *l,uint32_t base[AZRB_TABLES],uint32_t *total,uint32_t *mask) {
+static inline int azrb_finish(const AzrbLayout *l,uint32_t base[AZRB_TABLES],uint32_t *total,uint64_t *mask) {
     unsigned ignored;
     return azrb_finish_detail(l,base,total,mask,&ignored)==AZRB_FINISH_OK;
 }

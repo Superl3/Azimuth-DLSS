@@ -21,8 +21,9 @@ static unsigned azrp_root_count;
 
 typedef struct {
     ID3D12DescriptorHeap *heap,*heaps[2];
-    UINT num_heaps,mask,path;
-    D3D12_GPU_DESCRIPTOR_HANDLE tables[32];
+    UINT num_heaps,path;
+    uint64_t mask;
+    D3D12_GPU_DESCRIPTOR_HANDLE tables[AZRB_TABLES];
 } AzrpBindings;
 static D3D12_CPU_DESCRIPTOR_HANDLE azrp_shadow_handle(unsigned slot) {
     D3D12_CPU_DESCRIPTOR_HANDLE h={azrp_shadow_base.ptr+(SIZE_T)(slot-1)*azrp_shadow_inc};return h;
@@ -114,8 +115,9 @@ static void azrp_note_root(ID3D12RootSignature *rs,const void *blob,SIZE_T bytes
 #define AZRP_PARSE_ROOT(rd,Param,Range) do { \
     const UINT count=(rd)->NumParameters; \
     evidence.parameters=count;evidence.flags=(UINT)(rd)->Flags; \
-    if(count>32||((UINT)(rd)->Flags&0xc00u))l.valid=0; \
-    for(UINT i=0;i<count&&i<32;++i){ \
+    if(count>AZRB_TABLES){l.valid=0;evidence.overflow=1;} \
+    if((UINT)(rd)->Flags&0xc00u)l.valid=0; \
+    for(UINT i=0;i<count&&i<AZRB_TABLES;++i){ \
         const Param *p=&(rd)->pParameters[i]; \
         if(p->ParameterType==D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE){ \
             UINT next=0; \
@@ -125,8 +127,8 @@ static void azrp_note_root(ID3D12RootSignature *rs,const void *blob,SIZE_T bytes
                 azrp_range(&l,i,p->ShaderVisibility,x->RangeType,x->BaseShaderRegister,x->RegisterSpace,x->NumDescriptors,x->OffsetInDescriptorsFromTableStart,&next); \
             } \
         }else if(p->ParameterType==D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS){ \
-            azrp_schema_add(&evidence,i,p->ShaderVisibility,AZRB_CBV,p->Constants.ShaderRegister,p->Constants.RegisterSpace,p->Constants.Num32BitValues,0,4); \
-            azrb_direct(&l,i,p->ShaderVisibility,AZRB_CBV,p->Constants.ShaderRegister,p->Constants.RegisterSpace,AZRB_DIRECT); \
+            azrp_schema_add(&evidence,i,p->ShaderVisibility,AZRB_CBV,p->Constants.ShaderRegister,p->Constants.RegisterSpace,p->Constants.Num32BitValues,0,AZRB_CONSTANT); \
+            azrb_direct(&l,i,p->ShaderVisibility,AZRB_CBV,p->Constants.ShaderRegister,p->Constants.RegisterSpace,AZRB_CONSTANT); \
         }else if(p->ParameterType==D3D12_ROOT_PARAMETER_TYPE_CBV||p->ParameterType==D3D12_ROOT_PARAMETER_TYPE_SRV||p->ParameterType==D3D12_ROOT_PARAMETER_TYPE_UAV){ \
             unsigned type=p->ParameterType==D3D12_ROOT_PARAMETER_TYPE_CBV?AZRB_CBV:p->ParameterType==D3D12_ROOT_PARAMETER_TYPE_SRV?AZRB_SRV:AZRB_UAV; \
             azrp_schema_add(&evidence,i,p->ShaderVisibility,type,p->Descriptor.ShaderRegister,p->Descriptor.RegisterSpace,1,0,AZRB_DIRECT); \
@@ -151,7 +153,7 @@ static void azrp_note_root(ID3D12RootSignature *rs,const void *blob,SIZE_T bytes
     evidence.layout=l;
     HRESULT stored=rs->lpVtbl->SetPrivateData(rs,&azrp_layout_key,(UINT)sizeof(evidence),&evidence);
     if(FAILED(stored))log_msg("POSTFX SR_LAYOUT_STORE_FAILED root=%p hr=%08lx",(void *)rs,(unsigned long)stored);
-    uint32_t base[AZRB_TABLES],total,mask;
+    uint32_t base[AZRB_TABLES],total;uint64_t mask;
     unsigned req;
     AzrbFinish status=azrb_finish_detail(&l,base,&total,&mask,&req);
     if(status!=AZRB_FINISH_OK){azrp_log_layout_failure(rs,&l,status,req,0,"registration");return;}
@@ -163,6 +165,29 @@ static void azrp_note_root(ID3D12RootSignature *rs,const void *blob,SIZE_T bytes
         log_msg("POSTFX SR_LAYOUT root=%p entries=%u psT0Root=%u psT0Offset=%u vsT0Root=%u vsT0Offset=%u",(void *)rs,total,l.req[0].root,l.req[0].offset,l.req[16].root,l.req[16].offset);
     }else log_msg("POSTFX SR_LAYOUT_REJECT phase=registration resolve=0 root=%p detail=registry_full registered=%u capacity=%u",(void *)rs,azrp_root_count,(unsigned)AZRP_ROOTS);
     ReleaseSRWLockExclusive(&azt_lock);
+}
+/* Validate original table handles against the actual currently-bound
+   heap of the declared kind. The native sampler heap stays unchanged.
+   A table never assigned in a complete epoch is undefined, not lost;
+   after replay, restore every actually assigned table and no others. */
+static uint64_t azrp_valid_tables(const ListState *s,const AztRoot *root,uint64_t bound,const D3D12_GPU_DESCRIPTOR_HANDLE *handles){
+    uint64_t valid=0;
+    if(!root||!root->table_layout_known)return 0;
+    for(unsigned i=0;i<AZRB_TABLES;++i){
+        uint64_t bit=azrb_bit(i);
+        if(!(bound&bit)||!(root->tables_all&bit))continue;
+        UINT type=(root->sampler_tables&bit)?D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER:D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        unsigned matches=0;
+        for(UINT j=0;j<s->num_heaps&&j<2;++j){
+            AztHeap *heap=azt_heap_for_ptr(s->heaps[j]);uintptr_t cpu;
+            if(heap&&heap->type==type&&azroute_descriptor_cpu(handles[i].ptr,heap->gpu,heap->cpu,heap->inc,heap->count,0,&cpu))++matches;
+        }
+        if(matches==1)valid|=bit;
+    }
+    return valid;
+}
+static int azrp_restore_ok(const ListState *s,const AztRoot *root,uint64_t bound,uint64_t valid){
+    return root&&root->table_layout_known&&azrb_restore_mask_ok(s->trace_bindings_known,s->trace_bindings_uncertain,root->tables_all,bound,valid);
 }
 /* Plan A: legacy compact table packing. B: same-capacity physical heap
    rebase. C: extended packing. All share exact shader requirements,
@@ -185,9 +210,15 @@ static int azrp_prepare_bindings(ListState *s,ID3D12Resource *scene,ID3D12Resour
     if(object_known)l=&evidence.layout;else l=cached;
     AztRoot *gr=azt_root_slot(s->trace_graphics_rs,0);
     AztRoot *cr=s->compute_rs?azt_root_slot(s->compute_rs,0):NULL;
-    int graphics_ok=gr&&gr->table_layout_known&&(s->trace_tables_mask&gr->tables_all)==gr->tables_all;
-    int compute_ok=!s->compute_rs||(cr&&cr->table_layout_known&&(s->trace_compute_mask&cr->tables_all)==cr->tables_all);
-    int bindings_ok=real_SetComputeRootDescriptorTable&&real_CopyDescriptorsSimple&&real_CreateShaderResourceView&&
+    uint64_t gv=azrp_valid_tables(s,gr,s->trace_tables_mask,s->tables);
+    uint64_t cv=azrp_valid_tables(s,cr,s->trace_compute_mask,s->trace_compute_tables);
+    int graphics_ok=azrp_restore_ok(s,gr,s->trace_tables_mask,gv);
+    int compute_ok=s->compute_rs?azrp_restore_ok(s,cr,s->trace_compute_mask,cv):s->trace_bindings_known&&!s->trace_bindings_uncertain&&!s->trace_compute_mask;
+    log_msg("POSTFX SR_RESTORE resolve=%llu epochKnown=%d uncertain=%d graphicsDeclared=0x%016llx graphicsBound=0x%016llx graphicsValid=0x%016llx graphicsUnbound=0x%016llx computeDeclared=0x%016llx computeBound=0x%016llx computeValid=0x%016llx computeUnbound=0x%016llx",
+        resolve,s->trace_bindings_known,s->trace_bindings_uncertain,(unsigned long long)(gr?gr->tables_all:0),(unsigned long long)s->trace_tables_mask,(unsigned long long)gv,
+        (unsigned long long)(gr?gr->tables_all&~s->trace_tables_mask:0),(unsigned long long)(cr?cr->tables_all:0),(unsigned long long)s->trace_compute_mask,(unsigned long long)cv,
+        (unsigned long long)(cr?cr->tables_all&~s->trace_compute_mask:0));
+    int bindings_ok=real_SetComputeRootDescriptorTable&&real_CopyDescriptorsSimple&&real_CreateShaderResourceView&&real_CreateDescriptorHeap&&
         azrp_shadow&&azrp_shadow_inc&&s->trace_graphics_rs&&s->num_heaps&&s->num_heaps<=2&&!s->trace_bindings_uncertain;
     AztHeap *orig=NULL;int resource_heap_index=-1,duplicate=0;
     for(UINT i=0;i<s->num_heaps&&i<2;++i){
@@ -198,9 +229,9 @@ static int azrp_prepare_bindings(ListState *s,ID3D12Resource *scene,ID3D12Resour
         }
     }
     int heap_ok=orig&&orig->gpu&&orig->inc==azrp_shadow_inc&&!duplicate;
-    log_msg("POSTFX SR_PREFLIGHT resolve=%llu root=%p registered=%d objectLayout=%d registryCount=%u registryCapacity=%u traceIncomplete=%d descriptorUsed=%u graphicsRestore=%d graphicsMask=0x%08x graphicsRequired=0x%08x computeRestore=%d computeMask=0x%08x computeRequired=0x%08x bindings=%d heap=%d heapCount=%u producerReady=%d snapshot=%d drawReady=%d",
+    log_msg("POSTFX SR_PREFLIGHT resolve=%llu root=%p registered=%d objectLayout=%d registryCount=%u registryCapacity=%u traceIncomplete=%d descriptorUsed=%u graphicsRestore=%d graphicsMask=0x%016llx graphicsRequired=0x%016llx computeRestore=%d computeMask=0x%016llx computeRequired=0x%016llx bindings=%d heap=%d heapCount=%u producerReady=%d snapshot=%d drawReady=%d",
         resolve,(void *)s->trace_graphics_rs,cached!=NULL,object_known,azrp_root_count,(unsigned)AZRP_ROOTS,azt_incomplete,azt_desc_used,
-        graphics_ok,s->trace_tables_mask,gr?gr->tables_all:0,compute_ok,s->trace_compute_mask,cr?cr->tables_all:0,
+        graphics_ok,(unsigned long long)s->trace_tables_mask,(unsigned long long)(gr?gr->tables_all:0),compute_ok,(unsigned long long)s->trace_compute_mask,(unsigned long long)(cr?cr->tables_all:0),
         bindings_ok,heap_ok,orig?orig->count:0,producer_ready,snapshot!=NULL,draw_ready);
     if(object_known){
         log_msg("POSTFX SR_SCHEMA resolve=%llu root=%p version=%u flags=0x%x parameters=%u rows=%u truncated=%u",
@@ -215,7 +246,8 @@ static int azrp_prepare_bindings(ListState *s,ID3D12Resource *scene,ID3D12Resour
         log_msg("POSTFX SR_REPLAY SKIP resolve=%llu reason=root_layout_unregistered root=%p detail=no_cache_or_object_metadata",resolve,(void *)s->trace_graphics_rs);
         ReleaseSRWLockExclusive(&azt_lock);return 0;
     }
-    uint32_t base_a[AZRB_TABLES]={0},base_b[AZRB_TABLES],base_c[AZRB_TABLES]={0},total_a=0,total_c=0,mask_a=0,mask_b=0,mask_c=0;
+    uint32_t base_a[AZRB_TABLES]={0},base_b[AZRB_TABLES],base_c[AZRB_TABLES]={0},total_a=0,total_c=0;
+    uint64_t mask_a=0,mask_b=0,mask_c=0;
     unsigned bad_a,bad_b,bad_c;
     AzrbFinish a=azrb_finish_detail(l,base_a,&total_a,&mask_a,&bad_a);
     AzrbFinish c=azrb_finish_limit(l,base_c,&total_c,&mask_c,&bad_c,AZRB_FALLBACK_LIMIT);
@@ -224,7 +256,7 @@ static int azrp_prepare_bindings(ListState *s,ID3D12Resource *scene,ID3D12Resour
     /* If the full-layout parser rejected the root, independently resolve
        the shader requirements against the saved original ranges. Only the
        same-capacity physical plan may use this projected layout. */
-    uint32_t unused_base[AZRB_TABLES],unused_total=0,unused_mask=0;unsigned unused_req;
+    uint32_t unused_base[AZRB_TABLES],unused_total=0;uint64_t unused_mask=0;unsigned unused_req;
     AzrbFinish semantic=azrb_finish_limit(l,unused_base,&unused_total,&unused_mask,&unused_req,0);
     if(semantic!=AZRB_FINISH_OK&&object_known){
         projected=azrb_project_schema(&physical_layout,evidence.row,evidence.rows,evidence.parameters,evidence.flags,evidence.overflow,&project_bad);
@@ -233,7 +265,7 @@ static int azrp_prepare_bindings(ListState *s,ID3D12Resource *scene,ID3D12Resour
     }
     for(unsigned i=0;i<AZRB_TABLES;++i){
         base_b[i]=UINT32_MAX;
-        if(heap_ok&&(s->trace_tables_mask&(1u<<i))){
+        if(heap_ok&&(s->trace_tables_mask&azrb_bit(i))){
             uintptr_t handle=0;
             if(azroute_descriptor_cpu(s->tables[i].ptr,orig->gpu,orig->cpu,orig->inc,orig->count,0,&handle))
                 base_b[i]=(uint32_t)((handle-orig->cpu)/orig->inc);
@@ -248,10 +280,20 @@ static int azrp_prepare_bindings(ListState *s,ID3D12Resource *scene,ID3D12Resour
         int ok=0;uint32_t physical=UINT32_MAX;
         if(!q->mode)reason="required_binding_missing";
         else if(q->mode==AZRB_STATIC){ok=q->type==AZRB_SAMPLER;reason=ok?"static_sampler":"invalid_static";}
-        else if(q->mode==AZRB_DIRECT){ok=q->type==AZRB_CBV||(q->type==AZRB_SRV&&q->reg==6);if(!ok)reason="unsupported_direct";}
+        else if(q->mode==AZRB_DIRECT){
+            ok=q->root<AZRB_TABLES&&q->type==AZRB_CBV&&(s->trace_graphics_cbv_mask&azrb_bit(q->root));
+            reason=ok?"native_root_cbv_observed":q->type==AZRB_CBV?"root_cbv_unobserved":"unsupported_direct";
+        }else if(q->mode==AZRB_CONSTANT){
+            /* Exact PS/VS pair only reads cb13[0].x. No root signature
+               change or constant write occurs during replay. */
+            ok=q->root<AZRB_TABLES&&q->type==AZRB_CBV&&q->reg==13&&(s->trace_graphics_constant_words[q->root]&1);
+            reason=ok?"native_root_constant_observed":"root_constant_unobserved_or_unsupported";
+        }
         else if(q->mode!=AZRB_TABLE||q->root>=AZRB_TABLES||q->offset>=l->span[q->root]||!l->kind[q->root])reason="invalid_table";
-        else if(!(s->trace_tables_mask&(1u<<q->root))||!s->tables[q->root].ptr)reason="unbound_table";
-        else if(l->kind[q->root]==2){ok=q->type==AZRB_SAMPLER;reason=ok?"native_sampler_table":"invalid_sampler_type";}
+        else if(!(s->trace_tables_mask&azrb_bit(q->root))||!s->tables[q->root].ptr)reason="unbound_table";
+        else if(l->kind[q->root]==2){
+            ok=q->type==AZRB_SAMPLER&&(gv&azrb_bit(q->root));reason=ok?"native_sampler_table":"invalid_sampler_table";
+        }
         else if(!heap_ok||base_b[q->root]>=orig->count||q->offset>=orig->count-base_b[q->root])reason="descriptor_bounds";
         else{
             physical=base_b[q->root]+q->offset;
@@ -273,6 +315,7 @@ static int azrp_prepare_bindings(ListState *s,ID3D12Resource *scene,ID3D12Resour
             }
         }
         if(!ok)errors|=1u<<i;
+        if(q->mode==AZRB_DIRECT||q->mode==AZRB_CONSTANT)log_msg("POSTFX SR_ROOT_ARG resolve=%llu req=%u index=%u mode=%u cbv=0x%016llx words=0x%016llx observed=%d",resolve,i,q->root,q->mode,(unsigned long long)(q->root<AZRB_TABLES&&q->mode==AZRB_DIRECT?s->trace_graphics_cbv[q->root]:0),(unsigned long long)(q->root<AZRB_TABLES?s->trace_graphics_constant_words[q->root]:0),ok);
         log_msg("POSTFX SR_REQ resolve=%llu root=%p req=%u stage=%u type=%u reg=%u mode=%u tableRoot=%u offset=%u span=%u physical=%u shadow=%u shadowType=%u resource=%p ok=%d reason=%s",
             resolve,(void *)s->trace_graphics_rs,i,q->stage,q->type,q->reg,q->mode,q->root,q->offset,q->root<AZRB_TABLES?l->span[q->root]:0,
             physical,source[i]?source[i]->shadow:0,source[i]?source[i]->shadow_type:UINT_MAX,source[i]?(void *)source[i]->res:NULL,ok,reason);
@@ -301,7 +344,9 @@ static int azrp_prepare_bindings(ListState *s,ID3D12Resource *scene,ID3D12Resour
         D3D12_DESCRIPTOR_HEAP_DESC hd={0};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         hd.NumDescriptors=total;hd.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         ID3D12DescriptorHeap *private_heap=NULL;
-        HRESULT hr=ID3D12Device_CreateDescriptorHeap(g_device,&hd,&IID_ID3D12DescriptorHeap,(void **)&private_heap);
+        /* The device hook acquires azt_lock. This private heap must bypass
+           it while preflight holds the lock, or successful plans deadlock. */
+        HRESULT hr=real_CreateDescriptorHeap(g_device,&hd,&IID_ID3D12DescriptorHeap,(void **)&private_heap);
         if(FAILED(hr)||!private_heap){
             if(private_heap)ID3D12DescriptorHeap_Release(private_heap);
             log_msg("POSTFX SR_PLAN_REJECT resolve=%llu path=%u reason=heap_allocation hr=%08lx",resolve,path+1,(unsigned long)hr);continue;
@@ -325,10 +370,10 @@ static int azrp_prepare_bindings(ListState *s,ID3D12Resource *scene,ID3D12Resour
                 }else real_CopyDescriptorsSimple(g_device,1,dst,azrp_shadow_handle(source[i]->shadow),D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
                 out->tables[q->root].ptr=gpu.ptr+(UINT64)base[q->root]*azrp_shadow_inc;
             }
-            out->mask|=1u<<q->root;
+            out->mask|=azrb_bit(q->root);
         }
-        log_msg("POSTFX SR_BINDINGS resolve=%llu path=%u entries=%u root=%p tables=0x%08x shadowUsed=%u layoutSource=%s",
-            resolve,out->path,total,(void *)s->trace_graphics_rs,out->mask,azrp_shadow_used,projected?"schema_projection":object_known?"object":"cache");
+        log_msg("POSTFX SR_BINDINGS resolve=%llu path=%u entries=%u root=%p tables=0x%016llx shadowUsed=%u layoutSource=%s",
+            resolve,out->path,total,(void *)s->trace_graphics_rs,(unsigned long long)out->mask,azrp_shadow_used,projected?"schema_projection":object_known?"object":"cache");
         ReleaseSRWLockExclusive(&azt_lock);return 1;
     }
     log_msg("POSTFX SR_REPLAY SKIP resolve=%llu reason=%s root=%p",resolve,

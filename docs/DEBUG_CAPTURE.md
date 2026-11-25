@@ -364,3 +364,49 @@ direct root-argument and state restoration tracking. The existing
 launcher and ZIP format are unchanged.
 
 When semantic validation of the full-layout parser fails, the physical plan additionally attempts independent schema projection of all 20 actual shader requirements. It is permitted only with a complete recorded original schema (no truncation), supported parameter count and no direct indexing flags; each required register must resolve uniquely. The projection cannot be used for packed layouts, which require full spans. SR_SCHEMA_PROJECT and layoutSource=schema_projection identify this alternative. Missing, ambiguous or physically aliased requirements still reject execution. This does not create a different root signature.
+
+
+### 64-DWORD root layout and observed-state restoration
+
+The 1fb4437 moving capture of resolves 3668/3669 stored 16/18 RAW
+textures. Both original replay stages and the immutable SR producer
+completed. The root signature reports 40 parameters but the old parser
+iterated only the first 32, incorrectly showing 37 schema rows as
+untruncated. PS b1 was absent from that partial schema, not proven to
+be a missing descriptor shadow. Existing PS t0 and VS t0 were root
+17 and 1; both resource table shadows, both samplers, and other
+required bindings passed their old checks. Graphics bound mask 0x60002
+and declared mask 0x177777; compute bound 0xe and declared 0xf.
+No unknown high root index is hardcoded.
+
+All replay and trace tables now support the D3D12 64-DWORD root budget
+with 64-bit masks. Full schema enumeration and truncation are explicit.
+The existing pure-route complete flag retains its conservative
+32-parameter restriction; replay uses the full table-layout metadata.
+The SR replay keeps the original root signature, so a direct CBV is
+not a descriptor table. Graphics root CBV writes and constant writes
+are observed; b13 uses cb13[0].x in the exact PS/VS. Both must be
+observed before replay. No constant value or GPU VA is synthesized.
+
+The restore gate now checks that the recording was observed from
+successful Reset/Create, that every actually bound graphics/compute
+table is declared and its handle is inside the correct current
+shader-visible heap, and that no untracked binding invalidation occurred.
+A declared but never-bound table is undefined; it is not necessary
+or valid to invent a binding for unused shader stages. Restore all
+actually observed tables, not merely the replay-required subset.
+Sampler heap metadata is tracked, and the original sampler heap is
+kept. ClearState and bundles mark the epoch uncertain; indirect calls
+invalidate direct argument evidence. NGX may alter direct arguments;
+fresh native binding observations are required after injected work.
+POSTFX SR_RESTORE and SR_ROOT_ARG expose these gates and all 64 bits.
+All other replay checks (original shader pair, exact required views,
+producer fence, snapshot, no global trace overflow) remain.
+
+Private GPU descriptor heap creation now calls the original unhooked
+CreateDescriptorHeap while holding the metadata lock: the hooked
+entry would acquire the same lock and deadlock once a plan passed.
+Host regression tests use the observed low root positions and synthetic
+high indices, including index 63, missing epochs, invalid heap handles,
+and the actual partial binding masks. This is not proof of runtime
+success or a visible SR path. The same launcher command applies.

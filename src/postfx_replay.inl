@@ -84,7 +84,7 @@ static ID3D12Resource *postfx_replay_draw(ID3D12GraphicsCommandList *cl,ListStat
     D3D12_RECT sc={0,0,1920,1080};
     if(bindings){
         real_SetDescriptorHeaps(cl,bindings->num_heaps,bindings->heaps);
-        for(UINT i=0;i<32;++i)if(bindings->mask&(1u<<i))real_SetGraphicsRootDescriptorTable(cl,i,bindings->tables[i]);
+        for(UINT i=0;i<AZRB_TABLES;++i)if(bindings->mask&azrb_bit(i))real_SetGraphicsRootDescriptorTable(cl,i,bindings->tables[i]);
     }
     real_SetPipelineState(cl,variant);
     real_OMSetRenderTargets(cl,1,&rtv,FALSE,NULL);
@@ -95,9 +95,9 @@ static ID3D12Resource *postfx_replay_draw(ID3D12GraphicsCommandList *cl,ListStat
     real_RSSetViewports(cl,s->num_vp,s->vp);real_RSSetScissorRects(cl,s->num_sc,s->sc);
     if(bindings){
         real_SetDescriptorHeaps(cl,s->num_heaps,s->heaps);
-        for(UINT i=0;i<32;++i){
-            if(s->trace_tables_mask&(1u<<i))real_SetGraphicsRootDescriptorTable(cl,i,s->tables[i]);
-            if(s->trace_compute_mask&(1u<<i))real_SetComputeRootDescriptorTable(cl,i,s->trace_compute_tables[i]);
+        for(UINT i=0;i<AZRB_TABLES;++i){
+            if(s->trace_tables_mask&azrb_bit(i))real_SetGraphicsRootDescriptorTable(cl,i,s->tables[i]);
+            if(s->trace_compute_mask&azrb_bit(i))real_SetComputeRootDescriptorTable(cl,i,s->trace_compute_tables[i]);
         }
     }
     log_msg("POSTFX REPLAY RECORDED resolve=%llu size=1920x1080 native_t0=%d offscreen=1",resolve,bindings?0:1);

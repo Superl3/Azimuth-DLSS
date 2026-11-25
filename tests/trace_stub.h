@@ -28,9 +28,11 @@ static void *GetProcAddress(HMODULE m,const char *s){(void)m;(void)s;return NULL
 #define D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING 5768
 #define D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV 0
 #define D3D12_DESCRIPTOR_HEAP_TYPE_RTV 2
+#define D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER 1
 #define D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE 1
 #define D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND UINT_MAX
 #define D3D12_DESCRIPTOR_RANGE_TYPE_SRV 0
+#define D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER 3
 #define D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE 0
 #define D3D12_SHADER_VISIBILITY_ALL 0
 #define D3D12_SHADER_VISIBILITY_PIXEL 5
@@ -85,7 +87,7 @@ typedef struct {ID3D12RootSignature *pRootSignature;StubBytecode PS,VS,GS,HS,DS;
 typedef struct {UINT Type,Flags;struct{ID3D12Resource *pResource;UINT Subresource;D3D12_RESOURCE_STATES StateAfter;}Transition;struct{ID3D12Resource *pResourceAfter,*pResourceBefore;}Aliasing;}D3D12_RESOURCE_BARRIER;
 typedef struct {float TopLeftX,TopLeftY,Width,Height;}StubVP;
 typedef struct {LONG left,top,right,bottom;}StubRect;
-typedef struct {ID3D12PipelineState *pso;UINT num_rtv,rtv_single,has_dsv,num_vp,num_sc,num_heaps;D3D12_CPU_DESCRIPTOR_HANDLE rtv[8];StubVP vp[4];StubRect sc[4];ID3D12DescriptorHeap *heaps[2];ID3D12RootSignature *trace_graphics_rs;UINT trace_tables_mask;D3D12_GPU_DESCRIPTOR_HANDLE tables[32];UINT trace_topology,trace_predicated,trace_queries,trace_query_unknown;unsigned long long trace_recording_id;}ListState;
+typedef struct {ID3D12PipelineState *pso;UINT num_rtv,rtv_single,has_dsv,num_vp,num_sc,num_heaps;D3D12_CPU_DESCRIPTOR_HANDLE rtv[8];StubVP vp[4];StubRect sc[4];ID3D12DescriptorHeap *heaps[2];ID3D12RootSignature *trace_graphics_rs;uint64_t trace_tables_mask;D3D12_GPU_DESCRIPTOR_HANDLE tables[64];UINT trace_topology,trace_predicated,trace_queries,trace_query_unknown;unsigned long long trace_recording_id;}ListState;
 static AzSRMode stub_mode=AZSR_ROUTE;static int stub_enabled=1,stub_copies,stub_transitions,stub_visible;
 static ID3D12Resource *stub_src,*stub_dst;
 static AzSRMode dlss_sr_mode(void){return stub_mode;}

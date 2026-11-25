@@ -3,6 +3,7 @@
    pure-HDR-upscale replacement. It does not change any game descriptor. */
 #include "sr_route_policy.h"
 #include "debug_capture_policy.h"
+#include "replay_binding_policy.h"
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -54,7 +55,7 @@ typedef struct {
     ID3D12RootSignature *rs;
     UINT count;
     int complete,table_layout_known;
-    UINT tables_all;
+    uint64_t tables_all,sampler_tables;
     AztRange ranges[AZT_RANGES];
 } AztRoot;
 typedef struct {
@@ -211,7 +212,8 @@ static AztDesc *azt_slot(AztHeap *h, SIZE_T cpu, int insert) {
     return NULL;
 }
 static void sr_trace_heap(ID3D12Device *dev, ID3D12DescriptorHeap *heap, const D3D12_DESCRIPTOR_HEAP_DESC *desc) {
-    if (!sr_trace_enabled() || !heap || !desc || (desc->Type!=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV && desc->Type!=D3D12_DESCRIPTOR_HEAP_TYPE_RTV)) return;
+    if (!sr_trace_enabled() || !heap || !desc || (desc->Type!=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV && desc->Type!=D3D12_DESCRIPTOR_HEAP_TYPE_RTV &&
+        !(desc->Type==D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER&&(desc->Flags&D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)))) return;
     D3D12_CPU_DESCRIPTOR_HANDLE cpu;
     D3D12_GPU_DESCRIPTOR_HANDLE gpu={0};
     heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(heap,&cpu);
@@ -308,10 +310,19 @@ static void sr_trace_root(ID3D12RootSignature *rs,const void *blob,SIZE_T bytes)
     if(d->Version==D3D_ROOT_SIGNATURE_VERSION_1_0) {
         const D3D12_ROOT_SIGNATURE_DESC *rd=&d->Desc_1_0;
         if(rd->NumParameters>32 || ((UINT)rd->Flags & 0x400u)) v.complete=0;
-        v.table_layout_known=rd->NumParameters<=32;
-        for(UINT i=0;i<rd->NumParameters && i<32;++i) {
+        v.table_layout_known=rd->NumParameters<=AZRB_TABLES&&!((UINT)rd->Flags&0xc00u);
+        for(UINT i=0;i<rd->NumParameters && i<AZRB_TABLES;++i) {
             const D3D12_ROOT_PARAMETER *p=&rd->pParameters[i];
-            if(p->ParameterType==D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE)v.tables_all|=1u<<i;
+            if(p->ParameterType==D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE){
+                v.tables_all|=azrb_bit(i);
+                if(!p->DescriptorTable.NumDescriptorRanges)v.table_layout_known=0;
+                else{
+                    int sampler=p->DescriptorTable.pDescriptorRanges[0].RangeType==D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+                    if(sampler)v.sampler_tables|=azrb_bit(i);
+                    for(UINT j=1;j<p->DescriptorTable.NumDescriptorRanges;++j)
+                        if((p->DescriptorTable.pDescriptorRanges[j].RangeType==D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)!=sampler)v.table_layout_known=0;
+                }
+            }
             if(p->ParameterType!=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE || (p->ShaderVisibility!=D3D12_SHADER_VISIBILITY_PIXEL && p->ShaderVisibility!=D3D12_SHADER_VISIBILITY_ALL)) continue;
             UINT next=0;
             for(UINT j=0;j<p->DescriptorTable.NumDescriptorRanges;++j) {
@@ -322,10 +333,19 @@ static void sr_trace_root(ID3D12RootSignature *rs,const void *blob,SIZE_T bytes)
     } else if(d->Version==D3D_ROOT_SIGNATURE_VERSION_1_1) {
         const D3D12_ROOT_SIGNATURE_DESC1 *rd=&d->Desc_1_1;
         if(rd->NumParameters>32 || ((UINT)rd->Flags & 0x400u)) v.complete=0;
-        v.table_layout_known=rd->NumParameters<=32;
-        for(UINT i=0;i<rd->NumParameters && i<32;++i) {
+        v.table_layout_known=rd->NumParameters<=AZRB_TABLES&&!((UINT)rd->Flags&0xc00u);
+        for(UINT i=0;i<rd->NumParameters && i<AZRB_TABLES;++i) {
             const D3D12_ROOT_PARAMETER1 *p=&rd->pParameters[i];
-            if(p->ParameterType==D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE)v.tables_all|=1u<<i;
+            if(p->ParameterType==D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE){
+                v.tables_all|=azrb_bit(i);
+                if(!p->DescriptorTable.NumDescriptorRanges)v.table_layout_known=0;
+                else{
+                    int sampler=p->DescriptorTable.pDescriptorRanges[0].RangeType==D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+                    if(sampler)v.sampler_tables|=azrb_bit(i);
+                    for(UINT j=1;j<p->DescriptorTable.NumDescriptorRanges;++j)
+                        if((p->DescriptorTable.pDescriptorRanges[j].RangeType==D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)!=sampler)v.table_layout_known=0;
+                }
+            }
             if(p->ParameterType!=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE || (p->ShaderVisibility!=D3D12_SHADER_VISIBILITY_PIXEL && p->ShaderVisibility!=D3D12_SHADER_VISIBILITY_ALL)) continue;
             UINT next=0;
             for(UINT j=0;j<p->DescriptorTable.NumDescriptorRanges;++j) {
@@ -434,7 +454,7 @@ static int azt_full_texture(const D3D12_RESOURCE_DESC *d) {
         d->SampleDesc.Count==1 && !d->SampleDesc.Quality && d->Format==DXGI_FORMAT_R11G11B10_FLOAT;
 }
 static AztDesc *azt_bound_srv(ListState *s,const AztRange *r,UINT k) {
-    if(!(s->trace_tables_mask&(1u<<r->root)))return NULL;
+    if(r->root>=AZRB_TABLES||!(s->trace_tables_mask&azrb_bit(r->root)))return NULL;
     for(UINT i=0;i<s->num_heaps;++i){
         AztHeap *h=azt_heap_for_ptr(s->heaps[i]);uintptr_t cpu;
         if(!h || h->type!=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV || !azroute_descriptor_cpu(s->tables[r->root].ptr,h->gpu,h->cpu,h->inc,h->count,r->offset+k,&cpu))continue;
