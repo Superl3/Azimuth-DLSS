@@ -47,7 +47,8 @@ if ($Label -notmatch '^[A-Za-z0-9_-]{1,48}$') { throw 'Label must contain 1-48 l
 if (!$Output) { $Output = Read-Host 'Expected display resolution, e.g. 3840x1600 (or unknown)' }
 if ($Output -ne 'unknown' -and $Output -notmatch '^[1-9]\d*x[1-9]\d*$') { throw 'Output must be WxH or unknown.' }
 if($Preview -and $Output -eq 'unknown'){throw 'Preview requires an explicit higher output resolution.'}
-if($PreviewReplay -and $Output -ne '1920x1080'){throw 'Native postprocess replay currently requires 1920x1080 output and 1280x720 actual render.'}
+if($PreviewReplay -and $Output -notin @('1920x1080','3840x1600')){throw 'Postprocess replay supports 1280x720 -> 1920x1080 or 2592x1080 -> 3840x1600.'}
+if($VisibleSR -and $Output -ne '1920x1080'){throw 'VisibleSR remains SDR 1920x1080 only; use offscreen PreviewSRReplay for 3840x1600 PQ diagnostics.'}
 if (!$RenderSetting) { $RenderSetting = Read-Host 'Actual Azimuth render setting (native/low/etc.; this is a label only)' }
 $dest = [IO.Path]::GetFullPath($Destination)
 New-Item -ItemType Directory -Path $dest -Force | Out-Null
@@ -144,7 +145,7 @@ try {
         if ($AutoResolve) {
             Write-Host "Enter real gameplay before resolve $AutoResolve. The trace starts automatically."
         } else {
-            Write-Host 'Enter real gameplay. Press F8 once while driving. Repeat after the bounded capture for additional samples.'
+            Write-Host 'Enter real gameplay. Press F8 once while driving. Preview ignores early input before fresh scene readiness and all further F8 inputs after acceptance.'
         }
         if($Preview){
             if($VisibleSR){Write-Warning 'Visible SR SDR alpha: after F8, up to ten seconds of gated native final-target replacement. Native HUD pixels retained; SDR only: explicitly disable HDR in the game. No swapchain references are retained; actual Present needs external ETW or screen evidence.'}
@@ -227,7 +228,7 @@ try {
     if($Preview){
         if($content -notmatch 'SR PREVIEW:'){throw 'Log is not from preview mode.'}
         $total=0L
-        $rawRows=[regex]::Matches($content,'(?m)^PREVIEW FILE directory=(azimuth_preview_\d+_\d+) file=(f\d+-(?:color|depth|mv|sr|preoverlay|composite|final|replay|srpostfx|visiblehud|visiblefinal)-(\d+)x(\d+)-fmt(\d+)\.raw) bytes=(\d+)\r?$')
+        $rawRows=[regex]::Matches($content,'(?m)^PREVIEW FILE directory=(azimuth_preview_\d+_\d+) file=(f\d+-(?:color|depth|mv|sr|preoverlay|composite|final|replay|srpostfx|visiblehud|visiblefinal|hdrscene)-(\d+)x(\d+)-fmt(\d+)\.raw) bytes=(\d+)\r?$')
         foreach($row in $rawRows){
             if($previewFiles.Count -ge 22){break}
             $folder=Join-Path $game $row.Groups[1].Value

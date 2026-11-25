@@ -8,6 +8,7 @@
 #include "preview_batch_policy.h"
 #include "visible_sr.inl"
 #include "visible_trace.inl"
+#include "hdr_contract.inl"
 #include "preview_capture.inl"
 #define AZDBG_GEOM_MAX 64
 typedef struct AzdbgGeom {UINT cw,ch,dw,dh,vw,vh; int cf,df;} AzdbgGeom;

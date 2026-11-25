@@ -3,6 +3,8 @@
    loads. This is a baseline, not yet SR t0 substitution or visible routing.
    Opt-in, fixed 1280x720 -> 1920x1080, at most two isolated RTVs. */
 #include "postfx_dxbc.h"
+#include "replay_profile.h"
+static AzReplayProfile azrp_profile;
 #include "replay_bindings.inl"
 #define AZRP_MAX 8
 static int azrp_enabled;
@@ -15,8 +17,15 @@ static unsigned azrp_surface_count;
 
 static void postfx_replay_init(void) {
     char b[8];DWORD n=GetEnvironmentVariableA("AZIMUTH_DEBUG_POSTFX_REPLAY",b,sizeof(b));
-    azrp_enabled=dlss_sr_preview_mode()&&n==1&&b[0]=='1'&&!GetModuleHandleW(L"renderdoc.dll");
-    if(azrp_enabled){log_msg("POSTFX REPLAY CONFIG native t0, 1280x720 -> 1920x1080, offscreen only");azrp_shadow_init();}
+    int requested=n==1&&b[0]=='1';
+    char output[32]={0};DWORD len=GetEnvironmentVariableA("AZIMUTH_SR_OUTPUT",output,sizeof(output));
+    if(len&&len<sizeof(output))azrp_profile=azrp_profile_for(output);
+    azrp_enabled=dlss_sr_preview_mode()&&requested&&azrp_profile.ow&&!GetModuleHandleW(L"renderdoc.dll");
+    if(requested&&!azrp_enabled)log_msg("POSTFX REPLAY SKIP reason=unsupported_profile_or_capture_runtime");
+    if(azrp_enabled){
+        log_msg("POSTFX REPLAY CONFIG native t0 render=%ux%u output=%ux%u scale=%.7f,%.7f wide=%d offscreen=1",azrp_profile.rw,azrp_profile.rh,azrp_profile.ow,azrp_profile.oh,(double)azrp_profile.rw/azrp_profile.ow,(double)azrp_profile.rh/azrp_profile.oh,azrp_profile.wide);
+        azrp_shadow_init();
+    }
 }
 static void postfx_replay_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *d,ID3D12PipelineState *pso) {
     if(!azrp_enabled||!d||!pso||!d->PS.pShaderBytecode||!d->VS.pShaderBytecode||
@@ -40,7 +49,7 @@ static void postfx_replay_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *d,ID3D12
     size_t cap=d->PS.BytecodeLength+80;
     void *patched=HeapAlloc(GetProcessHeap(),0,cap);
     if(!patched){log_msg("POSTFX REPLAY PSO allocation failed");goto done;}
-    size_t size=azdx_patch_positions(d->PS.pShaderBytecode,d->PS.BytecodeLength,patched,cap,2.0f/3.0f,2.0f/3.0f,2);
+    size_t size=azdx_patch_positions(d->PS.pShaderBytecode,d->PS.BytecodeLength,patched,cap,(float)azrp_profile.rw/(float)azrp_profile.ow,(float)azrp_profile.rh/(float)azrp_profile.oh,2);
     if(!size){log_msg("POSTFX REPLAY PSO rejected: container checksum/token match");HeapFree(GetProcessHeap(),0,patched);goto done;}
     D3D12_GRAPHICS_PIPELINE_STATE_DESC desc=*d;
     desc.PS.pShaderBytecode=patched;desc.PS.BytecodeLength=size;
@@ -55,7 +64,7 @@ done: ReleaseSRWLockExclusive(&azrp_lock);
 }
 static ID3D12Resource *postfx_replay_draw(ID3D12GraphicsCommandList *cl,ListState *s,unsigned long long resolve,const AzrpBindings *bindings,AzrpSurface *owned) {
     if(!azrp_enabled||!s||!cl||s->num_rtv!=1||s->has_dsv||s->num_vp!=1||s->num_sc!=1||
-       s->vp_jittered||s->vp[0].Width!=1280.0f||s->vp[0].Height!=720.0f||
+       s->vp_jittered||s->vp[0].Width!=(float)azrp_profile.rw||s->vp[0].Height!=(float)azrp_profile.rh||
        s->vp[0].TopLeftX!=0||s->vp[0].TopLeftY!=0||s->trace_predicated||s->trace_queries||
        s->trace_query_unknown||s->trace_topology!=D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST||
        (!owned&&azrp_surface_count>=4)||(owned&&owned->image))return NULL;
@@ -65,7 +74,7 @@ static ID3D12Resource *postfx_replay_draw(ID3D12GraphicsCommandList *cl,ListStat
     ReleaseSRWLockShared(&azrp_lock);
     if(!variant){log_msg("POSTFX REPLAY SKIP resolve=%llu reason=no_patched_pso",resolve);return NULL;}
     D3D12_HEAP_PROPERTIES hp={0};hp.Type=D3D12_HEAP_TYPE_DEFAULT;hp.CreationNodeMask=hp.VisibleNodeMask=1;
-    D3D12_RESOURCE_DESC rd={0};rd.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;rd.Width=1920;rd.Height=1080;
+    D3D12_RESOURCE_DESC rd={0};rd.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;rd.Width=azrp_profile.ow;rd.Height=azrp_profile.oh;
     rd.DepthOrArraySize=1;rd.MipLevels=1;rd.Format=DXGI_FORMAT_R10G10B10A2_UNORM;rd.SampleDesc.Count=1;
     rd.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
     ID3D12Resource *image=NULL;
@@ -81,8 +90,8 @@ static ID3D12Resource *postfx_replay_draw(ID3D12GraphicsCommandList *cl,ListStat
     /* Same root signature, descriptor heaps, root constants, VB/IB, topology.
        Only the four states changed here are restored. All surfaces/PSOs
        remain alive until process exit. Never write the original target. */
-    D3D12_VIEWPORT vp={0,0,1920,1080,s->vp[0].MinDepth,s->vp[0].MaxDepth};
-    D3D12_RECT sc={0,0,1920,1080};
+    D3D12_VIEWPORT vp={0,0,(float)azrp_profile.ow,(float)azrp_profile.oh,s->vp[0].MinDepth,s->vp[0].MaxDepth};
+    D3D12_RECT sc={0,0,(LONG)azrp_profile.ow,(LONG)azrp_profile.oh};
     if(bindings){
         real_SetDescriptorHeaps(cl,bindings->num_heaps,bindings->heaps);
         for(UINT i=0;i<AZRB_TABLES;++i)if(bindings->mask&azrb_bit(i))real_SetGraphicsRootDescriptorTable(cl,i,bindings->tables[i]);
@@ -101,6 +110,6 @@ static ID3D12Resource *postfx_replay_draw(ID3D12GraphicsCommandList *cl,ListStat
             if(s->trace_compute_mask&azrb_bit(i))real_SetComputeRootDescriptorTable(cl,i,s->trace_compute_tables[i]);
         }
     }
-    log_msg("POSTFX REPLAY RECORDED resolve=%llu size=1920x1080 native_t0=%d offscreen=1",resolve,bindings?0:1);
+    log_msg("POSTFX REPLAY RECORDED resolve=%llu size=%ux%u native_t0=%d offscreen=1",resolve,azrp_profile.ow,azrp_profile.oh,bindings?0:1);
     return image;
 }

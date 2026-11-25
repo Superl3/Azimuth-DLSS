@@ -25,7 +25,7 @@ static int azvis_window_locked(void){
 }
 static void visible_init(void){
     char b[8];DWORD n=GetEnvironmentVariableA("AZIMUTH_DEBUG_VISIBLE_SR",b,sizeof(b));
-    azvis_enabled=azrp_enabled&&azrp_sr_enabled&&n==1&&b[0]=='1';
+    azvis_enabled=azrp_enabled&&azrp_sr_enabled&&!azrp_profile.wide&&n==1&&b[0]=='1';
     if(n==1&&b[0]=='1')log_msg("VISIBLE CONFIG enabled=%d durationMs=%u mode=native_hud_region_retention sdr=1 presentVerified=0 swapchainRefs=0",azvis_enabled,AZVIS_MS);
 }
 static void visible_release(AzvisFrame *v){

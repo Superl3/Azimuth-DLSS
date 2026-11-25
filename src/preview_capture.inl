@@ -3,7 +3,7 @@
    is not a recording identity. Readback never guesses queue/state. */
 #include "preview_batch_policy.h"
 #define AZPV_GROUPS AZPV_CAPTURE_COUNT
-#define AZPV_SHOTS 11
+#define AZPV_SHOTS 12
 #define AZPV_LIVE 4
 #define AZPV_TOTAL (AZPV_GROUPS+AZPV_LIVE)
 #define AZPV_BATCHES (AZPV_TOTAL * 4)
@@ -32,7 +32,9 @@ typedef struct {
     unsigned long long resolve;
     ID3D12Resource *scene,*sr_snapshot; /* retained to process exit */
     AzpvBatch *core_batch;
-    uintptr_t postfx,composite;
+    uintptr_t postfx,composite,hdr_copy,hdr_copy_list;
+    unsigned long long hdr_copy_recording;
+    int hdr_copy_full;
     unsigned postfx_seen,requested_mask,closed;
     AzvisFrame visible;
 } AzpvGroup;
@@ -55,7 +57,7 @@ static void preview_init(void) {
     visible_init();
     azpv_enabled=GetModuleHandleW(L"renderdoc.dll")==NULL;
     log_msg("PREVIEW CONFIG readback=%d postfx=%d groups=%u maxBytes=%llu",
-        azpv_enabled,azpv_postfx,(unsigned)AZPV_GROUPS,(unsigned long long)AZPV_LIMIT);
+        azpv_enabled,azpv_postfx,azrp_capture_groups(azrp_profile),(unsigned long long)AZPV_LIMIT);
 }
 static int preview_format(DXGI_FORMAT f) {
     return f==DXGI_FORMAT_R11G11B10_FLOAT||f==DXGI_FORMAT_R16G16_FLOAT||
@@ -119,7 +121,7 @@ static AzpvBatch *preview_batch(unsigned group,ID3D12GraphicsCommandList *cl,uns
 static ID3D12Resource *preview_sr_snapshot(ID3D12GraphicsCommandList *cl,ID3D12Resource *out) {
     if(!azrp_sr_enabled||!real_CopyResource||!out)return NULL;
     D3D12_RESOURCE_DESC rd;out->lpVtbl->GetDesc(out,&rd);
-    if(rd.Width!=1920||rd.Height!=1080||rd.Format!=DXGI_FORMAT_R11G11B10_FLOAT||
+    if(!azrp_match_output(azrp_profile,rd.Width,rd.Height)||rd.Format!=DXGI_FORMAT_R11G11B10_FLOAT||
        rd.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D||rd.DepthOrArraySize!=1||rd.MipLevels!=1||rd.SampleDesc.Count!=1)return NULL;
     rd.Flags=D3D12_RESOURCE_FLAG_NONE;
     D3D12_HEAP_PROPERTIES hp={0};hp.Type=D3D12_HEAP_TYPE_DEFAULT;hp.CreationNodeMask=hp.VisibleNodeMask=1;
@@ -169,7 +171,7 @@ void hooks_preview_record(ID3D12GraphicsCommandList *cl,ID3D12Resource *color,ID
        cl->lpVtbl->GetType(cl)!=D3D12_COMMAND_LIST_TYPE_DIRECT||!InterlockedCompareExchange(&azpv_queue_ready,0,0))return;
     AcquireSRWLockExclusive(&azt_lock);
     azdebug_preview_note(&azpv_ready,azt_frame+1,GetTickCount64(),fresh_mv&&!reset);
-    int wanted=azdbg.active&&azdbg.id==1&&azdbg.observed<AZPV_GROUPS;
+    int wanted=azdbg.active&&azdbg.id==1&&azdbg.observed<azrp_capture_groups(azrp_profile);
     int live=azvis_window_locked();
     unsigned long long resolve=azt_frame+1;
     ListState *s=state_for(cl);
@@ -181,7 +183,7 @@ void hooks_preview_record(ID3D12GraphicsCommandList *cl,ID3D12Resource *color,ID
     preview_reap_live(resolve);
     for(unsigned i=0;i<AZPV_TOTAL;++i)if(azpv_groups[i].resolve==resolve)goto done;
     unsigned group=AZPV_TOTAL;
-    if(wanted&&azpv_count<AZPV_GROUPS&&!azpv_done)group=azpv_count++;
+    if(wanted&&azpv_count<azrp_capture_groups(azrp_profile)&&!azpv_done)group=azpv_count++;
     else if(live)for(unsigned i=AZPV_GROUPS;i<AZPV_TOTAL;++i)if(!azpv_groups[i].resolve){group=i;break;}
     if(group==AZPV_TOTAL){if(live)log_msg("VISIBLE SKIP resolve=%llu stage=producer reason=slot_busy",resolve);goto done;}
     int capture=group<AZPV_GROUPS;
@@ -200,11 +202,38 @@ void hooks_preview_record(ID3D12GraphicsCommandList *cl,ID3D12Resource *color,ID
     if(capture&&!batch->count)batch->life.state=PV_FAILED;
 done: ReleaseSRWLockExclusive(&azpv_lock);
 }
+/* Identity-only observation of the native preoverlay copy used by HDR.
+   The original copy has already been recorded; no GPU state changes.
+   A full-region same-recording copy before composite is a candidate,
+   not proof that no later write touched the destination. */
+static void preview_hdr_copy(ID3D12GraphicsCommandList *cl,const D3D12_TEXTURE_COPY_LOCATION *dst,UINT x,UINT y,UINT z,const D3D12_TEXTURE_COPY_LOCATION *src,const D3D12_BOX *box){
+    if(!azpv_enabled||!azrp_profile.wide||!azrp_sr_enabled||!dst||!src||!dst->pResource||!src->pResource)return;
+    AcquireSRWLockShared(&azt_lock);unsigned long long resolve=azt_frame;
+    ListState *s=state_for(cl);unsigned long long recording=s?s->trace_recording_id:0;
+    int active=azdbg.active&&azdbg.id==1;
+    ReleaseSRWLockShared(&azt_lock);
+    if(!active||!recording)return;
+    AcquireSRWLockExclusive(&azpv_lock);
+    for(unsigned i=0;i<azpv_count;++i){
+        AzpvGroup *g=&azpv_groups[i];
+        if(g->resolve!=resolve||g->postfx!=(uintptr_t)src->pResource||g->postfx_seen!=1u)continue;
+        D3D12_RESOURCE_DESC a,b;src->pResource->lpVtbl->GetDesc(src->pResource,&a);dst->pResource->lpVtbl->GetDesc(dst->pResource,&b);
+        int full=!x&&!y&&!z&&dst->Type==D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX&&src->Type==D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX&&
+            !dst->SubresourceIndex&&!src->SubresourceIndex&&(!box||(!box->left&&!box->top&&!box->front&&box->right==a.Width&&box->bottom==a.Height&&box->back==1))&&
+            a.Dimension==D3D12_RESOURCE_DIMENSION_TEXTURE2D&&b.Dimension==a.Dimension&&azrp_match_render(azrp_profile,a.Width,a.Height)&&
+            a.Width==b.Width&&a.Height==b.Height&&a.DepthOrArraySize==1&&b.DepthOrArraySize==1&&a.MipLevels==1&&b.MipLevels==1&&
+            a.SampleDesc.Count==1&&b.SampleDesc.Count==1&&(a.Format==23||a.Format==24)&&(b.Format==23||b.Format==24);
+        g->hdr_copy=(uintptr_t)dst->pResource;g->hdr_copy_list=(uintptr_t)cl;g->hdr_copy_recording=recording;g->hdr_copy_full=full;
+        log_msg("POSTFX HDR_COPY resolve=%llu list=%p recording=%llu src=%p dst=%p srcFmt=%u dstFmt=%u size=%llux%u full=%d box=%d beforeComposite=1 qpc=%lld",resolve,(void *)cl,recording,(void *)src->pResource,(void *)dst->pResource,(unsigned)a.Format,(unsigned)b.Format,(unsigned long long)a.Width,a.Height,full,box!=NULL,azvis_qpc());
+    }
+    ReleaseSRWLockExclusive(&azpv_lock);
+}
 /* Opt-in snapshots of exact observed fullscreen passes only. Require
    matching live RTV metadata and a known RT state in this recording. */
 static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int start_zero) {
     if(!azpv_enabled||!azpv_postfx||!s)return;
     ID3D12Resource *target=NULL,*input=NULL;
+    AzHdrContract hdr={0};
     uintptr_t identity=0;DWORD hash=0;unsigned long long resolve=0;
     unsigned missing=0,found=0;int known=0,recording_match=0,state_value=-1;
     UINT nr=s->num_rtv,nv=s->num_vp,ns=s->num_sc;
@@ -241,6 +270,7 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
                 }
             if(found!=1)missing|=64u;
             if(!missing){target=t->res;ID3D12Resource_AddRef(target);}
+            if(hash==0x577d52ef&&azrp_profile.wide&&azrp_sr_enabled)hdr=azhdr_inspect(cl,s,resolve,identity);
         }
     }
     ReleaseSRWLockExclusive(&azt_lock);
@@ -304,6 +334,15 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
             if(g->visible.composite_ready){s->trace_watch_resolve=resolve;s->trace_watch_count=0;s->trace_watch_active=1;
                 log_msg("VISIBLE WORK_WATCH resolve=%llu list=%p recording=%llu work=%llu composite=%p",resolve,(void *)cl,s->trace_recording_id,s->trace_work_seq,(void *)target);}
         }
+        if(capture&&hash==0x577d52ef&&azrp_profile.wide&&azrp_sr_enabled){
+            g->requested_mask|=2048u;
+            int copy_match=g->hdr_copy_full&&hdr.scene&&g->hdr_copy==hdr.scene&&g->hdr_copy_list==(uintptr_t)cl&&g->hdr_copy_recording==s->trace_recording_id;
+            log_msg("POSTFX HDR_FINAL_GATE resolve=%llu t0Chain=%d t2CopyMatch=%d inputBindings=%d t2ReadState=%d outputColorSpace=unknown routeAllowed=0 reason=unverified_pq_output_and_scene_lineage",resolve,chain,copy_match,hdr.inputs_ok,hdr.scene_readable);
+            if(chain&&!missing&&copy_match&&hdr.scene_ref){
+                AzpvBatch *batch=preview_batch(i,cl,s->trace_recording_id);
+                if(!batch||!preview_add(batch,hdr.scene_ref,hdr.scene_state,"hdrscene"))log_msg("POSTFX HDR_SKIP resolve=%llu reason=t2_readback_allocation",resolve);
+            }else log_msg("POSTFX HDR_SKIP resolve=%llu reason=t2_state_or_copy_unproven",resolve);
+        }
         if(bit==4)g->closed=1;
         if(g->visible.enabled&&bit==4){
             g->requested_mask|=1536u;
@@ -325,6 +364,7 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
     if(hash==0xa93721c4||hash==0x577d52ef)
         visible_note_final(identity,(uintptr_t)input,cl,s->trace_recording_id,resolve,hash,routed,missing);
     if(target)ID3D12Resource_Release(target);
+    if(hdr.scene_ref)ID3D12Resource_Release(hdr.scene_ref);
 }
 static void preview_reset(ID3D12GraphicsCommandList *cl) {
     if(!azpv_enabled)return;
@@ -414,7 +454,7 @@ static void preview_poll(void) {
     unsigned pending=0,files=0,good_groups=0,failed_groups=0;
     unsigned saved_mask[AZPV_GROUPS]={0};
     uint64_t now=GetTickCount64();
-    static const char *names[]={"color","depth","mv","sr","preoverlay","composite","final","replay","srpostfx","visiblehud","visiblefinal"};
+    static const char *names[]={"color","depth","mv","sr","preoverlay","composite","final","replay","srpostfx","visiblehud","visiblefinal","hdrscene"};
     for(unsigned i=0;i<azpv_batch_count;++i){
         AzpvBatch *b=&azpv_batches[i];
         if(!b->life.state||b->group>=AZPV_GROUPS)continue;
@@ -445,13 +485,13 @@ static void preview_poll(void) {
         if(b->life.state==PV_SAVED){
             files+=b->good;
             for(unsigned k=0;k<b->count;++k)if(b->shots[k].name)
-                for(unsigned j=0;j<11;++j)if(!strcmp(b->shots[k].name,names[j]))saved_mask[b->group]|=1u<<j;
+                for(unsigned j=0;j<12;++j)if(!strcmp(b->shots[k].name,names[j]))saved_mask[b->group]|=1u<<j;
         }else if(b->life.state!=PV_FAILED)++pending;
     }
     if(ended&&!pending){
         for(unsigned i=0;i<azpv_count;++i){
             AzpvGroup *g=&azpv_groups[i];
-            unsigned expected=(azpv_postfx?127u:15u)|(azrp_enabled?128u:0u)|(azrp_sr_enabled?256u:0u)|(g->visible.enabled?1536u:0u);
+            unsigned expected=(azpv_postfx?127u:15u)|(azrp_enabled?128u:0u)|(azrp_sr_enabled?256u:0u)|(g->visible.enabled?1536u:0u)|(azrp_profile.wide&&azrp_sr_enabled?2048u:0u);
             int core=(saved_mask[i]&15u)==15u;
             if(core)++good_groups;else ++failed_groups;
             log_msg("PREVIEW GROUP_RESULT resolve=%llu expected=0x%02x attempted=0x%02x saved=0x%02x postfxSeen=0x%x coreComplete=%d",

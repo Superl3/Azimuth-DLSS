@@ -51,7 +51,7 @@ def analyze_visible(text):
         n=int(resolve)
         if tag in ("SRPOSTFX_READY","HUD_INPUT_READY","HUD_COMPOSITE_RECORDED","FINAL_RECORDED",
                    "FINAL_SUBMITTED","FINAL_GPU_COMPLETE","FINAL_CANDIDATE","TARGET_SUBMITTED",
-                   "PRESENT_BARRIER","PRESENT_BARRIER_SUBMITTED","SKIP"):
+                   "PRESENT_BARRIER","PRESENT_BARRIER_SUBMITTED","WORK_WATCH","WORK","WORK_BIND","WORK_BARRIER","WORK_SUBMIT","EDGE","SKIP"):
             frame=frames.setdefault(n,{"resolve":n,"stages":{},"skips":[]})
             frame["stages"][tag]=frame["stages"].get(tag,0)+1
             if tag=="SKIP":
@@ -61,6 +61,8 @@ def analyze_visible(text):
                 frame["skips"].append(row)
             elif tag=="FINAL_CANDIDATE":
                 frame.setdefault("final_candidates",[]).append(row)
+            elif tag in ("WORK_WATCH","WORK","WORK_BIND","WORK_BARRIER","WORK_SUBMIT","EDGE"):
+                frame.setdefault("work_and_edges",[]).append({"tag":tag,**row})
             elif tag=="PRESENT_BARRIER_SUBMITTED":
                 frame.setdefault("submitted_present_barriers",[]).append(row)
     results=list(frames.values())
@@ -125,7 +127,7 @@ def parse_debug(text, output=None):
         if not w["counts"]["native_velocity"]:w["warnings"].append("No native velocity pass observed in this window.")
         if w["truncation"]:w["warnings"].append("Bounded log truncated; use GPU capture or a shorter window.")
         if not w["fg_discovery"]["draw_count"]:w["warnings"].append("No FG draw candidates; descriptor/PSO tracking may be incomplete.")
-    preview=[line for line in text.splitlines() if line.startswith(("SR PREVIEW:","PREVIEW ","SR PROBE RESULT ","POSTFX REPLAY ","POSTFX SR_","VISIBLE "))]
+    preview=[line for line in text.splitlines() if line.startswith(("SR PREVIEW:","PREVIEW ","SR PROBE RESULT ","POSTFX REPLAY ","POSTFX SR_","POSTFX HDR_","VISIBLE "))]
     return {"preview_observations":preview,"visible_trial":analyze_visible(text),"debug_ready":"DEBUG READY:" in text,"capture_count":len(windows),
             "startup":startup,"captures":windows,"renderdoc_observations":rdc,
             "warning":"CPU metadata is not a GPU capture or proof of resource contents. RenderDoc completion count is observational; inspect actual .rdc files. No guessed HUD/camera values and no routing/FG enablement."}

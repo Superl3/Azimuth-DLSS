@@ -539,3 +539,35 @@ until process exit. The 8-resolve RAW window and 10-second visible
 trial are independent. TRIAL_END logs candidate/routed/submitted counts
 and elapsed/chain-change reason. External PresentMon and screen video
 remain necessary to verify actual display.
+
+
+### Wide replay and PQ contract diagnosis
+
+    Start-DebugCapture.cmd -Preview -PreviewPostFx -PreviewReplay -PreviewSRReplay -PreviewJitter -ShaderDisasm -Output 3840x1600
+
+Keep game HDR enabled for this diagnostic. No -VisibleSR for this profile.
+1280x720 -> 1920x1080 keeps its 2/3 position remap. Wide profile is
+exactly 2592x1080 -> 3840x1600, with 27/40 = 0.675 in both axes.
+The exact original postprocess shader is patched at its same two
+SV_POSITION conversions, preserving original normalized UVs and native
+auxiliary inputs. This is an offscreen experiment; wide resolution
+does not itself establish HDR. Preserve the native final shader.
+One wide RAW group (up to 10 files including hdrscene) stays within
+the 256 MiB readback cap. SDR remains two groups and up to 22 files.
+
+The exact HDR final pair 577d52ef / 79d0ca68 reads t0 composite,
+t1 1D curve, t2 preoverlay and cb0 peak/paper/black, using s0. Its
+disassembly applies sRGB decoding and curve conversion, suppresses
+scene HDR boost where composite differs from scene, converts to BT.2020
+primaries and applies ST 2084 PQ. Neither native postfx nor srpostfx
+is a PQ buffer. POSTFX HDR_REQ and HDR_CONTRACT report each input
+binding, resource dimensions, exact read-state observations, root
+CBV/constant presence and sampler binding. Actual Levels values and
+sampler values are not read or inferred. HDR_COPY logs exact source,
+destination, region and recording when the preoverlay is copied before
+composite. HDR_FINAL_GATE correlates that copy with final t2. A safe
+same-recording, known read state and full-copy candidate can produce
+hdrscene RAW; it is the actual t2 pixels at the observed final draw,
+not a proof of alpha extraction. Unknown input state, copy lineage,
+or output DXGI color space does not allow replacement. HDR output
+remains native regardless of these diagnostic results.

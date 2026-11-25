@@ -305,7 +305,7 @@ static int azrp_prepare_bindings(ListState *s,ID3D12Resource *scene,ID3D12Resour
                    the old view is not needed by B/C, but live exact
                    source identity, simple view, and format still are. */
                 ok=d->res==scene&&d->simple&&d->format==DXGI_FORMAT_R11G11B10_FLOAT&&
-                    d->desc.Width==1280&&d->desc.Height==720&&(!d->shadow_valid||d->shadow_type==AZRB_SRV);
+                    azrp_match_render(azrp_profile,d->desc.Width,d->desc.Height)&&(!d->shadow_valid||d->shadow_type==AZRB_SRV);
                 if(!ok)reason="scene_t0_identity";
                 else if(!d->shadow_valid){reason="scene_verified_recreate";strict_errors|=1u<<i;}
                 else reason="scene_verified";

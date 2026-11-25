@@ -66,6 +66,8 @@ jobs:
           python tests/test_visible_trace_lifetime.py
           zig cc -target x86_64-windows-gnu -std=c11 -Wall -Wextra -Werror tests/test_postfx_dxbc.c -o build/test_postfx_dxbc.exe
           ./build/test_postfx_dxbc.exe
+          zig cc -target x86_64-windows-gnu -std=c11 -Wall -Wextra -Werror tests/test_replay_profile.c -o build/test_replay_profile.exe
+          ./build/test_replay_profile.exe
           zig cc -target x86_64-windows-gnu -std=c11 -Wall -Wextra -Werror tests/test_postfx_compiler.c -o build/test_postfx_compiler.exe
           ./build/test_postfx_compiler.exe
           zig cc -target x86_64-windows-gnu -std=c11 -Wall -Wextra -Werror tests/test_replay_binding_policy.c -o build/test_replay_binding_policy.exe
