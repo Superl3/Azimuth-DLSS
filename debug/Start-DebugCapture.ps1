@@ -10,6 +10,7 @@ param(
     [switch]$Preview,
     [switch]$PreviewPostFx,
     [switch]$PreviewJitter,
+    [switch]$PreviewReplay,
     [ValidateSet('quality','balanced','performance')][string]$Quality = 'quality',
     [ValidateRange(0, 1000000)][int]$AutoResolve = 0,
     [switch]$ExitAfterCapture,
@@ -17,7 +18,8 @@ param(
     [string]$Destination = (Join-Path $PSScriptRoot 'debug-captures')
 )
 $ErrorActionPreference = 'Stop'
-if(($PreviewPostFx -or $PreviewJitter) -and !$Preview){throw '-PreviewPostFx and -PreviewJitter require -Preview.'}
+if(($PreviewPostFx -or $PreviewJitter -or $PreviewReplay) -and !$Preview){throw 'Preview options require -Preview.'}
+if($PreviewReplay -and !$PreviewPostFx){throw '-PreviewReplay requires -PreviewPostFx.'}
 if ($ExitAfterCapture -and (!$AutoResolve -or $CollectOnly)) {
     throw '-ExitAfterCapture requires -AutoResolve and a new game launch.'
 }
@@ -39,6 +41,7 @@ if ($Label -notmatch '^[A-Za-z0-9_-]{1,48}$') { throw 'Label must contain 1-48 l
 if (!$Output) { $Output = Read-Host 'Expected display resolution, e.g. 3840x1600 (or unknown)' }
 if ($Output -ne 'unknown' -and $Output -notmatch '^[1-9]\d*x[1-9]\d*$') { throw 'Output must be WxH or unknown.' }
 if($Preview -and $Output -eq 'unknown'){throw 'Preview requires an explicit higher output resolution.'}
+if($PreviewReplay -and $Output -ne '1920x1080'){throw 'Native postprocess replay currently requires 1920x1080 output and 1280x720 actual render.'}
 if (!$RenderSetting) { $RenderSetting = Read-Host 'Actual Azimuth render setting (native/low/etc.; this is a label only)' }
 $dest = [IO.Path]::GetFullPath($Destination)
 New-Item -ItemType Directory -Path $dest -Force | Out-Null
@@ -114,7 +117,7 @@ try {
             $previous = (Get-Item -LiteralPath $log).LastWriteTimeUtc
             Copy-Item -LiteralPath $log -Destination (Join-Path $dest ($tag + '-previous.log'))
         }
-        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM','AZIMUTH_DEBUG_AUTO_RESOLVE','AZIMUTH_SR_OUTPUT','AZIMUTH_SR_QUALITY','AZIMUTH_DEBUG_PREVIEW_POSTFX','AZIMUTH_DEBUG_PREVIEW_JITTER','AZIMUTH_DEBUG_QUEUE_TRACE')) {
+        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM','AZIMUTH_DEBUG_AUTO_RESOLVE','AZIMUTH_SR_OUTPUT','AZIMUTH_SR_QUALITY','AZIMUTH_DEBUG_PREVIEW_POSTFX','AZIMUTH_DEBUG_PREVIEW_JITTER','AZIMUTH_DEBUG_POSTFX_REPLAY','AZIMUTH_DEBUG_QUEUE_TRACE')) {
             $oldEnv[$key] = [Environment]::GetEnvironmentVariable($key,'Process')
         }
         [Environment]::SetEnvironmentVariable('AZIMUTH_SR_MODE',$(if($Preview){'preview'}else{'debug'}),'Process')
@@ -123,6 +126,7 @@ try {
             [Environment]::SetEnvironmentVariable('AZIMUTH_SR_QUALITY',$Quality,'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_PREVIEW_POSTFX',$(if($PreviewPostFx){'1'}else{'0'}),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_PREVIEW_JITTER',$(if($PreviewJitter){'1'}else{'0'}),'Process')
+            [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_POSTFX_REPLAY',$(if($PreviewReplay){'1'}else{'0'}),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_QUEUE_TRACE','1','Process')
         }
         [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_RENDERDOC','0','Process')
@@ -204,9 +208,9 @@ try {
     if($Preview){
         if($content -notmatch 'SR PREVIEW:'){throw 'Log is not from preview mode.'}
         $total=0L
-        $rawRows=[regex]::Matches($content,'(?m)^PREVIEW FILE directory=(azimuth_preview_\d+_\d+) file=(f\d+-(?:color|depth|mv|sr|preoverlay|composite|final)-(\d+)x(\d+)-fmt(\d+)\.raw) bytes=(\d+)\r?$')
+        $rawRows=[regex]::Matches($content,'(?m)^PREVIEW FILE directory=(azimuth_preview_\d+_\d+) file=(f\d+-(?:color|depth|mv|sr|preoverlay|composite|final|replay)-(\d+)x(\d+)-fmt(\d+)\.raw) bytes=(\d+)\r?$')
         foreach($row in $rawRows){
-            if($previewFiles.Count -ge 14){break}
+            if($previewFiles.Count -ge 16){break}
             $folder=Join-Path $game $row.Groups[1].Value
             $name=$row.Groups[2].Value
             if($previewFiles -contains $name){continue}
@@ -233,7 +237,7 @@ try {
         automatic_wait_expired = $autoWaitExpired
         files_sha256 = [ordered]@{ 'azimuth.exe' = (FileHashOrNull $exe); 'dxgi.dll' = (FileHashOrNull $proxy); 'azimuth_ngx.dll' = (FileHashOrNull $bridge) }
         selected_shader_disassembly = $shaderFiles
-        gpu_raw = $previewFiles; preview_complete = [bool]($content -match '(?m)^PREVIEW COMPLETE '); preview_quality = $(if($Preview){$Quality}else{$null}); preview_jitter_requested = [bool]$PreviewJitter
+        gpu_raw = $previewFiles; preview_complete = [bool]($content -match '(?m)^PREVIEW COMPLETE '); preview_quality = $(if($Preview){$Quality}else{$null}); preview_jitter_requested = [bool]$PreviewJitter; preview_native_replay_requested = [bool]$PreviewReplay
         notice = 'Local evidence. Explicit preview includes selected raw game textures. Optional selected shader assembly. No game binaries or saves. Review privately.'
     }
     $meta | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $stage 'capture.json') -Encoding UTF8

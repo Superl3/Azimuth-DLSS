@@ -242,3 +242,34 @@ SR-replayed postprocess results. No state gate was relaxed.
 ### Separate recording batches (v0.4 foundation)
 
 The moving Jitter ON capture showed the same command-list pointer being submitted for the core SR work, then reused before native postprocess draws. A logical resolve group is now separate from up to four independent recording batches. Each batch holds its own fence and resource references. Mapping requires a successful reset of that recording and fence completion; a never-reset list may time out rather than return ambiguous pixels. No assumption of identical queues or Present frame identity is made. Native postprocess readback still requires the existing explicit render-target barrier/view checks. PREVIEW BATCH, SUBMITTED, SAVED and GROUP_RESULT give batch/recording and per-stage masks. Capture size remains 14 textures and 256 MiB maximum; no screen modification. Repeated submissions are rejected before mapping. The previous version's postfx gate never ran after core submission; now later recordings can independently reach it.
+
+### Native high-resolution postprocess replay baseline
+
+    Start-DebugCapture.cmd -Preview -PreviewPostFx -PreviewReplay -PreviewJitter -ShaderDisasm -Output 1920x1080
+
+Only 1280x720 actual render / 1920x1080 output is supported by this first
+replay experiment. The original FH2 postprocess shader reads low-resolution
+auxiliaries using two integer conversions from SV_POSITION. The runtime
+creates a variant of the exact observed PS/VS pair, verifies the original
+DXBC retail checksum, checks that exactly two matching instructions are
+present, and changes only these position conversions to use 2/3 coordinates.
+The rest of the original shader, root signature, bindings, normalized UVs,
+constant buffers, samplers, native HDR input and original color transform
+are reused. The extra draw targets its own 1920x1080 texture and restores
+the game's PSO, RTV, viewport and scissor. All new resources are bounded
+and retained; the raw replay texture uses its recording batch fence.
+
+This is the native-input high-resolution postprocess baseline, NOT yet
+a replay with the SR output bound at t0 and NOT visible SR. It deliberately
+does not swap descriptor heaps or overwrite game descriptors. The next
+step is to reproduce the exact native root bindings in private descriptors
+and route the SR output to t0 with proven producer/consumer lifetime.
+Do not silently substitute a simplified tone mapper or low-res image
+sharpening for this step. Captures may include f*-replay-1920x1080-fmt24.raw.
+Check POSTFX REPLAY PSO ready, RECORDED, SKIP and PREVIEW GROUP_RESULT.
+No game bytecode is stored in source control. Token/checksum references:
+https://github.com/microsoft/DirectX-Headers/blob/main/include/directx/D3D12TokenizedProgramFormat.hpp
+and https://github.com/microsoft/hlsl-specs/blob/main/proposals/infra/INF-0004-validator-hashing.md .
+Tests cover a synthetic container and a real Windows D3DCompile/D3DDisassemble
+fixture. Real FH2 variant creation and replay pixels still require runtime
+verification. Up to 16 textures, still bounded by 256 MiB of readbacks.

@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include "../third_party/renderdoc/renderdoc_app.h"
 #include "debug_shader_dump.inl"
+#include "postfx_replay.inl"
 #include "preview_capture.inl"
 #define AZDBG_GEOM_MAX 64
 typedef struct AzdbgGeom {UINT cw,ch,dw,dh,vw,vh; int cf,df;} AzdbgGeom;

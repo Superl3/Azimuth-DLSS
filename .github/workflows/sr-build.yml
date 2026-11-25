@@ -61,6 +61,10 @@ jobs:
           ./build/test_debug_capture_policy.exe
           zig cc -target x86_64-windows-gnu -std=c11 -Wall -Wextra -Werror tests/test_preview_batch_policy.c -o build/test_preview_batch_policy.exe
           ./build/test_preview_batch_policy.exe
+          zig cc -target x86_64-windows-gnu -std=c11 -Wall -Wextra -Werror tests/test_postfx_dxbc.c -o build/test_postfx_dxbc.exe
+          ./build/test_postfx_dxbc.exe
+          zig cc -target x86_64-windows-gnu -std=c11 -Wall -Wextra -Werror tests/test_postfx_compiler.c -o build/test_postfx_compiler.exe
+          ./build/test_postfx_compiler.exe
           python tests/test_debug_capture.py
       - name: Test automatic capture packaging
         shell: pwsh

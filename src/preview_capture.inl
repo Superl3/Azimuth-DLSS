@@ -3,7 +3,7 @@
    is not a recording identity. Readback never guesses queue/state. */
 #include "preview_batch_policy.h"
 #define AZPV_GROUPS 2
-#define AZPV_SHOTS 7
+#define AZPV_SHOTS 8
 #define AZPV_BATCHES (AZPV_GROUPS * 4)
 #define AZPV_LIMIT (256ull*1024*1024)
 #define AZPV_FILE_LIMIT (64ull*1024*1024)
@@ -46,6 +46,7 @@ static void preview_init(void) {
     if(!dlss_sr_preview_mode())return;
     char b[8];DWORD n=GetEnvironmentVariableA("AZIMUTH_DEBUG_PREVIEW_POSTFX",b,sizeof(b));
     azpv_postfx=n==1&&b[0]=='1';
+    postfx_replay_init();
     azpv_enabled=GetModuleHandleW(L"renderdoc.dll")==NULL;
     log_msg("PREVIEW CONFIG readback=%d postfx=%d groups=%u maxBytes=%llu",
         azpv_enabled,azpv_postfx,(unsigned)AZPV_GROUPS,(unsigned long long)AZPV_LIMIT);
@@ -195,9 +196,21 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
             resolve,name,missing,chain,nr,nv,ns,(unsigned)s->trace_topology,state_value,known,recording_match,found,start_zero);
         if(chain&&!missing&&target){
             AzpvBatch *batch=preview_batch(i,cl,s->trace_recording_id);
-            if(batch&&preview_add(batch,target,D3D12_RESOURCE_STATE_RENDER_TARGET,name))continue;
-            log_msg("PREVIEW SKIP resolve=%llu stage=%s reason=readback_batch_or_allocation",resolve,name);
+            if(!batch||!preview_add(batch,target,D3D12_RESOURCE_STATE_RENDER_TARGET,name))
+                log_msg("PREVIEW SKIP resolve=%llu stage=%s reason=readback_batch_or_allocation",resolve,name);
         }else log_msg("PREVIEW SKIP resolve=%llu stage=%s reason=%s",resolve,name,missing?"gate":"identity_chain");
+        /* Native replay never touches the original RTV, so an unknown
+           original target transition (bit 0x10) is not used as a barrier
+           guess. All other original-draw/identity gates still apply. */
+        if(bit==1&&azrp_enabled){
+            g->requested_mask|=128u;
+            if(chain&&!(missing&~16u)&&s->trace_recording_id){
+                AzpvBatch *batch=preview_batch(i,cl,s->trace_recording_id);
+                ID3D12Resource *image=batch?postfx_replay_draw(cl,s,resolve):NULL;
+                if(!image||!preview_add(batch,image,D3D12_RESOURCE_STATE_RENDER_TARGET,"replay"))
+                    log_msg("POSTFX REPLAY SKIP resolve=%llu reason=record_or_readback",resolve);
+            }else log_msg("POSTFX REPLAY SKIP resolve=%llu reason=original_draw_gate missing=0x%02x chain=%d",resolve,missing,chain);
+        }
     }
     ReleaseSRWLockExclusive(&azpv_lock);
     if(target)ID3D12Resource_Release(target);
@@ -285,7 +298,7 @@ static void preview_poll(void) {
     unsigned pending=0,files=0,good_groups=0,failed_groups=0;
     unsigned saved_mask[AZPV_GROUPS]={0};
     uint64_t now=GetTickCount64();
-    static const char *names[]={"color","depth","mv","sr","preoverlay","composite","final"};
+    static const char *names[]={"color","depth","mv","sr","preoverlay","composite","final","replay"};
     for(unsigned i=0;i<azpv_batch_count;++i){
         AzpvBatch *b=&azpv_batches[i];
         if(b->life.state==PV_SUBMITTED){
@@ -309,13 +322,13 @@ static void preview_poll(void) {
         if(b->life.state==PV_SAVED){
             files+=b->good;
             for(unsigned k=0;k<b->count;++k)if(b->shots[k].name)
-                for(unsigned j=0;j<7;++j)if(!strcmp(b->shots[k].name,names[j]))saved_mask[b->group]|=1u<<j;
+                for(unsigned j=0;j<8;++j)if(!strcmp(b->shots[k].name,names[j]))saved_mask[b->group]|=1u<<j;
         }else if(b->life.state!=PV_FAILED)++pending;
     }
     if(ended&&!pending){
         for(unsigned i=0;i<azpv_count;++i){
             AzpvGroup *g=&azpv_groups[i];
-            unsigned expected=azpv_postfx?127u:15u;
+            unsigned expected=(azpv_postfx?127u:15u)|(azrp_enabled?128u:0u);
             int core=(saved_mask[i]&15u)==15u;
             if(core)++good_groups;else ++failed_groups;
             log_msg("PREVIEW GROUP_RESULT resolve=%llu expected=0x%02x attempted=0x%02x saved=0x%02x postfxSeen=0x%x coreComplete=%d",
