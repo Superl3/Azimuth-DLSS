@@ -169,3 +169,45 @@ Use `Start-DebugCapture.cmd -ShaderDisasm` with the 1080p setting, press F8 once
 The third capture identified a 16:9 final variant and a probable pre-overlay boundary. The analyzer now reports `fh2_postfx` same-list/same-resolve candidate chains and intervening same-target blends, without classifying HUD or enabling routing. It also recognizes the 16:9 final PS for optional disassembly. See [FH2 capture findings](FH2_CAPTURE_FINDINGS.md) for the postprocess coordinate-domain requirements. The next useful evidence is an actual GPU capture at the intended output aspect ratio, not more broad metadata-only runs. Descriptor occupancy now appears in `DEBUG DESCRIPTOR_STATS`.
 
 The `hdr_scene_copy` report distinguishes final HDR-PQ and SDR-curve shader candidates, measured downscale/upscale direction, and observed pre-overlay copy to HDR t2 (same list/resolve and before recorded blends). It never asserts actual UI pixels or enables FG. Existing raw logs can be re-analyzed with the updated Python scripts; no new game run or DLL installation is needed for that analysis.
+
+
+## Unified SR preview (experimental)
+
+Use the full azimuth-sr-experimental-windows-x64 artifact, not the
+standalone debug artifact. Keep your NVIDIA nvngx_dlss.dll in the game
+folder. The launcher can temporarily install and restore the matching
+proxy and NGX bridge. Set the game to the measured 2592x1080 render
+size and a 3840x1600 requested output. Do not assume the setting label
+matches actual dimensions.
+
+    Start-DebugCapture.cmd -Preview -PreviewPostFx -ShaderDisasm -Output 3840x1600
+
+Drive, press F8 once, and exit after PREVIEW COMPLETE. Optional
+-AutoResolve 2600 -ExitAfterCapture waits for both metadata and preview
+completion; the trigger counts recognized resolves, not gameplay time.
+Preview is the existing offscreen probe plus debug metadata. No jitter
+or visible SR replacement. Two first resolve intervals of the first
+capture window are selected, with up to four core textures (scene
+R11G11B10, depth, reconstructed R16G16 motion, NGX output) and three
+optional same-list postprocess targets (preoverlay, composite, final).
+The latter are skipped unless exact PS/VS, t0, live RTV identity,
+viewport, single-subresource state and same recording are observed.
+They are native-path color, NOT postprocessed SR, and preoverlay is
+not verified HUD-less. Original game output remains unchanged by design.
+
+Copies are recorded on the original producer list; only actual
+observed submission followed by completion of a private queue fence
+allows mapping. No guessed queue or frame-count retirement, no
+blocking CPU fence wait. At most 2 groups, 14 textures, 256 MiB allocated;
+references retained until process exit. Reset before submission,
+repeat submission, failure, missing queue hook, unsupported format or
+timeout produce partial evidence rather than guessed pixels. Use a
+separate run through RenderDoc/PIX for actual constants, active
+swapchain and draw semantics; if RenderDoc is loaded private readback
+is disabled to avoid hooking conflicts. Preview is not a benchmark.
+
+Raw files are tightly packed little-endian 32-bit pixels with size
+and DXGI resource format in the filename. They contain game imagery;
+review ZIP locally before sharing privately. No capture content is
+automatically uploaded. Metadata, logs and optional shader assembly
+are included even if GPU texture capture partially fails.

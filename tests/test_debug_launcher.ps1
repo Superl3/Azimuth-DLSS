@@ -43,7 +43,26 @@ try {
     if (!$failedAsExpected -or @(Get-ChildItem -LiteralPath $failure -Filter '*.zip').Count -ne 1) {
         throw 'An incomplete automatic capture must fail and preserve its evidence.'
     }
-    'PASS: automatic launcher packaging and failure evidence'
+    # Preview collect-only fixture: package only exact reported raw sizes.
+    $rawDir=Join-Path $game 'azimuth_preview_123_456'
+    New-Item -ItemType Directory -Path $rawDir | Out-Null
+    $rawName='f2002-sr-2x2-fmt26.raw'
+    [IO.File]::WriteAllBytes((Join-Path $rawDir $rawName),[byte[]]::new(16))
+    @('SR PREVIEW: fixture','DEBUG READY: fixture',
+      'DEBUG BEGIN id=1 firstResolveAfter=2001 limit=8 timeoutMs=8000',
+      "PREVIEW FILE directory=azimuth_preview_123_456 file=$rawName bytes=16",
+      'PREVIEW FILE directory=azimuth_preview_123_456 file=f2002-color-2x2-fmt26.raw bytes=16',
+      'PREVIEW COMPLETE groups=1 saved=1 failed=0 recordedFiles=1',
+      'DEBUG END id=1 reason=resolve_limit resolves=8 lastResolve=2010') | Set-Content -LiteralPath $log
+    $previewDest=Join-Path $root 'preview'
+    & $launcher -GameDir $game -Label 'preview-fixture' -Output '3840x1600' -RenderSetting 'test' -Preview -CollectOnly -Destination $previewDest
+    $previewZip=@(Get-ChildItem -LiteralPath $previewDest -Filter '*.zip')
+    $previewContents=Join-Path $root 'preview-contents'
+    Expand-Archive -LiteralPath $previewZip[0].FullName -DestinationPath $previewContents
+    if(!(Test-Path -LiteralPath (Join-Path $previewContents ('gpu-raw\'+$rawName)))){throw 'Missing preview raw texture.'}
+    $previewMeta=Get-Content -LiteralPath (Join-Path $previewContents 'capture.json') -Raw | ConvertFrom-Json
+    if($previewMeta.mode -ne 'preview' -or @($previewMeta.gpu_raw).Count -ne 1){throw 'Wrong preview metadata.'}
+    'PASS: automatic launcher packaging, failure evidence, and bounded preview raw texture fixture'
 } finally {
     $resolved = (Resolve-Path -LiteralPath $root).Path
     if ((Split-Path -Parent $resolved).TrimEnd('\') -eq $temp.TrimEnd('\') -and

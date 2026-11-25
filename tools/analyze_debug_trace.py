@@ -76,7 +76,8 @@ def parse_debug(text, output=None):
         if not w["counts"]["native_velocity"]:w["warnings"].append("No native velocity pass observed in this window.")
         if w["truncation"]:w["warnings"].append("Bounded log truncated; use GPU capture or a shorter window.")
         if not w["fg_discovery"]["draw_count"]:w["warnings"].append("No FG draw candidates; descriptor/PSO tracking may be incomplete.")
-    return {"debug_ready":"DEBUG READY:" in text,"capture_count":len(windows),
+    preview=[line for line in text.splitlines() if line.startswith(("SR PREVIEW:","PREVIEW ","SR PROBE RESULT "))]
+    return {"preview_observations":preview,"debug_ready":"DEBUG READY:" in text,"capture_count":len(windows),
             "startup":startup,"captures":windows,"renderdoc_observations":rdc,
             "warning":"CPU metadata is not a GPU capture or proof of resource contents. RenderDoc completion count is observational; inspect actual .rdc files. No guessed HUD/camera values and no routing/FG enablement."}
 
