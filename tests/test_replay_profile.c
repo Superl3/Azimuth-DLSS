@@ -9,7 +9,7 @@ int main(void){
     assert(!azrp_match_render(w,2560,1080)&&!azrp_match_output(w,1920,1080));
     assert(!azrp_profile_for("3840x2160").ow&&!azrp_profile_for(NULL).ow);
     assert(azrp_capture_groups(s)==2&&azrp_capture_groups(w)==1);
-    uint64_t wide_bytes=4ull*(5ull*w.rw*w.rh+4ull*w.ow*w.oh);
+    uint64_t wide_bytes=4ull*(6ull*w.rw*w.rh+4ull*w.ow*w.oh);
     assert(wide_bytes<256ull*1024*1024);
     puts("PASS: explicit SDR/wide replay profiles, exact 27/40 coordinate scale, bounded wide RAW group");
     return 0;

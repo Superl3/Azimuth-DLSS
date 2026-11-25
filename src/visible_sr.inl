@@ -17,7 +17,7 @@ typedef struct {
     unsigned long long recording,composite_work;
     uintptr_t target_id;
     AzrpSurface sr_surface;
-    ID3D12Resource *layers,*merged;
+    ID3D12Resource *layers,*merged,*probe_final;
     ID3D12DescriptorHeap *rtv,*heap;
 } AzvisFrame;
 static int azvis_window_locked(void){
@@ -31,6 +31,7 @@ static void visible_init(void){
 static void visible_release(AzvisFrame *v){
     if(v->heap)ID3D12DescriptorHeap_Release(v->heap);
     if(v->rtv)ID3D12DescriptorHeap_Release(v->rtv);
+    if(v->probe_final)ID3D12Resource_Release(v->probe_final);
     if(v->merged)ID3D12Resource_Release(v->merged);
     if(v->layers)ID3D12Resource_Release(v->layers);
     if(v->sr_surface.srv)ID3D12DescriptorHeap_Release(v->sr_surface.srv);
@@ -253,15 +254,25 @@ done:
 static void azvis_set_tables(ID3D12GraphicsCommandList *cl,const AzrpBindings *b){
     for(UINT i=0;i<AZRB_TABLES;++i)if(b->mask&azrb_bit(i))real_SetGraphicsRootDescriptorTable(cl,i,b->tables[i]);
 }
-static int visible_finalize(AzvisFrame *v,ID3D12GraphicsCommandList *cl,ListState *s,ID3D12Resource *native,ID3D12Resource *target,unsigned long long resolve){
+static int visible_finalize(AzvisFrame *v,ID3D12GraphicsCommandList *cl,ListState *s,ID3D12Resource *native,ID3D12Resource *target,unsigned long long resolve,int allow_probe){
     AcquireSRWLockShared(&azt_lock);
     int active=azvis_window_locked();
     ReleaseSRWLockShared(&azt_lock);
     if(!active){log_msg("VISIBLE SKIP resolve=%llu stage=final reason=trial_ended_or_chain_changed",resolve);return 0;}
     if(!v->enabled||!v->pre_ready||!v->composite_ready||v->list!=cl||v->recording!=s->trace_recording_id||
-       !azvis_texture(native,1280,720)||!azvis_texture(target,1920,1080)||s->vp_jittered||
-       !azpv_adjacent_work(v->composite_work,s->trace_work_seq)){
-        log_msg("VISIBLE SKIP resolve=%llu stage=final reason=chain_recording_or_nonadjacent_work pre=%d composite=%d priorWork=%llu finalWork=%llu expectedList=%p actualList=%p expectedRecording=%llu actualRecording=%llu",resolve,v->pre_ready,v->composite_ready,v->composite_work,s->trace_work_seq,(void *)v->list,(void *)cl,v->recording,s->trace_recording_id);return 0;
+       !azvis_texture(native,1280,720)||!azvis_texture(target,1920,1080)||s->vp_jittered){
+        log_msg("VISIBLE SKIP resolve=%llu stage=final reason=chain_recording_or_native_size pre=%d composite=%d expectedList=%p actualList=%p expectedRecording=%llu actualRecording=%llu",resolve,v->pre_ready,v->composite_ready,(void *)v->list,(void *)cl,v->recording,s->trace_recording_id);return 0;
+    }
+    int adjacent=azpv_adjacent_work(v->composite_work,s->trace_work_seq);
+    int probe=!adjacent;
+    if(probe){
+        log_msg("VISIBLE SKIP resolve=%llu stage=final reason=chain_recording_or_nonadjacent_work pre=%d composite=%d priorWork=%llu finalWork=%llu expectedList=%p actualList=%p expectedRecording=%llu actualRecording=%llu",resolve,v->pre_ready,v->composite_ready,v->composite_work,s->trace_work_seq,(void *)v->list,(void *)cl,v->recording,s->trace_recording_id);
+        if(!allow_probe)return 0;
+        /* The private layers were populated earlier in this very recording.
+           Intervening native work may change the actual native composite,
+           so a diagnostic draw into a NEW private RTV is allowed, but
+           never overwrite the game's final target for this case. */
+        log_msg("VISIBLE PROBE_BEGIN resolve=%llu reason=nonadjacent_work nativePreserved=1 staleCompositePossible=1",resolve);
     }
     ID3D12PipelineState *merge=NULL;
     AcquireSRWLockShared(&azvis_pso_lock);
@@ -269,12 +280,15 @@ static int visible_finalize(AzvisFrame *v,ID3D12GraphicsCommandList *cl,ListStat
     ReleaseSRWLockShared(&azvis_pso_lock);
     if(!merge){log_msg("VISIBLE SKIP resolve=%llu stage=final reason=no_exact_sdr_pso",resolve);return 0;}
     v->merged=azvis_new_texture(1,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,D3D12_RESOURCE_STATE_RENDER_TARGET);
-    D3D12_DESCRIPTOR_HEAP_DESC hd={0};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=1;
+    if(probe){v->probe_final=azvis_new_texture(1,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,D3D12_RESOURCE_STATE_RENDER_TARGET);if(!v->probe_final)return 0;}
+    D3D12_DESCRIPTOR_HEAP_DESC hd={0};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=probe?2u:1u;
     if(!v->merged||!real_CreateDescriptorHeap||FAILED(real_CreateDescriptorHeap(g_device,&hd,&IID_ID3D12DescriptorHeap,(void **)&v->rtv))||!v->rtv){
         log_msg("VISIBLE SKIP resolve=%llu stage=final reason=merge_allocation",resolve);return 0;
     }
     D3D12_CPU_DESCRIPTOR_HANDLE rtv;v->rtv->lpVtbl->GetCPUDescriptorHandleForHeapStart(v->rtv,&rtv);
     real_CreateRenderTargetView(g_device,v->merged,NULL,rtv);
+    D3D12_CPU_DESCRIPTOR_HANDLE probe_rtv=rtv;
+    if(probe){probe_rtv.ptr+=ID3D12Device_GetDescriptorHandleIncrementSize(g_device,D3D12_DESCRIPTOR_HEAP_TYPE_RTV);real_CreateRenderTargetView(g_device,v->probe_final,NULL,probe_rtv);}
     AzrpBindings a,b;
     if(!azvis_final_bindings(s,native,v,&a,&b,resolve))return 0;
     /* All gates and allocations passed BEFORE touching the native target.
@@ -286,16 +300,19 @@ static int visible_finalize(AzvisFrame *v,ID3D12GraphicsCommandList *cl,ListStat
     real_SetPipelineState(cl,merge);real_OMSetRenderTargets(cl,1,&rtv,FALSE,NULL);
     real_DrawInstanced(cl,3,1,0,0);
     hooks_transition(cl,v->merged,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    log_msg("VISIBLE HUD_COMPOSITE_RECORDED resolve=%llu size=1920x1080 policy=native_region alphaRecovered=0",resolve);
+    log_msg("VISIBLE %s resolve=%llu size=1920x1080 policy=native_region alphaRecovered=0",probe?"PROBE_HUD_RECORDED":"HUD_COMPOSITE_RECORDED",resolve);
     azvis_set_tables(cl,&b);real_SetPipelineState(cl,s->pso);
-    real_OMSetRenderTargets(cl,s->num_rtv,s->rtv,s->rtv_single,NULL);
+    if(probe)real_OMSetRenderTargets(cl,1,&probe_rtv,FALSE,NULL);
+    else real_OMSetRenderTargets(cl,s->num_rtv,s->rtv,s->rtv_single,NULL);
     real_DrawInstanced(cl,3,1,0,0);
+    if(probe)real_OMSetRenderTargets(cl,s->num_rtv,s->rtv,s->rtv_single,NULL);
     real_SetDescriptorHeaps(cl,s->num_heaps,s->heaps);
     for(UINT i=0;i<AZRB_TABLES;++i){
         if(s->trace_tables_mask&azrb_bit(i))real_SetGraphicsRootDescriptorTable(cl,i,s->tables[i]);
         if(s->trace_compute_mask&azrb_bit(i))real_SetComputeRootDescriptorTable(cl,i,s->trace_compute_tables[i]);
     }
     LARGE_INTEGER qpc;QueryPerformanceCounter(&qpc);
+    if(probe){log_msg("VISIBLE PROBE_FINAL_RECORDED resolve=%llu list=%p recording=%llu target=%p qpc=%lld nativePreserved=1 presentVerified=0",resolve,(void *)cl,v->recording,(void *)v->probe_final,(long long)qpc.QuadPart);return 2;}
     v->routed=1;v->target_id=(uintptr_t)target;
     log_msg("VISIBLE FINAL_RECORDED resolve=%llu list=%p recording=%llu target=%p qpc=%lld nativeFinalShader=1 presentVerified=0",resolve,(void *)cl,v->recording,(void *)target,(long long)qpc.QuadPart);
     return 1;

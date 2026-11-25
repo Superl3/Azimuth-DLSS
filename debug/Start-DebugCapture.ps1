@@ -228,7 +228,7 @@ try {
     if($Preview){
         if($content -notmatch 'SR PREVIEW:'){throw 'Log is not from preview mode.'}
         $total=0L
-        $rawRows=[regex]::Matches($content,'(?m)^PREVIEW FILE directory=(azimuth_preview_\d+_\d+) file=(f\d+-(?:color|depth|mv|sr|preoverlay|composite|final|replay|srpostfx|visiblehud|visiblefinal|hdrscene)-(\d+)x(\d+)-fmt(\d+)\.raw) bytes=(\d+)\r?$')
+        $rawRows=[regex]::Matches($content,'(?m)^PREVIEW FILE directory=(azimuth_preview_\d+_\d+) file=(f\d+-(?:color|depth|mv|sr|preoverlay|composite|final|replay|srpostfx|visiblehud|visiblefinal|hdrscene|hudprobe|finalprobe)-(\d+)x(\d+)-fmt(\d+)\.raw) bytes=(\d+)\r?$')
         foreach($row in $rawRows){
             if($previewFiles.Count -ge 22){break}
             $folder=Join-Path $game $row.Groups[1].Value

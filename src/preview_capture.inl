@@ -3,7 +3,7 @@
    is not a recording identity. Readback never guesses queue/state. */
 #include "preview_batch_policy.h"
 #define AZPV_GROUPS AZPV_CAPTURE_COUNT
-#define AZPV_SHOTS 12
+#define AZPV_SHOTS 14
 #define AZPV_LIVE 4
 #define AZPV_TOTAL (AZPV_GROUPS+AZPV_LIVE)
 #define AZPV_BATCHES (AZPV_TOTAL * 4)
@@ -331,8 +331,10 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
         }
         if(g->visible.enabled&&bit==2&&chain&&!missing&&target){
             visible_composite(&g->visible,cl,s,target,resolve);
-            if(g->visible.composite_ready){s->trace_watch_resolve=resolve;s->trace_watch_count=0;s->trace_watch_active=1;
-                log_msg("VISIBLE WORK_WATCH resolve=%llu list=%p recording=%llu work=%llu composite=%p",resolve,(void *)cl,s->trace_recording_id,s->trace_work_seq,(void *)target);}
+            /* Independent of successful SR preparation, observe the
+               native tail so an earlier gate cannot hide the next gap. */
+            s->trace_watch_resolve=resolve;s->trace_watch_count=0;s->trace_watch_active=1;
+            log_msg("VISIBLE WORK_WATCH resolve=%llu list=%p recording=%llu work=%llu composite=%p privateComposite=%d",resolve,(void *)cl,s->trace_recording_id,s->trace_work_seq,(void *)target,g->visible.composite_ready);
         }
         if(capture&&hash==0x577d52ef&&azrp_profile.wide&&azrp_sr_enabled){
             g->requested_mask|=2048u;
@@ -350,12 +352,17 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
             else if(hash==0xa93721c4&&chain&&!missing&&target&&g->visible.pre_ready&&g->visible.composite_ready&&
                g->visible.list==cl&&g->visible.recording==s->trace_recording_id){
                 AzpvBatch *batch=preview_batch(i,cl,s->trace_recording_id);
-                if(batch&&visible_finalize(&g->visible,cl,s,input,target,resolve)){
+                int result=batch?visible_finalize(&g->visible,cl,s,input,target,resolve,capture):0;
+                if(result==1){
                     routed=1;
                     if(capture){
                         if(!preview_add(batch,g->visible.merged,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,"visiblehud"))log_msg("VISIBLE SKIP resolve=%llu stage=visiblehud reason=readback",resolve);
                         if(!preview_add(batch,target,D3D12_RESOURCE_STATE_RENDER_TARGET,"visiblefinal"))log_msg("VISIBLE SKIP resolve=%llu stage=visiblefinal reason=readback",resolve);
                     }
+                }else if(result==2&&capture){
+                    g->requested_mask|=12288u;
+                    if(!preview_add(batch,g->visible.merged,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,"hudprobe"))log_msg("VISIBLE SKIP resolve=%llu stage=hudprobe reason=readback",resolve);
+                    if(!preview_add(batch,g->visible.probe_final,D3D12_RESOURCE_STATE_RENDER_TARGET,"finalprobe"))log_msg("VISIBLE SKIP resolve=%llu stage=finalprobe reason=readback",resolve);
                 }
             }else log_msg("VISIBLE SKIP resolve=%llu stage=final reason=chain_gate missing=0x%x chain=%d",resolve,missing,chain);
         }
@@ -454,7 +461,7 @@ static void preview_poll(void) {
     unsigned pending=0,files=0,good_groups=0,failed_groups=0;
     unsigned saved_mask[AZPV_GROUPS]={0};
     uint64_t now=GetTickCount64();
-    static const char *names[]={"color","depth","mv","sr","preoverlay","composite","final","replay","srpostfx","visiblehud","visiblefinal","hdrscene"};
+    static const char *names[]={"color","depth","mv","sr","preoverlay","composite","final","replay","srpostfx","visiblehud","visiblefinal","hdrscene","hudprobe","finalprobe"};
     for(unsigned i=0;i<azpv_batch_count;++i){
         AzpvBatch *b=&azpv_batches[i];
         if(!b->life.state||b->group>=AZPV_GROUPS)continue;
@@ -485,7 +492,7 @@ static void preview_poll(void) {
         if(b->life.state==PV_SAVED){
             files+=b->good;
             for(unsigned k=0;k<b->count;++k)if(b->shots[k].name)
-                for(unsigned j=0;j<12;++j)if(!strcmp(b->shots[k].name,names[j]))saved_mask[b->group]|=1u<<j;
+                for(unsigned j=0;j<14;++j)if(!strcmp(b->shots[k].name,names[j]))saved_mask[b->group]|=1u<<j;
         }else if(b->life.state!=PV_FAILED)++pending;
     }
     if(ended&&!pending){

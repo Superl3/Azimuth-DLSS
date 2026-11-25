@@ -284,7 +284,8 @@ static void visible_trace_draw(ID3D12GraphicsCommandList *cl,ListState *s,UINT c
        be involved. A bound-only edge is NOT promoted to proven lineage. */
     AzvisBufferMatch bm;
     int bb=azvis_match_buffer(chains,(uintptr_t)t->res,&bm);
-    if(lineage_window&&source_count&&t->desc.Dimension==D3D12_RESOURCE_DIMENSION_TEXTURE2D){
+    if(lineage_window&&source_count&&t->desc.Dimension==D3D12_RESOURCE_DIMENSION_TEXTURE2D&&
+       (bb||(!s->has_dsv&&!p->depth_enabled&&instances==1&&(count==3||count==6)))){
         if(bb&&azvis_edge_logs<256){
             log_msg("VISIBLE BACKBUFFER_DRAW resolveObserved=%llu list=%p recording=%llu target=%p chain=%p chainAttempt=%llu index=%u size=%llux%u pso=%p ps=%08lx-%08lx-%08lx-%08lx snapshotOnly=1 qpc=%lld",
                 azt_frame,(void *)cl,s->trace_recording_id,(void *)t->res,(void *)bm.chain,(unsigned long long)bm.generation,bm.index,(unsigned long long)t->desc.Width,t->desc.Height,(void *)s->pso,(unsigned long)p->hash[0],(unsigned long)p->hash[1],(unsigned long)p->hash[2],(unsigned long)p->hash[3],azvis_qpc());

@@ -571,3 +571,26 @@ hdrscene RAW; it is the actual t2 pixels at the observed final draw,
 not a proof of alpha extraction. Unknown input state, copy lineage,
 or output DXGI color space does not allow replacement. HDR output
 remains native regardless of these diagnostic results.
+
+
+### Independent SDR final-pixel probe on a nonadjacent tail
+
+If the original composite and final are in the same recording but a
+counted intervening work item blocks native replacement, the selected
+RAW groups may still replay the merge and original SDR final shader into
+private RTVs, using the already-owned private layers and current proven
+native final binding/restore conditions. This produces hudprobe and
+finalprobe (instead of visiblehud and visiblefinal), without touching
+the game's native final RTV. A nonadjacent tail remains a hard block for
+actual routing. The private probe may reflect an earlier composite if
+native work intervened, so it cannot prove final parity or presentation.
+It is attempted only for the two bounded SDR capture groups, not the
+rolling live slots. PROBE_BEGIN / PROBE_HUD_RECORDED /
+PROBE_FINAL_RECORDED, batch fence and raw file names distinguish it.
+No extra run is needed to check the merge PSO/curve if the work-tail
+gate alone fails. The general lineage scan now covers candidate
+fullscreen draws at any destination size and creation-snapshot
+backbuffer draws; this is not an exhaustive shader-use proof.
+The wide shader fixture checks real compiler/disassembly at 0.675.
+The original native 1920x1080 MV-magnitude literal remains unchanged:
+it is a native motion-blur scale, not one of the two SV_POSITION loads.

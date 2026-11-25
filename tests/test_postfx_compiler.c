@@ -31,6 +31,10 @@ int main(void) {
     assert(SUCCEEDED(disasm(out,n,0,NULL,&asm1))&&asm1);
     const char *text=(const char *)ID3D10Blob_GetBufferPointer(asm1);
     assert(strstr(text,"mul ")&&strstr(text,"ftoi ")&&strstr(text,"0.666667"));
+    ID3D10Blob_Release(asm1);asm1=NULL;
+    n=azdx_patch_positions(bytes,size,out,size+40,0.675f,0.675f,1);
+    assert(n==size+40&&SUCCEEDED(disasm(out,n,0,NULL,&asm1))&&asm1);
+    assert(strstr((const char *)ID3D10Blob_GetBufferPointer(asm1),"0.675000"));
     ID3D10Blob_Release(asm1);ID3D10Blob_Release(asm0);ID3D10Blob_Release(code);
     HeapFree(GetProcessHeap(),0,out);
     code=NULL;err=NULL;

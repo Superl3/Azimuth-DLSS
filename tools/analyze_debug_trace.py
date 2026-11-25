@@ -51,7 +51,7 @@ def analyze_visible(text):
         n=int(resolve)
         if tag in ("SRPOSTFX_READY","HUD_INPUT_READY","HUD_COMPOSITE_RECORDED","FINAL_RECORDED",
                    "FINAL_SUBMITTED","FINAL_GPU_COMPLETE","FINAL_CANDIDATE","TARGET_SUBMITTED",
-                   "PRESENT_BARRIER","PRESENT_BARRIER_SUBMITTED","WORK_WATCH","WORK","WORK_BIND","WORK_BARRIER","WORK_SUBMIT","EDGE","SKIP"):
+                   "PRESENT_BARRIER","PRESENT_BARRIER_SUBMITTED","WORK_WATCH","WORK","WORK_BIND","WORK_BARRIER","WORK_SUBMIT","EDGE","PROBE_BEGIN","PROBE_HUD_RECORDED","PROBE_FINAL_RECORDED","SKIP"):
             frame=frames.setdefault(n,{"resolve":n,"stages":{},"skips":[]})
             frame["stages"][tag]=frame["stages"].get(tag,0)+1
             if tag=="SKIP":
