@@ -1,0 +1,20 @@
+#ifndef AZIMUTH_PREVIEW_BATCH_POLICY_H
+#define AZIMUTH_PREVIEW_BATCH_POLICY_H
+#include <stdint.h>
+enum {PV_RECORDED=1,PV_SUBMITTED,PV_SAVED,PV_FAILED};
+typedef struct {int state,current;} AzpvBatchLife;
+static inline int azpv_can_append(AzpvBatchLife b,uint64_t old_recording,uint64_t recording) {
+    return b.state==PV_RECORDED&&b.current&&recording&&old_recording==recording;
+}
+static inline void azpv_on_reset(AzpvBatchLife *b) {
+    b->current=0;
+    if(b->state==PV_RECORDED)b->state=PV_FAILED;
+}
+static inline void azpv_on_submit(AzpvBatchLife *b,unsigned matches,int signaled) {
+    if(!matches||!b->current)return;
+    b->state=(matches==1&&b->state==PV_RECORDED&&signaled)?PV_SUBMITTED:PV_FAILED;
+}
+static inline int azpv_can_map(AzpvBatchLife b,uint64_t completed) {
+    return b.state==PV_SUBMITTED&&!b.current&&completed>=1&&completed!=UINT64_MAX;
+}
+#endif

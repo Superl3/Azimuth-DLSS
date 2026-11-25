@@ -59,6 +59,8 @@ jobs:
           python tests/test_capture_sr.py
           zig cc -target x86_64-windows-gnu -std=c11 -Wall -Wextra -Werror tests/test_debug_capture_policy.c -o build/test_debug_capture_policy.exe
           ./build/test_debug_capture_policy.exe
+          zig cc -target x86_64-windows-gnu -std=c11 -Wall -Wextra -Werror tests/test_preview_batch_policy.c -o build/test_preview_batch_policy.exe
+          ./build/test_preview_batch_policy.exe
           python tests/test_debug_capture.py
       - name: Test automatic capture packaging
         shell: pwsh

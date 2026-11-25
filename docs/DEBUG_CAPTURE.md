@@ -238,3 +238,7 @@ recording state, 0x20 viewport/scissor, 0x40 t0 binding. A later stage
 may save even if the earlier one failed to save, when its identity chain
 and its own state are verified. These are original-game snapshots, not
 SR-replayed postprocess results. No state gate was relaxed.
+
+### Separate recording batches (v0.4 foundation)
+
+The moving Jitter ON capture showed the same command-list pointer being submitted for the core SR work, then reused before native postprocess draws. A logical resolve group is now separate from up to four independent recording batches. Each batch holds its own fence and resource references. Mapping requires a successful reset of that recording and fence completion; a never-reset list may time out rather than return ambiguous pixels. No assumption of identical queues or Present frame identity is made. Native postprocess readback still requires the existing explicit render-target barrier/view checks. PREVIEW BATCH, SUBMITTED, SAVED and GROUP_RESULT give batch/recording and per-stage masks. Capture size remains 14 textures and 256 MiB maximum; no screen modification. Repeated submissions are rejected before mapping. The previous version's postfx gate never ran after core submission; now later recordings can independently reach it.
