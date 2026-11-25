@@ -63,25 +63,55 @@ static inline void azrb_direct(AzrbLayout *l,unsigned root,unsigned vis,unsigned
 }
 /* Exact shader pair: pixel t0 is scene color; vertex t0 is a different
    exposure texture. Never substitute an alias used by the VS. */
-static inline int azrb_finish(const AzrbLayout *l,uint32_t base[AZRB_TABLES],uint32_t *total,uint32_t *mask) {
-    if(!l->valid||l->req[0].mode!=AZRB_TABLE||l->req[16].mode!=AZRB_TABLE||
-       (l->req[0].root==l->req[16].root&&l->req[0].offset==l->req[16].offset))return 0;
+typedef enum {
+    AZRB_FINISH_OK=0,AZRB_FINISH_INVALID,AZRB_FINISH_PS_T0,AZRB_FINISH_VS_T0,
+    AZRB_FINISH_VS_ALIAS,AZRB_FINISH_ALIAS,AZRB_FINISH_MISSING,
+    AZRB_FINISH_SRV_MODE,AZRB_FINISH_TABLE,AZRB_FINISH_SPAN,AZRB_FINISH_EMPTY
+} AzrbFinish;
+static inline const char *azrb_finish_name(AzrbFinish status) {
+    switch(status){
+        case AZRB_FINISH_OK:return "ok";
+        case AZRB_FINISH_INVALID:return "layout_invalid";
+        case AZRB_FINISH_PS_T0:return "ps_t0_not_table";
+        case AZRB_FINISH_VS_T0:return "vs_t0_not_table";
+        case AZRB_FINISH_VS_ALIAS:return "ps_vs_t0_alias";
+        case AZRB_FINISH_ALIAS:return "ps_t0_alias";
+        case AZRB_FINISH_MISSING:return "required_binding_missing";
+        case AZRB_FINISH_SRV_MODE:return "srv_not_table";
+        case AZRB_FINISH_TABLE:return "invalid_table";
+        case AZRB_FINISH_SPAN:return "heap_span_limit";
+        case AZRB_FINISH_EMPTY:return "empty_resource_tables";
+    }
+    return "unknown";
+}
+/* Same acceptance policy as azrb_finish; req_index is diagnostic only. */
+static inline AzrbFinish azrb_finish_detail(const AzrbLayout *l,uint32_t base[AZRB_TABLES],uint32_t *total,uint32_t *mask,unsigned *req_index) {
+    *req_index=UINT32_MAX;
+    if(!l->valid)return AZRB_FINISH_INVALID;
+    if(l->req[0].mode!=AZRB_TABLE){*req_index=0;return AZRB_FINISH_PS_T0;}
+    if(l->req[16].mode!=AZRB_TABLE){*req_index=16;return AZRB_FINISH_VS_T0;}
+    if(l->req[0].root==l->req[16].root&&l->req[0].offset==l->req[16].offset){*req_index=16;return AZRB_FINISH_VS_ALIAS;}
     /* No other required binding may alias the substituted PS t0 slot,
        including differently typed descriptors or shared stage tables. */
     for(unsigned i=1;i<AZRB_REQS;++i)
-        if(l->req[i].mode==AZRB_TABLE&&l->req[i].root==l->req[0].root&&l->req[i].offset==l->req[0].offset)return 0;
+        if(l->req[i].mode==AZRB_TABLE&&l->req[i].root==l->req[0].root&&l->req[i].offset==l->req[0].offset){*req_index=i;return AZRB_FINISH_ALIAS;}
     *total=0;*mask=0;memset(base,0,AZRB_TABLES*sizeof(*base));
     for(unsigned i=0;i<AZRB_REQS;++i){
         const AzrbReq *r=&l->req[i];
-        if(!r->mode||(r->type==AZRB_SRV&&r->reg!=6&&r->mode!=AZRB_TABLE))return 0;
+        if(!r->mode){*req_index=i;return AZRB_FINISH_MISSING;}
+        if(r->type==AZRB_SRV&&r->reg!=6&&r->mode!=AZRB_TABLE){*req_index=i;return AZRB_FINISH_SRV_MODE;}
         if(r->mode!=AZRB_TABLE)continue;
-        if(r->root>=AZRB_TABLES||r->offset>=l->span[r->root]||!l->kind[r->root])return 0;
+        if(r->root>=AZRB_TABLES||r->offset>=l->span[r->root]||!l->kind[r->root]){*req_index=i;return AZRB_FINISH_TABLE;}
         if(l->kind[r->root]!=1)continue;
         if(*mask&(1u<<r->root))continue;
         uint32_t n=l->span[r->root];
-        if(!n||n>AZRB_HEAP_LIMIT-*total)return 0;
+        if(!n||n>AZRB_HEAP_LIMIT-*total){*req_index=i;return AZRB_FINISH_SPAN;}
         base[r->root]=*total;*total+=n;*mask|=1u<<r->root;
     }
-    return *total!=0;
+    return *total!=0?AZRB_FINISH_OK:AZRB_FINISH_EMPTY;
+}
+static inline int azrb_finish(const AzrbLayout *l,uint32_t base[AZRB_TABLES],uint32_t *total,uint32_t *mask) {
+    unsigned ignored;
+    return azrb_finish_detail(l,base,total,mask,&ignored)==AZRB_FINISH_OK;
 }
 #endif

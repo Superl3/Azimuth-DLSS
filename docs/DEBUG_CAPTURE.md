@@ -300,3 +300,22 @@ Up to 18 textures under the existing 256 MiB readback cap. No FG,
 UI recomposition, actual camera constant values, or present takeover.
 
 The SR replay additionally rejects every alias of PS t0, requires all original graphics/compute descriptor table bindings to be accounted for before switching heaps, and checks that a separate SR producer recording has been reset and its fence completed. A producer on the same still-recording list may be used in order. These strict gates can legitimately skip the experiment; the recorded reason is evidence to improve the next implementation, not permission to bypass GPU synchronization. The native replay remains independent of descriptor mirroring.
+
+
+### SR replay root-layout diagnostics
+
+The former combined reason=root_layout has been split into three ordered
+replay gates (all include the actual Resolve and graphics root pointer):
+root_layout_unregistered, root_layout_validation_failed, trace_incomplete.
+No acceptance predicate, heap limit, descriptor restoration requirement
+or GPU synchronization condition was relaxed. SR_LAYOUT_GATE reports
+registration/count/trace state. SR_LAYOUT_REJECT identifies the exact
+failed validation check, first failing requirement (stage/type/register,
+mode/root/offset), missing requirement mask and the two t0 bindings.
+Registration failures are emitted at root creation with resolve=0
+(not an actual Resolve), phase=registration and the root pointer; correlate
+with the pointer in the later per-Resolve skip. Deserializer failures,
+unsupported/invalid layouts and a full registry are logged too. The
+replay path still registers only validated layouts. If several conditions
+are false, the first failure follows the original short-circuit ordering.
+The debug summary already includes POSTFX SR_ lines.

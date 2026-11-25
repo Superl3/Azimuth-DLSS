@@ -23,6 +23,18 @@ int main(void){
     l=layout();l.req[3].mode=0;assert(!azrb_finish(&l,base,&total,&mask));
     l=layout();l.span[3]=AZRB_HEAP_LIMIT;assert(!azrb_finish(&l,base,&total,&mask));
     l=layout();azrb_range(&l,8,AZRB_ALL,AZRB_SRV,0,0,1,0);assert(!azrb_finish(&l,base,&total,&mask));
-    puts("PASS: exact PS/VS bindings, separate t0, bounded tables and reject ambiguity");
+    unsigned req;
+    l=layout();assert(azrb_finish_detail(&l,base,&total,&mask,&req)==AZRB_FINISH_OK&&req==UINT32_MAX);
+    l.valid=0;assert(azrb_finish_detail(&l,base,&total,&mask,&req)==AZRB_FINISH_INVALID);
+    l=layout();l.req[0].mode=AZRB_UNBOUND;assert(azrb_finish_detail(&l,base,&total,&mask,&req)==AZRB_FINISH_PS_T0&&req==0);
+    l=layout();l.req[16].mode=AZRB_UNBOUND;assert(azrb_finish_detail(&l,base,&total,&mask,&req)==AZRB_FINISH_VS_T0&&req==16);
+    l=layout();l.req[16].root=l.req[0].root;l.req[16].offset=l.req[0].offset;
+    assert(azrb_finish_detail(&l,base,&total,&mask,&req)==AZRB_FINISH_VS_ALIAS&&req==16);
+    l=layout();l.req[3].offset=0;assert(azrb_finish_detail(&l,base,&total,&mask,&req)==AZRB_FINISH_ALIAS&&req==3);
+    l=layout();l.req[3].mode=AZRB_UNBOUND;assert(azrb_finish_detail(&l,base,&total,&mask,&req)==AZRB_FINISH_MISSING&&req==3);
+    l=layout();l.req[3].mode=AZRB_DIRECT;assert(azrb_finish_detail(&l,base,&total,&mask,&req)==AZRB_FINISH_SRV_MODE&&req==3);
+    l=layout();l.req[3].offset=12;assert(azrb_finish_detail(&l,base,&total,&mask,&req)==AZRB_FINISH_TABLE&&req==3);
+    l=layout();l.span[3]=AZRB_HEAP_LIMIT;assert(azrb_finish_detail(&l,base,&total,&mask,&req)==AZRB_FINISH_SPAN&&req==16);
+    puts("PASS: exact PS/VS bindings, separate t0, bounded tables, reject ambiguity and detailed failure reasons");
     return 0;
 }

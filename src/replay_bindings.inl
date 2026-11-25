@@ -77,13 +77,27 @@ static void azrp_range(AzrbLayout *l,unsigned root,unsigned vis,unsigned type,un
     azrb_range(l,root,vis,type,reg,space,count,start);
     *next=count==UINT_MAX||start==UINT_MAX||count>UINT_MAX-start?UINT_MAX:start+count;
 }
+/* Registration rejects invalid layouts before inserting them. Log the
+   actual rejection with the root identity so a later Resolve's missing
+   entry can be correlated without registering an unsafe layout. */
+static void azrp_log_layout_failure(ID3D12RootSignature *rs,const AzrbLayout *l,AzrbFinish status,unsigned req,unsigned long long resolve,const char *phase){
+    unsigned missing=0;
+    for(unsigned i=0;i<AZRB_REQS;++i)if(!l->req[i].mode)missing|=1u<<i;
+    const AzrbReq *bad=req<AZRB_REQS?&l->req[req]:NULL;
+    log_msg("POSTFX SR_LAYOUT_REJECT phase=%s resolve=%llu root=%p detail=%s reqIndex=%u stage=%u type=%u reg=%u mode=%u tableRoot=%u offset=%u valid=%d missingMask=0x%05x psT0Mode=%u psT0Root=%u psT0Offset=%u vsT0Mode=%u vsT0Root=%u vsT0Offset=%u",
+        phase,resolve,(void *)rs,azrb_finish_name(status),req,bad?bad->stage:UINT_MAX,bad?bad->type:UINT_MAX,bad?bad->reg:UINT_MAX,bad?bad->mode:UINT_MAX,bad?bad->root:UINT_MAX,bad?bad->offset:UINT_MAX,
+        l->valid,missing,l->req[0].mode,l->req[0].root,l->req[0].offset,l->req[16].mode,l->req[16].root,l->req[16].offset);
+}
 static void azrp_note_root(ID3D12RootSignature *rs,const void *blob,SIZE_T bytes){
-    if(!azrp_sr_enabled||!rs||!blob||!bytes)return;
+    if(!azrp_sr_enabled||!rs)return;
+    if(!blob||!bytes){log_msg("POSTFX SR_LAYOUT_REJECT phase=registration resolve=0 root=%p detail=missing_serialized_root",(void *)rs);return;}
     typedef HRESULT(WINAPI *Deserializer)(LPCVOID,SIZE_T,REFIID,void **);
     HMODULE dll=GetModuleHandleW(L"d3d12.dll");
     Deserializer fn=dll?(Deserializer)(void *)GetProcAddress(dll,"D3D12CreateVersionedRootSignatureDeserializer"):NULL;
     ID3D12VersionedRootSignatureDeserializer *obj=NULL;
-    if(!fn||FAILED(fn(blob,bytes,&IID_ID3D12VersionedRootSignatureDeserializer,(void **)&obj))||!obj)return;
+    if(!fn){log_msg("POSTFX SR_LAYOUT_REJECT phase=registration resolve=0 root=%p detail=deserializer_unavailable",(void *)rs);return;}
+    HRESULT hr=fn(blob,bytes,&IID_ID3D12VersionedRootSignatureDeserializer,(void **)&obj);
+    if(FAILED(hr)||!obj){log_msg("POSTFX SR_LAYOUT_REJECT phase=registration resolve=0 root=%p detail=deserialize_failed hr=%08lx",(void *)rs,(unsigned long)hr);return;}
     const D3D12_VERSIONED_ROOT_SIGNATURE_DESC *desc=obj->lpVtbl->GetUnconvertedRootSignatureDesc(obj);
     AzrbLayout l;azrb_init(&l);
 #define AZRP_PARSE_ROOT(rd,Param,Range) do { \
@@ -119,13 +133,15 @@ static void azrp_note_root(ID3D12RootSignature *rs,const void *blob,SIZE_T bytes
 #undef AZRP_PARSE_ROOT
     obj->lpVtbl->Release(obj);
     uint32_t base[AZRB_TABLES],total,mask;
-    if(!azrb_finish(&l,base,&total,&mask))return;
+    unsigned req;
+    AzrbFinish status=azrb_finish_detail(&l,base,&total,&mask,&req);
+    if(status!=AZRB_FINISH_OK){azrp_log_layout_failure(rs,&l,status,req,0,"registration");return;}
     AcquireSRWLockExclusive(&azt_lock);
     if(azrp_root_count<AZRP_ROOTS){
         ID3D12RootSignature_AddRef(rs);
         unsigned i=azrp_root_count++;azrp_roots[i].rs=rs;azrp_roots[i].layout=l;
         log_msg("POSTFX SR_LAYOUT root=%p entries=%u psT0Root=%u psT0Offset=%u vsT0Root=%u vsT0Offset=%u",(void *)rs,total,l.req[0].root,l.req[0].offset,l.req[16].root,l.req[16].offset);
-    }
+    }else log_msg("POSTFX SR_LAYOUT_REJECT phase=registration resolve=0 root=%p detail=registry_full registered=%u capacity=%u",(void *)rs,azrp_root_count,(unsigned)AZRP_ROOTS);
     ReleaseSRWLockExclusive(&azt_lock);
 }
 /* Same original root signature. Only descriptor tables change; root CBV
@@ -144,12 +160,32 @@ static int azrp_prepare_bindings(ListState *s,ID3D12Resource *scene,ID3D12Resour
     D3D12_CPU_DESCRIPTOR_HANDLE cpu;D3D12_GPU_DESCRIPTOR_HANDLE gpu;
     out->heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(out->heap,&cpu);
     out->heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(out->heap,&gpu);
-    int ok=0;const char *reason="root_layout";
+    int ok=0;const char *reason="unknown";
+    const char *detail="none";
     AcquireSRWLockExclusive(&azt_lock);
     const AzrbLayout *l=NULL;
     for(unsigned i=0;i<azrp_root_count;++i)if(azrp_roots[i].rs==s->trace_graphics_rs){l=&azrp_roots[i].layout;break;}
     uint32_t base[AZRB_TABLES],total,mask;
-    if(!l||!azrb_finish(l,base,&total,&mask)||azt_incomplete)goto done;
+    /* Preserve the original short-circuit ordering and fail-closed gates. */
+    if(!l){
+        reason="root_layout_unregistered";
+        log_msg("POSTFX SR_LAYOUT_GATE resolve=%llu root=%p registered=0 registryCount=%u registryCapacity=%u traceIncomplete=%d genericRootKnown=%d",
+            resolve,(void *)s->trace_graphics_rs,azrp_root_count,(unsigned)AZRP_ROOTS,azt_incomplete,azt_root_slot(s->trace_graphics_rs,0)!=NULL);
+        goto done;
+    }
+    unsigned req;
+    AzrbFinish status=azrb_finish_detail(l,base,&total,&mask,&req);
+    if(status!=AZRB_FINISH_OK){
+        reason="root_layout_validation_failed";detail=azrb_finish_name(status);
+        azrp_log_layout_failure(s->trace_graphics_rs,l,status,req,resolve,"replay");
+        goto done;
+    }
+    if(azt_incomplete){
+        reason="trace_incomplete";
+        log_msg("POSTFX SR_LAYOUT_GATE resolve=%llu root=%p registered=1 finish=ok traceIncomplete=%d descriptorsUsed=%u descriptorsCapacity=%u",
+            resolve,(void *)s->trace_graphics_rs,azt_incomplete,azt_desc_used,(unsigned)AZT_DESCS);
+        goto done;
+    }
     AztRoot *gr=azt_root_slot(s->trace_graphics_rs,0);
     if(!gr||!gr->table_layout_known||(s->trace_tables_mask&gr->tables_all)!=gr->tables_all){reason="graphics_restore_unproven";goto done;}
     if(s->compute_rs){
@@ -191,6 +227,6 @@ static int azrp_prepare_bindings(ListState *s,ID3D12Resource *scene,ID3D12Resour
     log_msg("POSTFX SR_BINDINGS resolve=%llu entries=%u root=%p tables=0x%08x shadowUsed=%u",resolve,total,(void *)s->trace_graphics_rs,out->mask,azrp_shadow_used);
 done:
     ReleaseSRWLockExclusive(&azt_lock);
-    if(!ok){ID3D12DescriptorHeap_Release(out->heap);memset(out,0,sizeof(*out));log_msg("POSTFX SR_REPLAY SKIP resolve=%llu reason=%s",resolve,reason);}
+    if(!ok){ID3D12DescriptorHeap_Release(out->heap);memset(out,0,sizeof(*out));log_msg("POSTFX SR_REPLAY SKIP resolve=%llu reason=%s root=%p detail=%s",resolve,reason,(void *)s->trace_graphics_rs,detail);}
     return ok;
 }
