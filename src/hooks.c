@@ -695,6 +695,7 @@ static void STDMETHODCALLTYPE hook_ResourceBarrier(ID3D12GraphicsCommandList *cl
         }
     }
     real_ResourceBarrier(cl, n, b);
+    if(azvis_enabled)visible_trace_barriers(cl,state_for(cl),n,b);
 }
 
 void hooks_transition(ID3D12GraphicsCommandList *cl, ID3D12Resource *r, D3D12_RESOURCE_STATES from,
@@ -1255,13 +1256,17 @@ static HRESULT STDMETHODCALLTYPE hook_CreateSwapChainForHwnd(IDXGIFactory2 *f, I
                                                              const DXGI_SWAP_CHAIN_DESC1 *desc,
                                                              const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *fs,
                                                              IDXGIOutput *out, IDXGISwapChain1 **sc) {
+    uint64_t attempt=visible_create_begin(hwnd,device,desc,fs);
     HRESULT hr = real_CreateSwapChainForHwnd(f, device, hwnd, desc, fs, out, sc);
+    if(attempt)log_msg("VISIBLE SWAPCHAIN_RESULT attempt=%llu hwnd=%p hr=%08lx chain=%p qpc=%lld",
+        (unsigned long long)attempt,(void *)hwnd,(unsigned long)hr,SUCCEEDED(hr)&&sc?(void *)*sc:NULL,azvis_qpc());
     if (SUCCEEDED(hr) && sc && *sc) {
         ensure_hotkey_thread();
         log_msg("swap chain %ux%u format %d hooked", desc->Width, desc->Height, (int)desc->Format);
         dlss_sr_note_swapchain(desc->Width, desc->Height);
-        fg_trace_swapchain(*sc, device);
-        visible_swapchain(*sc,device);
+        AzfgChain snapshot;
+        fg_trace_swapchain(*sc,device,&snapshot);
+        if(attempt)visible_note_chain(attempt,(uintptr_t)hwnd,(uintptr_t)*sc,&snapshot);
     }
     return hr;
 }

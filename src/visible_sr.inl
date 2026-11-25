@@ -7,6 +7,7 @@
 #define AZVIS_MS 10000u
 #define AZPV_CAPTURE_COUNT 2u
 static int azvis_enabled;
+static volatile LONG azvis_chain_changed;
 static SRWLOCK azvis_pso_lock=SRWLOCK_INIT;
 static struct {ID3D12PipelineState *original,*merge;} azvis_psos[AZVIS_PSO_MAX];
 static unsigned azvis_pso_count;
@@ -20,12 +21,12 @@ typedef struct {
     ID3D12DescriptorHeap *rtv,*heap;
 } AzvisFrame;
 static int azvis_window_locked(void){
-    return azvis_enabled&&azdbg.id==1&&GetTickCount64()-azdbg.started_ms<AZVIS_MS;
+    return azvis_enabled&&!InterlockedCompareExchange(&azvis_chain_changed,0,0)&&azdbg.id==1&&GetTickCount64()-azdbg.started_ms<AZVIS_MS;
 }
 static void visible_init(void){
     char b[8];DWORD n=GetEnvironmentVariableA("AZIMUTH_DEBUG_VISIBLE_SR",b,sizeof(b));
     azvis_enabled=azrp_enabled&&azrp_sr_enabled&&n==1&&b[0]=='1';
-    if(n==1&&b[0]=='1')log_msg("VISIBLE CONFIG enabled=%d durationMs=%u mode=native_hud_region_retention sdr=1 presentVerified=0",azvis_enabled,AZVIS_MS);
+    if(n==1&&b[0]=='1')log_msg("VISIBLE CONFIG enabled=%d durationMs=%u mode=native_hud_region_retention sdr=1 presentVerified=0 swapchainRefs=0",azvis_enabled,AZVIS_MS);
 }
 static void visible_release(AzvisFrame *v){
     if(v->heap)ID3D12DescriptorHeap_Release(v->heap);
@@ -253,10 +254,14 @@ static void azvis_set_tables(ID3D12GraphicsCommandList *cl,const AzrpBindings *b
     for(UINT i=0;i<AZRB_TABLES;++i)if(b->mask&azrb_bit(i))real_SetGraphicsRootDescriptorTable(cl,i,b->tables[i]);
 }
 static int visible_finalize(AzvisFrame *v,ID3D12GraphicsCommandList *cl,ListState *s,ID3D12Resource *native,ID3D12Resource *target,unsigned long long resolve){
+    AcquireSRWLockShared(&azt_lock);
+    int active=azvis_window_locked();
+    ReleaseSRWLockShared(&azt_lock);
+    if(!active){log_msg("VISIBLE SKIP resolve=%llu stage=final reason=trial_ended_or_chain_changed",resolve);return 0;}
     if(!v->enabled||!v->pre_ready||!v->composite_ready||v->list!=cl||v->recording!=s->trace_recording_id||
        !azvis_texture(native,1280,720)||!azvis_texture(target,1920,1080)||s->vp_jittered||
        !azpv_adjacent_work(v->composite_work,s->trace_work_seq)){
-        log_msg("VISIBLE SKIP resolve=%llu stage=final reason=chain_recording_or_nonadjacent_work",resolve);return 0;
+        log_msg("VISIBLE SKIP resolve=%llu stage=final reason=chain_recording_or_nonadjacent_work pre=%d composite=%d priorWork=%llu finalWork=%llu",resolve,v->pre_ready,v->composite_ready,v->composite_work,s->trace_work_seq);return 0;
     }
     ID3D12PipelineState *merge=NULL;
     AcquireSRWLockShared(&azvis_pso_lock);

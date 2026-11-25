@@ -27,7 +27,8 @@ static void fg_trace_init(void) {
     azfg_trace=1;
     log_msg("FG TRACE ONLY start=%u resolves=%u budget=%u (recording order; no frame generation)",azfg_start,azfg_resolves,azfg_budget);
 }
-static void fg_trace_swapchain(IDXGISwapChain1 *sc,IUnknown *device) {
+static void fg_trace_swapchain(IDXGISwapChain1 *sc,IUnknown *device,AzfgChain *snapshot) {
+    if(snapshot)memset(snapshot,0,sizeof(*snapshot));
     if (!azfg_trace || !sc) return;
     DXGI_SWAP_CHAIN_DESC1 d;
     memset(&d,0,sizeof(d));
@@ -52,6 +53,7 @@ static void fg_trace_swapchain(IDXGISwapChain1 *sc,IUnknown *device) {
             ID3D12Resource_Release(r);
         }
     }
+    if(snapshot)*snapshot=v;
     AcquireSRWLockExclusive(&azt_lock);
     unsigned slot=azfg_chains;
     for (unsigned i=0;i<azfg_chains;++i) if (azfg_chain[i].chain==v.chain) {slot=i;break;}

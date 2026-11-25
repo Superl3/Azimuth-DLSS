@@ -13,6 +13,7 @@ param(
     [switch]$PreviewReplay,
     [switch]$PreviewSRReplay,
     [switch]$VisibleSR,
+    [string]$PresentMonCsv,
     [ValidateSet('quality','balanced','performance')][string]$Quality = 'quality',
     [ValidateRange(0, 1000000)][int]$AutoResolve = 0,
     [switch]$ExitAfterCapture,
@@ -146,7 +147,7 @@ try {
             Write-Host 'Enter real gameplay. Press F8 once while driving. Repeat after the bounded capture for additional samples.'
         }
         if($Preview){
-            if($VisibleSR){Write-Warning 'Visible SR SDR alpha: after F8, up to ten seconds of gated native final-target replacement. Native HUD pixels retained; actual Present not yet proven.'}
+            if($VisibleSR){Write-Warning 'Visible SR SDR alpha: after F8, up to ten seconds of gated native final-target replacement. Native HUD pixels retained; SDR only: explicitly disable HDR in the game. No swapchain references are retained; actual Present needs external ETW or screen evidence.'}
             else{Write-Host 'Preview captures offscreen SR and selected GPU textures; no visible SR replacement.'}
             if($PreviewJitter){Write-Warning 'Experimental viewport jitter can affect the displayed native fallback scene.'}
         }
@@ -212,6 +213,14 @@ try {
         Write-Host "Selected shader disassembly files: $($shaderFiles.Count)"
         if(!$shaderFiles.Count){Write-Warning 'No disassembly exported. Check DEBUG SHADER_DUMP lines.'}
     }
+    $presentMonPackaged=$false
+    if($PresentMonCsv){
+        $pm=Get-Item -LiteralPath $PresentMonCsv -ErrorAction SilentlyContinue
+        if($pm -and !$pm.PSIsContainer -and !($pm.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $pm.Length -gt 0 -and $pm.Length -le 67108864){
+            Copy-Item -LiteralPath $pm.FullName -Destination (Join-Path $stage 'presentmon.csv')
+            $presentMonPackaged=$true
+        }else{Write-Warning 'PresentMon CSV missing or invalid; preserving in-process evidence.'}
+    }
     $previewFiles=@()
     if($Preview){
         if($content -notmatch 'SR PREVIEW:'){throw 'Log is not from preview mode.'}
@@ -245,7 +254,7 @@ try {
         automatic_wait_expired = $autoWaitExpired
         files_sha256 = [ordered]@{ 'azimuth.exe' = (FileHashOrNull $exe); 'dxgi.dll' = (FileHashOrNull $proxy); 'azimuth_ngx.dll' = (FileHashOrNull $bridge) }
         selected_shader_disassembly = $shaderFiles
-        gpu_raw = $previewFiles; preview_complete = [bool]($content -match '(?m)^PREVIEW COMPLETE '); preview_quality = $(if($Preview){$Quality}else{$null}); preview_jitter_requested = [bool]$PreviewJitter; preview_native_replay_requested = [bool]$PreviewReplay; preview_sr_replay_requested = [bool]$PreviewSRReplay; visible_sr_requested = [bool]$VisibleSR
+        gpu_raw = $previewFiles; preview_complete = [bool]($content -match '(?m)^PREVIEW COMPLETE '); preview_quality = $(if($Preview){$Quality}else{$null}); preview_jitter_requested = [bool]$PreviewJitter; preview_native_replay_requested = [bool]$PreviewReplay; preview_sr_replay_requested = [bool]$PreviewSRReplay; visible_sr_requested = [bool]$VisibleSR; presentmon_csv_packaged = $presentMonPackaged
         notice = 'Local evidence. Explicit preview includes selected raw game textures. Optional selected shader assembly. No game binaries or saves. Review privately.'
     }
     $meta | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $stage 'capture.json') -Encoding UTF8

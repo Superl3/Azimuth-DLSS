@@ -243,6 +243,7 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
     }
     ReleaseSRWLockExclusive(&azt_lock);
     if(!hash)return;
+    int routed=0;
     AcquireSRWLockExclusive(&azpv_lock);
     for(unsigned i=0;i<AZPV_TOTAL;++i){
         AzpvGroup *g=&azpv_groups[i];int capture=i<AZPV_GROUPS;
@@ -300,11 +301,12 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
         if(bit==4)g->closed=1;
         if(g->visible.enabled&&bit==4){
             g->requested_mask|=1536u;
-            if(hash==0xa93721c4&&chain&&!missing&&target&&g->visible.pre_ready&&g->visible.composite_ready&&
+            if(hash==0x577d52ef)log_msg("VISIBLE SKIP resolve=%llu stage=final reason=hdr_unsupported switch_game_HDR_off=1",resolve);
+            else if(hash==0xa93721c4&&chain&&!missing&&target&&g->visible.pre_ready&&g->visible.composite_ready&&
                g->visible.list==cl&&g->visible.recording==s->trace_recording_id){
                 AzpvBatch *batch=preview_batch(i,cl,s->trace_recording_id);
                 if(batch&&visible_finalize(&g->visible,cl,s,input,target,resolve)){
-                    visible_note_final(target,cl,s->trace_recording_id,resolve);
+                    routed=1;
                     if(capture){
                         if(!preview_add(batch,g->visible.merged,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,"visiblehud"))log_msg("VISIBLE SKIP resolve=%llu stage=visiblehud reason=readback",resolve);
                         if(!preview_add(batch,target,D3D12_RESOURCE_STATE_RENDER_TARGET,"visiblefinal"))log_msg("VISIBLE SKIP resolve=%llu stage=visiblefinal reason=readback",resolve);
@@ -314,6 +316,8 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
         }
     }
     ReleaseSRWLockExclusive(&azpv_lock);
+    if(hash==0xa93721c4||hash==0x577d52ef)
+        visible_note_final(identity,(uintptr_t)input,cl,s->trace_recording_id,resolve,hash,routed,missing);
     if(target)ID3D12Resource_Release(target);
 }
 static void preview_reset(ID3D12GraphicsCommandList *cl) {
@@ -397,7 +401,7 @@ static void preview_poll(void) {
     int ended=azdbg.id!=0&&!azdbg.active;
     unsigned long long retire_before=azt_frame;
     ReleaseSRWLockExclusive(&azt_lock);
-    visible_poll_present();
+    visible_poll_trial();
     AcquireSRWLockExclusive(&azpv_lock);
     preview_reap_live(retire_before);
     if(azpv_done)goto done;

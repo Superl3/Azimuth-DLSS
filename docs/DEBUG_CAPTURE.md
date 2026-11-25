@@ -464,17 +464,47 @@ all recordings must be retired and fence-complete.
 
 VISIBLE FINAL_SUBMITTED and FINAL_GPU_COMPLETE distinguish recording,
 actual queue submission and fence completion. VISIBLE EDGE records
-candidate downstream copies and bound-only draws. VISIBLE PRESENT_COUNT
-samples actual DXGI GetLastPresentCount and GetFrameStatistics, live
-current-backbuffer index and identity, and QPC. A one-count interval
-with a matching previous buffer and observed submission is reported as
-a candidate resolve association, not proof of exact scan-out. This
-avoids the known Steam-overlay recursion risk of patching Present.
-The explicit trial temporarily retains up to four swapchain interfaces
-(no retained backbuffer refs) and releases them after the 10-second
-window plus one second. Do not resize/recreate swapchains in this alpha
-test; a retained swapchain interface may delay destruction. If no
-identity match is found, capture actual desktop/game screen video or
-external PresentMon evidence to establish display, not just final RAW.
+candidate downstream copies and bound-only draws. FINAL_CANDIDATE
+records the native SDR/HDR final target even if Visible SR fails, so
+the next run can still establish downstream lineage.
 
-Live chain descriptors and all current buffer identities are recorded even if the present counter is unavailable. DXGI queries and chain releases run outside the tracing locks. The association remains a sampled candidate, only emitted for one uniquely observed submission in a single-count interval. QPC frequency is included for independent screen/ETW timeline correlation. FINAL_LAYOUT reports each required register and table-span check separately.
+### Startup regression fix (2ea6b1f -> reference-free observation)
+
+The 2026-11-25 startup capture showed a 1920x1080 launcher chain
+retained by the experimental observer, followed by CreateSwapChainForHwnd
+E_ACCESSDENIED (0x80070005) and Azimuth exception 0xE0424833 at +0x4c619.
+No F8 was reached. Same HWND was not logged in that build, so the exact
+cause is not proven. DXGI permits only one flip-model swapchain per HWND.
+The observer now retains **zero** swapchain interfaces at all times,
+never polls stale pointers, and does not hook Present/Present1.
+It reuses the existing FG creation snapshot (temporary GetBuffer and
+queue references released synchronously). SWAPCHAIN_REQUEST and
+SWAPCHAIN_RESULT record both successful and failed calls, HWND, queue,
+dimensions, format, flags, QPC, and HRESULT. CHAIN/BUFFER log value-only
+identity with retainedForTrial=0; a successful replacement on the same
+HWND invalidates the prior observation. A new create attempt during the
+trial disables further visible replacement. Do not resize/recreate
+chains during this experimental capture (creation snapshots may become
+stale on resize; selected RAW readbacks still own references until exit).
+
+PRESENT_BARRIER and PRESENT_BARRIER_SUBMITTED record transitions to the
+aliased PRESENT/COMMON state, their command-list recording, matching
+creation-snapshot buffer identity and submission queue. These are NOT
+actual Present calls or scan-out proof. Match with external PresentMon
+ETW (QPC and swapchain address) and actual game video; no added graphics
+hook is required. With an existing official PresentMon console binary:
+
+    PresentMon.exe --process_name azimuth.exe --qpc_time --output_file C:\Temp\fh2-present.csv --no_console_stats --terminate_on_proc_exit
+
+Start it before the game and stop it after exit if needed. Optionally
+pass -PresentMonCsv C:\Temp\fh2-present.csv to the launcher to package
+an existing CSV at collection time. No download, elevation, or automatic
+start of an external executable. ETW can fail due to permissions or
+missing events; an absent CSV never blocks the render trial.
+
+The failed startup log also recorded HDR on. Explicitly disable HDR in
+the Azimuth FH2 configuration before testing; do not infer SDR from
+the 10-bit swapchain format. An observed HDR final shader produces
+reason=hdr_unsupported and keeps native output. Existing offscreen
+SR evidence, HUD diagnostics and first two groups (22 RAW maximum)
+remain unchanged. QPC frequency is logged for external correlation.
