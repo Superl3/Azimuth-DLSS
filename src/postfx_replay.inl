@@ -9,7 +9,8 @@ static int azrp_enabled;
 static SRWLOCK azrp_lock=SRWLOCK_INIT;
 static struct {ID3D12PipelineState *original,*variant;} azrp_psos[AZRP_MAX];
 static unsigned azrp_attempts;
-static struct {ID3D12Resource *image;ID3D12DescriptorHeap *rtv,*srv;} azrp_surfaces[4];
+typedef struct {ID3D12Resource *image;ID3D12DescriptorHeap *rtv,*srv;} AzrpSurface;
+static AzrpSurface azrp_surfaces[4];
 static unsigned azrp_surface_count;
 
 static void postfx_replay_init(void) {
@@ -52,12 +53,12 @@ static void postfx_replay_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *d,ID3D12
     log_msg("POSTFX REPLAY PSO ready original=%p variant=%p remappedPositionLoads=2",(void *)pso,(void *)variant);
 done: ReleaseSRWLockExclusive(&azrp_lock);
 }
-static ID3D12Resource *postfx_replay_draw(ID3D12GraphicsCommandList *cl,ListState *s,unsigned long long resolve,const AzrpBindings *bindings) {
+static ID3D12Resource *postfx_replay_draw(ID3D12GraphicsCommandList *cl,ListState *s,unsigned long long resolve,const AzrpBindings *bindings,AzrpSurface *owned) {
     if(!azrp_enabled||!s||!cl||s->num_rtv!=1||s->has_dsv||s->num_vp!=1||s->num_sc!=1||
        s->vp_jittered||s->vp[0].Width!=1280.0f||s->vp[0].Height!=720.0f||
        s->vp[0].TopLeftX!=0||s->vp[0].TopLeftY!=0||s->trace_predicated||s->trace_queries||
        s->trace_query_unknown||s->trace_topology!=D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST||
-       azrp_surface_count>=4)return NULL;
+       (!owned&&azrp_surface_count>=4)||(owned&&owned->image))return NULL;
     ID3D12PipelineState *variant=NULL;
     AcquireSRWLockShared(&azrp_lock);
     for(unsigned i=0;i<AZRP_MAX;++i)if(azrp_psos[i].original==s->pso){variant=azrp_psos[i].variant;break;}
@@ -71,12 +72,12 @@ static ID3D12Resource *postfx_replay_draw(ID3D12GraphicsCommandList *cl,ListStat
     if(FAILED(ID3D12Device_CreateCommittedResource(g_device,&hp,D3D12_HEAP_FLAG_NONE,&rd,D3D12_RESOURCE_STATE_RENDER_TARGET,NULL,&IID_ID3D12Resource,(void **)&image))||!image)return NULL;
     D3D12_DESCRIPTOR_HEAP_DESC hd={0};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=1;
     ID3D12DescriptorHeap *heap=NULL;
-    if(FAILED(ID3D12Device_CreateDescriptorHeap(g_device,&hd,&IID_ID3D12DescriptorHeap,(void **)&heap))||!heap){ID3D12Resource_Release(image);return NULL;}
+    if(!real_CreateDescriptorHeap||FAILED(real_CreateDescriptorHeap(g_device,&hd,&IID_ID3D12DescriptorHeap,(void **)&heap))||!heap){ID3D12Resource_Release(image);return NULL;}
     D3D12_CPU_DESCRIPTOR_HANDLE rtv;heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(heap,&rtv);
     real_CreateRenderTargetView(g_device,image,NULL,rtv);
-    unsigned idx=azrp_surface_count++;
-    azrp_surfaces[idx].image=image;azrp_surfaces[idx].rtv=heap;
-    if(bindings)azrp_surfaces[idx].srv=bindings->heap;
+    AzrpSurface *surface=owned?owned:&azrp_surfaces[azrp_surface_count++];
+    surface->image=image;surface->rtv=heap;
+    if(bindings)surface->srv=bindings->heap;
     /* Same root signature, descriptor heaps, root constants, VB/IB, topology.
        Only the four states changed here are restored. All surfaces/PSOs
        remain alive until process exit. Never write the original target. */

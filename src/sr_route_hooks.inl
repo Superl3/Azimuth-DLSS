@@ -2,7 +2,6 @@
 static HRESULT(STDMETHODCALLTYPE *real_CreateCommandQueue)(ID3D12Device *,const D3D12_COMMAND_QUEUE_DESC *,REFIID,void **);
 static HRESULT(STDMETHODCALLTYPE *real_CreateRootSignature)(ID3D12Device *,UINT,const void *,SIZE_T,REFIID,void **);
 static void(STDMETHODCALLTYPE *real_CopyDescriptors)(ID3D12Device *,UINT,const D3D12_CPU_DESCRIPTOR_HANDLE *,const UINT *,UINT,const D3D12_CPU_DESCRIPTOR_HANDLE *,const UINT *,D3D12_DESCRIPTOR_HEAP_TYPE);
-static void(STDMETHODCALLTYPE *real_CopyTextureRegion)(ID3D12GraphicsCommandList *,const D3D12_TEXTURE_COPY_LOCATION *,UINT,UINT,UINT,const D3D12_TEXTURE_COPY_LOCATION *,const D3D12_BOX *);
 static void(STDMETHODCALLTYPE *real_ResolveSubresource)(ID3D12GraphicsCommandList *,ID3D12Resource *,UINT,ID3D12Resource *,UINT,DXGI_FORMAT);
 static void(STDMETHODCALLTYPE *real_ClearRenderTargetView)(ID3D12GraphicsCommandList *,D3D12_CPU_DESCRIPTOR_HANDLE,const FLOAT *,UINT,const D3D12_RECT *);
 static void(STDMETHODCALLTYPE *real_ClearUnorderedAccessViewUint)(ID3D12GraphicsCommandList *,D3D12_GPU_DESCRIPTOR_HANDLE,D3D12_CPU_DESCRIPTOR_HANDLE,ID3D12Resource *,const UINT *,UINT,const D3D12_RECT *);

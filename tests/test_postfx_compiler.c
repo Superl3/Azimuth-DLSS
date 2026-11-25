@@ -6,6 +6,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include "../src/postfx_dxbc.h"
+#include "../src/visible_merge_shader.h"
 int main(void) {
     typedef HRESULT(WINAPI *CompileFn)(LPCVOID,SIZE_T,LPCSTR,const D3D_SHADER_MACRO *,ID3DInclude *,LPCSTR,LPCSTR,UINT,UINT,ID3DBlob **,ID3DBlob **);
     typedef HRESULT(WINAPI *DisasmFn)(LPCVOID,SIZE_T,UINT,LPCSTR,ID3DBlob **);
@@ -31,7 +32,13 @@ int main(void) {
     const char *text=(const char *)ID3D10Blob_GetBufferPointer(asm1);
     assert(strstr(text,"mul ")&&strstr(text,"ftoi ")&&strstr(text,"0.666667"));
     ID3D10Blob_Release(asm1);ID3D10Blob_Release(asm0);ID3D10Blob_Release(code);
-    HeapFree(GetProcessHeap(),0,out);FreeLibrary(mod);
+    HeapFree(GetProcessHeap(),0,out);
+    code=NULL;err=NULL;
+    hr=compile(azvis_merge_hlsl,strlen(azvis_merge_hlsl),"visible_merge",NULL,NULL,"main","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,&err);
+    if(FAILED(hr)&&err)fprintf(stderr,"Visible shader: %s\n",(const char *)ID3D10Blob_GetBufferPointer(err));
+    assert(SUCCEEDED(hr)&&code);
+    if(err)ID3D10Blob_Release(err);
+    ID3D10Blob_Release(code);FreeLibrary(mod);
     puts("PASS: real D3DCompile retail checksum and position-remapped DXBC disassembly");
     return 0;
 }

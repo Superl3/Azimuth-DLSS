@@ -142,6 +142,7 @@ static HRESULT(STDMETHODCALLTYPE *real_CreateSwapChainForHwnd)(IDXGIFactory2 *, 
 static int sr_trace_enabled(void);
 static void sr_trace_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *,ID3D12PipelineState *);
 static void(STDMETHODCALLTYPE *real_CopyResource)(ID3D12GraphicsCommandList *,ID3D12Resource *,ID3D12Resource *);
+static void(STDMETHODCALLTYPE *real_CopyTextureRegion)(ID3D12GraphicsCommandList *,const D3D12_TEXTURE_COPY_LOCATION *,UINT,UINT,UINT,const D3D12_TEXTURE_COPY_LOCATION *,const D3D12_BOX *);
 
 /* ---------------------------------------------------------------- shaders */
 
@@ -183,6 +184,7 @@ static const GameProfile *profile_for_shader(const D3D12_SHADER_BYTECODE *ps, in
 static int pso_known(ID3D12PipelineState *pso);
 static void debug_shader_dump_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc,int role);
 static void postfx_replay_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc,ID3D12PipelineState *pso);
+static void visible_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc,ID3D12PipelineState *pso);
 
 static void remember_pso(ID3D12PipelineState *pso, ID3D12PipelineState *variant, int role) {
     AcquireSRWLockExclusive(&pso_lock);
@@ -210,6 +212,7 @@ static void consider_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc, ID3D12P
 
     sr_trace_pso(desc,pso);
     postfx_replay_pso(desc,pso);
+    visible_pso(desc,pso);
     int role = ROLE_NONE;
     const GameProfile *profile = profile_for_shader(&desc->PS, &role);
     if(dlss_sr_debug_mode())debug_shader_dump_pso(desc,profile?role:ROLE_NONE);

@@ -410,3 +410,42 @@ Host regression tests use the observed low root positions and synthetic
 high indices, including index 63, missing epochs, invalid heap handles,
 and the actual partial binding masks. This is not proof of runtime
 success or a visible SR path. The same launcher command applies.
+
+
+### Visible SR SDR alpha (bounded trial, not confirmed Present)
+
+    Start-DebugCapture.cmd -Preview -PreviewPostFx -PreviewReplay -PreviewSRReplay -PreviewJitter -VisibleSR -ShaderDisasm -Output 1920x1080
+
+After F8, at most ten seconds of gated output trials; do not use
+-ExitAfterCapture. Render 1280x720, output 1920x1080, SDR, Quality.
+The a2a200a capture proves native/SR postprocess pixels and the 34 native
+blend draws. Many HUD draws bind depth/stencil, and intermediate passes
+read the scene. Blindly enlarging their RTV/viewport is not safe.
+The first alpha instead retains the already blended native pixels for
+all four low-resolution taps with any preoverlay/composite difference;
+outside those regions it loads the original full-resolution srpostfx
+pixel. This preserves native HUD position and composite colors, but
+retains the low-res background underneath the HUD and is NOT exact
+alpha extraction or a native 1080p HUD replay.
+
+The original 1080p SDR final shader (a93721c4 + 79d0ca68) is run again
+on the private merged texture using its actual native t1 curve and s0
+sampler. This applies the original sRGB decode/BT.709-like transfer/LUT
+once to the replacement pixels. All required bindings and original
+graphics/compute table restoration must pass before modifying the live
+final RTV. Native rendering runs first and is untouched on a skipped
+path. No HDR, no FG, no Present hook, no game descriptor writes.
+The original final target is a candidate, not proven to be the actual
+swapchain buffer (creation snapshots did not match in 671/672).
+
+Only first two resolve groups have raw readbacks, up to 22 files under
+256 MiB. visiblehud is the pre-SDR merged image; visiblefinal is the
+replacement recorded into the game's original final RTV, not proof
+of presentation. The legacy final RAW is captured before replacement.
+Four rolling live slots own all extra surfaces and heaps. Recycle only
+after every associated recording was successfully reset and its
+private fence completed; failed/repeated submissions quarantine the
+slot until exit. No queue waits. Once the trial window ends, native
+output continues. Current offscreen quality and native HUD pixels
+remain the fallback. The Windows shader compiler fixture compiles
+the new merge PS; real PSO and final target routing need GPU testing.
