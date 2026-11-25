@@ -6,6 +6,7 @@ param(
     [string]$RenderSetting = '',
     [switch]$InstallProxy,
     [switch]$CollectOnly,
+    [switch]$ShaderDisasm,
     [string]$Destination = (Join-Path $PSScriptRoot 'debug-captures')
 )
 $ErrorActionPreference = 'Stop'
@@ -65,11 +66,13 @@ try {
             $previous = (Get-Item -LiteralPath $log).LastWriteTimeUtc
             Copy-Item -LiteralPath $log -Destination (Join-Path $dest ($tag + '-previous.log'))
         }
-        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC')) {
+        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM')) {
             $oldEnv[$key] = [Environment]::GetEnvironmentVariable($key,'Process')
         }
         [Environment]::SetEnvironmentVariable('AZIMUTH_SR_MODE','debug','Process')
         [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_RENDERDOC','0','Process')
+        [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_SHADER_DISASM',$(if($ShaderDisasm){'1'}else{'0'}),'Process')
+        if($ShaderDisasm){Write-Host 'Selected shader assembly is included in the ZIP; review before sharing privately.'}
         Write-Host 'Enter real gameplay. Press F8 once while driving. Capture stops after a bounded interval; repeat F8 for additional samples. Exit normally.'
         Write-Host 'This launcher collects CPU metadata only. To capture GPU frames, use the RenderDoc procedure and -CollectOnly.'
         $started = [DateTime]::UtcNow
@@ -88,12 +91,35 @@ try {
     New-Item -ItemType Directory -Path $stage | Out-Null
     $stageCreated = $true
     Copy-Item -LiteralPath $log -Destination (Join-Path $stage 'azimuth_dlaa.log')
+    $shaderFiles = @()
+    if($ShaderDisasm){
+        $rows = [regex]::Matches($content,'(?m)^DEBUG SHADER_DUMP directory=(azimuth_shader_debug_\d+_\d+) file=([pv]s-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{8}){3}\.asm\.txt) bytes=(\d+)\r?$')
+        foreach($row in $rows){
+            if($shaderFiles.Count -ge 16){break}
+            $folder = Join-Path $game $row.Groups[1].Value
+            $name = $row.Groups[2].Value
+            $source = Join-Path $folder $name
+            if(!(Test-Path -LiteralPath $source -PathType Leaf)){continue}
+            $dirInfo = Get-Item -LiteralPath $folder
+            $fileInfo = Get-Item -LiteralPath $source
+            if(($dirInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -or ($fileInfo.Attributes -band [IO.FileAttributes]::ReparsePoint)){continue}
+            if($fileInfo.Length -lt 1 -or $fileInfo.Length -gt 1048576 -or [string]$fileInfo.Length -ne $row.Groups[3].Value){continue}
+            if($shaderFiles -contains $name){continue}
+            $shaderDest = Join-Path $stage 'shader-disassembly'
+            New-Item -ItemType Directory -Path $shaderDest -Force | Out-Null
+            Copy-Item -LiteralPath $source -Destination (Join-Path $shaderDest $name)
+            $shaderFiles += $name
+        }
+        Write-Host "Selected shader disassembly files: $($shaderFiles.Count)"
+        if(!$shaderFiles.Count){Write-Warning 'No disassembly exported. Check DEBUG SHADER_DUMP lines.'}
+    }
     $meta = [ordered]@{
         label = $Label; expected_output = $Output; actual_render_setting_label = $RenderSetting
         utc = [DateTime]::UtcNow.ToString('o'); mode = 'debug'; collect_only = [bool]$CollectOnly
         process_exit_code = $exitCode; f8_begins = $begins; f8_ends = $ends
         files_sha256 = [ordered]@{ 'azimuth.exe' = (FileHashOrNull $exe); 'dxgi.dll' = (FileHashOrNull $proxy) }
-        notice = 'Local metadata only. No game binaries, saves, or raw GPU captures in this archive.'
+        selected_shader_disassembly = $shaderFiles
+        notice = 'Local evidence. Optional selected shader disassembly if requested; no game binaries, saves or raw GPU captures. Review privately.'
     }
     $meta | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $stage 'capture.json') -Encoding UTF8
     $analyzer = Join-Path $PSScriptRoot 'tools\analyze_debug_trace.py'

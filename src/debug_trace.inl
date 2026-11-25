@@ -3,6 +3,7 @@
 /* RenderDoc application header uses C bool; include before vendored header. */
 #include <stdbool.h>
 #include "../third_party/renderdoc/renderdoc_app.h"
+#include "debug_shader_dump.inl"
 #define AZDBG_GEOM_MAX 64
 typedef struct AzdbgGeom {UINT cw,ch,dw,dh,vw,vh; int cf,df;} AzdbgGeom;
 static AzdbgGeom azdbg_geom[AZDBG_GEOM_MAX];
@@ -16,6 +17,7 @@ static uint64_t azdbg_rdc_started;
 
 static void debug_trace_init(void) {
     if(!dlss_sr_debug_mode())return;
+    debug_shader_dump_init();
     UINT n=dlss_debug_ini_uint(L"Resolves",8);
     if(n>=1 && n<=64)azdbg_limit=n;
     n=dlss_debug_ini_uint(L"TimeoutMs",8000);

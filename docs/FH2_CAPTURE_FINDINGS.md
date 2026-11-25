@@ -65,3 +65,9 @@ color, actual queue submissions and present path. Offscreen NGX probe may
 be tested separately with the matching NGX bridge and runtime, correct
 output size, and a quality mode whose queried input limits include
 2592x1080. No probe success or visible SR/FG result has been established.
+
+## Follow-up: successful offscreen SR API return
+
+The next 1080p probe and debug capture ZIPs used matching game/proxy SHA-256. Probe color, depth and reconstructed R16G16_FLOAT MV were 2592x1080; all 12 logged decisions were fresh=1, top_left=1 and decision=1. NGX Quality optimal=2560x1067, min=1920x800, max=3840x1600; actual input accepted. `SR PROBE EVALUATED 2592x1080 -> 3840x1600 (OFFSCREEN ONLY)` appeared, exit code 0, no logged evaluation failure. This verifies successful API return at least once, not GPU completion or image quality. No game output was replaced.
+
+Three F8 windows completed, 24 resolve intervals. Each known shader pair occurred 24 times; all 24 intervals matched scene identity -> first t0 -> second t0 -> third t0, in recording order within the same observed list. The final t2 is another distinct 2592x1080 format-24 bound texture in 24/24 intervals; HUD role unknown. None of 181 recorded copy edges matches the final candidate targets or creation-time backbuffer snapshots. 1,613 FG draws all layout=0, 898 input truncation markers; no queue submissions or GPU capture. Actual sampling, camera constants and present path need verification. Targeted disassembly now available as an optional local capture; no visible SR or FG enablement.

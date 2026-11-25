@@ -80,10 +80,11 @@ static int sr_trace_enabled(void) { return dlss_sr_mode() != AZSR_DLAA; }
 static unsigned azt_hashptr(UINT64 p, unsigned mask) {
     return (unsigned)((p ^ (p >> 17) ^ (p >> 37)) * 0x9e3779b97f4a7c15ull >> 32) & mask;
 }
-static void azt_overflow(void) {
+static void azt_overflow_at(const char *where) {
     azt_incomplete = 1;
-    if (!azt_warned++) log_msg("SR TRACE incomplete: table capacity or descriptor layout exceeded; routing disabled");
+    if (!azt_warned) {azt_warned=1;log_msg("SR TRACE incomplete: table capacity or descriptor layout exceeded at %s; routing disabled",where);}
 }
+#define azt_overflow() azt_overflow_at(__func__)
 static int azt_env_uint(const char *name, UINT *out) {
     char b[32], tail;
     DWORD n = GetEnvironmentVariableA(name,b,sizeof(b));

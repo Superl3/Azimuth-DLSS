@@ -170,6 +170,7 @@ static const GameProfile *profile_for_shader(const D3D12_SHADER_BYTECODE *ps, in
 /* ---------------------------------------------------------------- PSO hook */
 
 static int pso_known(ID3D12PipelineState *pso);
+static void debug_shader_dump_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc,int role);
 
 static void remember_pso(ID3D12PipelineState *pso, ID3D12PipelineState *variant, int role) {
     AcquireSRWLockExclusive(&pso_lock);
@@ -198,6 +199,7 @@ static void consider_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc, ID3D12P
     sr_trace_pso(desc,pso);
     int role = ROLE_NONE;
     const GameProfile *profile = profile_for_shader(&desc->PS, &role);
+    if(dlss_sr_debug_mode())debug_shader_dump_pso(desc,profile?role:ROLE_NONE);
     if (!profile || role == ROLE_NONE || pso_known(pso)) {
         return;
     }

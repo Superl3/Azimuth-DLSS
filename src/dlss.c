@@ -367,6 +367,13 @@ int dlss_run(ID3D12GraphicsCommandList *cl, ID3D12Resource *color, D3D12_RESOURC
         ok = p_evaluate(cl, color, depth, motion, out_tex, w, h, jitter_used ? jx : 0.0f, jitter_used ? jy : 0.0f,
                         (float)w, (float)h, need_reset != 0, &r);
     }
+    if(decision==AZSR_EVALUATE_ONLY){
+        static unsigned probe_samples;
+        if(probe_samples<12||!ok){
+            ++probe_samples;
+            log_msg("SR PROBE RESULT sample=%u ok=%d ngx=0x%08x input=%ux%u output=%ux%u (CPU API return; GPU content unverified)",probe_samples,ok,(unsigned)r,w,h,ow,oh);
+        }
+    }
     if (ok && (decision == AZSR_EVALUATE_ONLY || decision == AZSR_ROUTE_OUTPUT)) {
         if (decision == AZSR_ROUTE_OUTPUT) sr_route_last_output = out_tex;
         /* Offscreen verification: no copy to game, no screen jitter. Order repeated UAV writes. */
