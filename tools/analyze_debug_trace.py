@@ -10,6 +10,7 @@ from analyze_fg_trace import parse_fg, analyze_fh2_postfx, analyze_hdr_scene_cop
 
 BEGIN=re.compile(r"^DEBUG BEGIN id=(\d+) firstResolveAfter=(\d+) limit=(\d+) timeoutMs=(\d+)")
 END=re.compile(r"^DEBUG END id=(\d+) reason=(\w+) resolves=(\d+) lastResolve=(\d+)")
+AUTO_BEGIN=re.compile(r"^DEBUG AUTO_BEGIN id=(\d+) requestedResolve=(\d+)$")
 SECTIONS={
     "geometry_draws":"DEBUG GEOMETRY_DRAW ",
     "resolve_geometry":"SR GEOMETRY ",
@@ -36,8 +37,14 @@ def parse_debug(text, output=None):
             if current is not None:
                 current["warnings"].append("Another begin marker before end; previous capture incomplete.")
             current={"id":i,"first_resolve_after":first,"limit":limit,"timeout_ms":timeout,
-                     "complete":False,"warnings":[],"lines":[]}
+                     "complete":False,"trigger":"manual","warnings":[],"lines":[]}
             windows.append(current);by_id[i]=current;last_id=i
+            continue
+        m=AUTO_BEGIN.match(line)
+        if m:
+            i,requested=map(int,m.groups())
+            if i in by_id:
+                by_id[i].update(trigger="automatic",requested_resolve=requested)
             continue
         m=END.match(line)
         if m:

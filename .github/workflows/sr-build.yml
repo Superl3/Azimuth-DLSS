@@ -46,6 +46,9 @@ jobs:
           zig cc -target x86_64-windows-gnu -std=c11 -Wall -Wextra -Werror tests/test_debug_capture_policy.c -o build/test_debug_capture_policy.exe
           ./build/test_debug_capture_policy.exe
           python tests/test_debug_capture.py
+      - name: Test automatic capture packaging
+        shell: pwsh
+        run: ./tests/test_debug_launcher.ps1
       - name: Build DXGI proxy with original Zig build
         shell: bash
         run: |

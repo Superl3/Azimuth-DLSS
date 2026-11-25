@@ -1,4 +1,4 @@
-# Azimuth SR + FG debug capture (F8)
+# Azimuth SR + FG debug capture
 
 **Debugging only, not working DLSS SR or FG.** The debug proxy selects the
 existing trace-only path: no NGX DLL or DLSS runtime required, no injected
@@ -37,6 +37,35 @@ next to azimuth.exe. An environment mode overrides the sidecar.
 Remove/disable the sidecar for normal DLAA operation. With Python:
 
     py -3 tools/capture_sr.py --game-dir "D:\Azimuth" --label FH2-native --render-setting native --output 3840x1600 --mode debug
+
+## Automatic metadata test
+
+From the extracted debug artifact, with Azimuth closed:
+
+```powershell
+.\Start-DebugCapture.ps1 -GameDir 'D:\Azimuth' -Label FH2-auto -Output 3840x1600 `
+    -RenderSetting native -InstallProxy -AutoResolve 2000 -ExitAfterCapture
+```
+
+Enter the desired race or free-roam scene before the requested threshold.
+The first poll at or after the specified resolve count starts one capture
+using the same bounded and prioritized metadata path as F8. A manual F8
+capture started earlier consumes that run's automatic window. The count
+includes resolved scenes before gameplay, so choose a threshold from an
+earlier log or increase it for slower loading.
+
+`-ExitAfterCapture` requests a normal window close after the capture ends
+or after `-WaitSeconds` (default 180) and never force-kills the game. Omit
+it to exit manually. A missing, interrupted, or timed-out automatic
+window fails the command after packaging available evidence. The ZIP
+records the requested threshold and observed automatic result. The
+launcher restores the original proxy after the process exits.
+
+For a custom launcher, set `AZIMUTH_SR_MODE=debug` and
+`AZIMUTH_DEBUG_AUTO_RESOLVE` to an integer from 1 through 1000000.
+A value of 0 leaves the F8-only behavior. The automatic window collects
+metadata. Use a separate native RenderDoc or PIX session if instrumenting
+both proxies at once fails at startup.
 
 ## Actual GPU data: RenderDoc (or PIX)
 

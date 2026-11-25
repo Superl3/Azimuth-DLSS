@@ -14,6 +14,7 @@ class DebugTests(unittest.TestCase):
         text="""DEBUG READY: F8 starts/stops bounded SR+FG trace
 DEBUG QUEUE_CREATE queue=0x1 type=0
 DEBUG BEGIN id=1 firstResolveAfter=12 limit=8 timeoutMs=8000
+DEBUG AUTO_BEGIN id=1 requestedResolve=10
 DEBUG ROLE id=1 resolve=12 role=2 list=0x2
 SR NATIVE VELOCITY target=1280x720 format=34 viewport=0.00,0.00,1280.00,720.00
 SR TRACE RESOLVE frame=13 list=0x2 scene=2560x1440 format=26 evaluated=0
@@ -28,11 +29,14 @@ DEBUG TRUNCATED id=2 section=aux
         self.assertEqual(data["capture_count"],2)
         a,b=data["captures"]
         self.assertTrue(a["complete"])
+        self.assertEqual(a["trigger"],"automatic")
+        self.assertEqual(a["requested_resolve"],10)
         self.assertEqual(a["observed_resolves"],8)
         self.assertEqual(a["counts"]["copy_edges"],1)
         self.assertEqual(a["counts"]["native_velocity"],1)
         self.assertEqual(a["resolve_records"],1)
         self.assertFalse(b["complete"])
+        self.assertEqual(b["trigger"],"manual")
         self.assertTrue(b["truncation"])
         self.assertEqual(data["renderdoc_observations"][0]["nearest_capture_id"],1)
         self.assertEqual(summarize(text,"3840x2160")["debug_capture"]["capture_count"],2)

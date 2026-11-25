@@ -1,4 +1,4 @@
-/* Manual diagnostic capture. No Present hook, no new GPU commands, no
+/* Bounded diagnostic capture. No Present hook, no new GPU commands, no
    readback of arbitrary process memory, no automatic upload. */
 /* RenderDoc application header uses C bool; include before vendored header. */
 #include <stdbool.h>
@@ -10,6 +10,7 @@ static AzdbgGeom azdbg_geom[AZDBG_GEOM_MAX];
 static unsigned azdbg_geom_count;
 static int azdbg_renderdoc;
 static unsigned azdbg_limit=8,azdbg_ms=8000,azdbg_rdc_frames=2;
+static unsigned azdbg_auto_resolve;
 static RENDERDOC_API_1_4_1 *azdbg_rdc_api;
 static uint32_t azdbg_rdc_seen;
 static int azdbg_rdc_pending;
@@ -26,7 +27,9 @@ static void debug_trace_init(void) {
     if(n>=1 && n<=4)azdbg_rdc_frames=n;
     char b[8];DWORD len=GetEnvironmentVariableA("AZIMUTH_DEBUG_RENDERDOC",b,sizeof(b));
     azdbg_renderdoc=len?len==1&&b[0]=='1':dlss_debug_ini_uint(L"RenderDoc",0)==1;
-    log_msg("DEBUG CONFIG resolves=%u timeoutMs=%u renderdoc=%d gpuFrames=%u",azdbg_limit,azdbg_ms,azdbg_renderdoc,azdbg_rdc_frames);
+    if(azt_env_uint("AZIMUTH_DEBUG_AUTO_RESOLVE",&n) && n<=1000000)azdbg_auto_resolve=n;
+    log_msg("DEBUG CONFIG resolves=%u timeoutMs=%u renderdoc=%d gpuFrames=%u autoResolve=%u",
+        azdbg_limit,azdbg_ms,azdbg_renderdoc,azdbg_rdc_frames,azdbg_auto_resolve);
 }
 
 static void debug_rdc_trigger(uint64_t now) {
@@ -49,13 +52,28 @@ static void debug_rdc_trigger(uint64_t now) {
     azdbg_rdc_api->TriggerMultiFrameCapture(azdbg_rdc_frames);
     log_msg("DEBUG RENDERDOC requested=%u actualPresentFrames unverified",azdbg_rdc_frames);
 }
+static int debug_trace_begin_locked(uint64_t now) {
+    if(!azdebug_begin(&azdbg,azdbg_limit,now,azdbg_ms))return 0;
+    azt_budget=4000;azt_resolve_logs=64;azt_copy_logs=0;
+    azdbg_geometry=64;azdbg_velocity=64;azdbg_aux=2048;azdbg_aux_warned=0;
+    azdbg_geom_count=0;azfg_general_rows=azfg_priority_rows=0;azfg_limit_logged=azfg_priority_limit_logged=0;
+    log_msg("DEBUG BEGIN id=%u firstResolveAfter=%llu limit=%u timeoutMs=%u",azdbg.id,azt_frame,azdbg_limit,azdbg_ms);
+    log_msg("DEBUG DESCRIPTOR_STATS id=%u used=%u capacity=%u incomplete=%d",azdbg.id,azt_desc_used,(unsigned)AZT_DESCS,azt_incomplete);
+    return 1;
+}
 static void debug_trace_poll(void) {
     if(!dlss_sr_debug_mode())return;
     const uint64_t now=(uint64_t)GetTickCount64();
+    int started=0;
     AcquireSRWLockExclusive(&azt_lock);
     if(azdebug_expired(&azdbg,now))azdbg_finish_locked("timeout");
+    if(azdebug_auto_due(&azdbg,azdbg_auto_resolve,azt_frame)){
+        started=debug_trace_begin_locked(now);
+        if(started)log_msg("DEBUG AUTO_BEGIN id=%u requestedResolve=%u",azdbg.id,azdbg_auto_resolve);
+    }
     ReleaseSRWLockExclusive(&azt_lock);
     /* RenderDoc API is only called on the existing hotkey thread. */
+    if(started)debug_rdc_trigger(now);
     if(azdbg_rdc_pending && azdbg_rdc_api){
         uint32_t count=azdbg_rdc_api->GetNumCaptures();
         if(count>azdbg_rdc_seen && !azdbg_rdc_api->IsFrameCapturing()){
@@ -72,14 +90,7 @@ static void debug_trace_toggle(void) {
     int started=0;
     AcquireSRWLockExclusive(&azt_lock);
     if(azdbg.active)azdbg_finish_locked("manual");
-    else if(azdebug_begin(&azdbg,azdbg_limit,now,azdbg_ms)){
-        azt_budget=4000;azt_resolve_logs=64;azt_copy_logs=0;
-        azdbg_geometry=64;azdbg_velocity=64;azdbg_aux=2048;azdbg_aux_warned=0;
-        azdbg_geom_count=0;azfg_general_rows=azfg_priority_rows=0;azfg_limit_logged=azfg_priority_limit_logged=0;
-        log_msg("DEBUG BEGIN id=%u firstResolveAfter=%llu limit=%u timeoutMs=%u",azdbg.id,azt_frame,azdbg_limit,azdbg_ms);
-        log_msg("DEBUG DESCRIPTOR_STATS id=%u used=%u capacity=%u incomplete=%d",azdbg.id,azt_desc_used,(unsigned)AZT_DESCS,azt_incomplete);
-        started=1;
-    }
+    else started=debug_trace_begin_locked(now);
     ReleaseSRWLockExclusive(&azt_lock);
     if(started)debug_rdc_trigger(now);
 }

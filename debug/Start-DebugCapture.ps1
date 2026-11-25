@@ -7,9 +7,15 @@ param(
     [switch]$InstallProxy,
     [switch]$CollectOnly,
     [switch]$ShaderDisasm,
+    [ValidateRange(0, 1000000)][int]$AutoResolve = 0,
+    [switch]$ExitAfterCapture,
+    [ValidateRange(10, 1800)][int]$WaitSeconds = 180,
     [string]$Destination = (Join-Path $PSScriptRoot 'debug-captures')
 )
 $ErrorActionPreference = 'Stop'
+if ($ExitAfterCapture -and (!$AutoResolve -or $CollectOnly)) {
+    throw '-ExitAfterCapture requires -AutoResolve and a new game launch.'
+}
 if (!$GameDir) {
     if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'azimuth.exe') -PathType Leaf) { $GameDir = $PSScriptRoot }
     else { $GameDir = (Read-Host 'Path to the Azimuth folder containing azimuth.exe').Trim('"') }
@@ -37,9 +43,20 @@ $installed = $false
 $oldEnv = @{}
 $stageCreated = $false
 $exitCode = $null
+$autoWaitExpired = $false
 function FileHashOrNull([string]$Path) {
     if (Test-Path -LiteralPath $Path -PathType Leaf) { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash }
     return $null
+}
+function Get-AutomaticCapture([string]$Content, [int]$RequestedResolve) {
+    if (!$RequestedResolve) { return }
+    $begin = [regex]::Match($Content, "(?m)^DEBUG AUTO_BEGIN id=(\d+) requestedResolve=$RequestedResolve\r?$")
+    if (!$begin.Success) { return }
+    $id = $begin.Groups[1].Value
+    $end = [regex]::Match($Content, "(?m)^DEBUG END id=$id reason=(\w+) resolves=(\d+) lastResolve=\d+\r?$")
+    if ($end.Success) {
+        [pscustomobject]@{ id = [int]$id; reason = $end.Groups[1].Value; resolves = [int]$end.Groups[2].Value }
+    }
 }
 try {
     if (!$CollectOnly) {
@@ -66,17 +83,43 @@ try {
             $previous = (Get-Item -LiteralPath $log).LastWriteTimeUtc
             Copy-Item -LiteralPath $log -Destination (Join-Path $dest ($tag + '-previous.log'))
         }
-        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM')) {
+        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM','AZIMUTH_DEBUG_AUTO_RESOLVE')) {
             $oldEnv[$key] = [Environment]::GetEnvironmentVariable($key,'Process')
         }
         [Environment]::SetEnvironmentVariable('AZIMUTH_SR_MODE','debug','Process')
         [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_RENDERDOC','0','Process')
         [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_SHADER_DISASM',$(if($ShaderDisasm){'1'}else{'0'}),'Process')
+        [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_AUTO_RESOLVE',[string]$AutoResolve,'Process')
         if($ShaderDisasm){Write-Host 'Selected shader assembly is included in the ZIP; review before sharing privately.'}
-        Write-Host 'Enter real gameplay. Press F8 once while driving. Capture stops after a bounded interval; repeat F8 for additional samples. Exit normally.'
+        if ($AutoResolve) {
+            Write-Host "Enter real gameplay before resolve $AutoResolve. The trace starts automatically."
+        } else {
+            Write-Host 'Enter real gameplay. Press F8 once while driving. Repeat after the bounded capture for additional samples.'
+        }
         Write-Host 'This launcher collects CPU metadata only. To capture GPU frames, use the RenderDoc procedure and -CollectOnly.'
         $started = [DateTime]::UtcNow
-        $proc = Start-Process -FilePath $exe -WorkingDirectory $game -PassThru -Wait
+        if ($ExitAfterCapture) {
+            $proc = Start-Process -FilePath $exe -WorkingDirectory $game -PassThru
+            $timer = [Diagnostics.Stopwatch]::StartNew()
+            $finished = $null
+            while (!$proc.WaitForExit(250) -and $timer.Elapsed.TotalSeconds -lt $WaitSeconds) {
+                $item = Get-Item -LiteralPath $log -ErrorAction SilentlyContinue
+                if ($item -and $item.LastWriteTimeUtc -ge $started.AddSeconds(-2) -and $item.LastWriteTimeUtc -ne $previous) {
+                    $live = Get-Content -LiteralPath $log -Raw -ErrorAction SilentlyContinue
+                    if ($live) { $finished = Get-AutomaticCapture $live $AutoResolve }
+                    if ($finished) { break }
+                }
+            }
+            if (!$proc.HasExited) {
+                $autoWaitExpired = !$finished
+                $null = $proc.CloseMainWindow()
+                if (!$proc.WaitForExit(15000)) {
+                    throw 'Azimuth did not close normally. Close it and rerun with -CollectOnly to package the log.'
+                }
+            }
+        } else {
+            $proc = Start-Process -FilePath $exe -WorkingDirectory $game -PassThru -Wait
+        }
         $exitCode = $proc.ExitCode
         if (Get-Process -Name azimuth -ErrorAction SilentlyContinue) { throw 'Azimuth child is still running; exit and run with -CollectOnly.' }
         if (!(Test-Path -LiteralPath $log -PathType Leaf)) { throw 'No trace log produced.' }
@@ -88,6 +131,7 @@ try {
     if ($content -notmatch 'DEBUG READY:') { throw 'This log is not from the F8 debug build. Check the installed DLL and launch mode.' }
     $begins = [regex]::Matches($content,'(?m)^DEBUG BEGIN ').Count
     $ends = [regex]::Matches($content,'(?m)^DEBUG END ').Count
+    $autoCapture = Get-AutomaticCapture $content $AutoResolve
     New-Item -ItemType Directory -Path $stage | Out-Null
     $stageCreated = $true
     Copy-Item -LiteralPath $log -Destination (Join-Path $stage 'azimuth_dlaa.log')
@@ -117,6 +161,8 @@ try {
         label = $Label; expected_output = $Output; actual_render_setting_label = $RenderSetting
         utc = [DateTime]::UtcNow.ToString('o'); mode = 'debug'; collect_only = [bool]$CollectOnly
         process_exit_code = $exitCode; f8_begins = $begins; f8_ends = $ends
+        automatic_resolve = $AutoResolve; automatic_capture = $autoCapture
+        automatic_wait_expired = $autoWaitExpired
         files_sha256 = [ordered]@{ 'azimuth.exe' = (FileHashOrNull $exe); 'dxgi.dll' = (FileHashOrNull $proxy) }
         selected_shader_disassembly = $shaderFiles
         notice = 'Local evidence. Optional selected shader disassembly if requested; no game binaries, saves or raw GPU captures. Review privately.'
@@ -137,6 +183,9 @@ try {
     Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
     if (!(Test-Path -LiteralPath $zip -PathType Leaf)) { throw 'Capture ZIP not created.' }
     Write-Host "Local evidence: $zip"
+    if ($AutoResolve -and ($autoCapture.reason -ne 'resolve_limit' -or $autoWaitExpired -or ($null -ne $exitCode -and $exitCode -ne 0))) {
+        throw 'Automatic capture did not finish successfully. Review the saved evidence.'
+    }
     if ($begins -eq 0) { Write-Warning 'No F8 capture found. Enter actual gameplay and press F8 in the next run.' }
     elseif ($begins -ne $ends) { Write-Warning 'One or more capture windows were interrupted.' }
     Write-Host 'Review the ZIP before sharing it. Save RenderDoc .rdc files separately and share privately only.'
