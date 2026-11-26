@@ -586,6 +586,7 @@ static int preview_save(AzpvBatch *g,AzpvShot *s) {
     if(!MultiByteToWideChar(CP_UTF8,0,name,-1,file+m,MAX_PATH-m))return 0;
     void *data=NULL;D3D12_RANGE range={0,(SIZE_T)s->total},empty={0,0};
     if(FAILED(s->buffer->lpVtbl->Map(s->buffer,0,&range,&data))||!data)return 0;
+    if(!strcmp(s->name,"visiblefinal"))azpc_final_hash(g->resolve,(const BYTE *)data+s->footprint.Offset,s->footprint.Footprint.RowPitch,s->w,s->h,s->format);
     HANDLE out=CreateFileW(file,GENERIC_WRITE,0,NULL,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,NULL);
     int ok=out!=INVALID_HANDLE_VALUE;
     if(ok){

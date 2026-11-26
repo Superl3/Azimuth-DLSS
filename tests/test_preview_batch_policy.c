@@ -3,7 +3,14 @@
 #include "../src/preview_batch_policy.h"
 #include "../src/visible_tail_policy.h"
 #include "../src/hdr_replay_policy.h"
+#include "../src/present_copy_policy.h"
 int main(void) {
+    assert(azpc_window(10,10)&&azpc_window(10,25)&&!azpc_window(10,26)&&!azpc_window(10,9));
+    unsigned char crop[AZPC_BYTES]={0},padded[(AZPC_PITCH+4)*AZPC_SIDE]={0};
+    assert(azpc_hash(crop,AZPC_PITCH)==azpc_hash(padded,AZPC_PITCH+4));
+    padded[AZPC_PITCH]=1;assert(azpc_hash(crop,AZPC_PITCH)==azpc_hash(padded,AZPC_PITCH+4));
+    padded[AZPC_PITCH+4]=1;assert(azpc_hash(crop,AZPC_PITCH)!=azpc_hash(padded,AZPC_PITCH+4));
+    assert(azpc_crop_ok(1920,1080)&&!azpc_crop_ok(95,96));
     unsigned roots[]={1,1,2,2}, offsets[]={0,1,0,1};
     assert(azhdr_distinct_slots(roots,offsets,3));
     assert(azhdr_distinct_slots(roots,offsets,4));
