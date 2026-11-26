@@ -88,6 +88,22 @@ static struct {
     ID3D12PipelineState *original, *variant;
     int role;
 } variants[MAX_VARIANTS];
+#define AZGUIDE_MAX 4
+typedef struct {ID3D12PipelineState *original,*stencil,*constants;} AzGuidePSO;
+typedef struct {
+    ID3D12Resource *stencil,*constants;
+    ID3D12DescriptorHeap *rtv;
+    uintptr_t list;
+    uint64_t resolve,recording,seq;
+    UINT w,h;
+} AzGuideFrame;
+static AzGuidePSO azguide_psos[MAX_VARIANTS];
+static AzGuideFrame azguide_frames[AZGUIDE_MAX];
+static unsigned azguide_count;
+static int azguide_enabled;
+static AzGuideFrame *azguide_latest;
+static volatile LONG64 mv_seq; /* motion-vector passes recorded */
+static LONG64 dlss_mv_seq;
 
 
 /* Scene resources, found at the resolve draw. States are tracked from the game's barriers. */
@@ -215,6 +231,36 @@ static void remember_pso(ID3D12PipelineState *pso, ID3D12PipelineState *variant,
     }
 }
 
+/* The two diagnostic variants are private and never change NGX motion.
+   Only exact FH2 native velocity PS and matching original PSO state. */
+static void azguide_build(const GameProfile *profile,const D3D12_GRAPHICS_PIPELINE_STATE_DESC *mv,ID3D12PipelineState *original){
+    if(!azguide_enabled||strcmp(profile->id,"fh2"))return;
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC d=*mv;
+    d.RTVFormats[0]=DXGI_FORMAT_R32_FLOAT;
+    ID3D12PipelineState *out[2]={0};
+    for(unsigned k=0;k<2;++k){
+        const char *prefix=k?"#define AZIMUTH_GUIDE_CONSTANTS 1\n":"#define AZIMUTH_GUIDE_STENCIL 1\n";
+        size_t n=strlen(prefix)+strlen(profile->mv_ps_hlsl)+1;
+        char *source=HeapAlloc(GetProcessHeap(),0,n);
+        if(!source)break;
+        strcpy(source,prefix);strcat(source,profile->mv_ps_hlsl);
+        ID3DBlob *b=compile(source,"main","ps_5_0");HeapFree(GetProcessHeap(),0,source);
+        if(!b)break;
+        d.PS.pShaderBytecode=ID3D10Blob_GetBufferPointer(b);d.PS.BytecodeLength=ID3D10Blob_GetBufferSize(b);
+        HRESULT hr=real_CreateGraphicsPipelineState(g_device,&d,&IID_ID3D12PipelineState,(void **)&out[k]);
+        ID3D10Blob_Release(b);if(FAILED(hr)||!out[k])break;
+    }
+    if(out[0]&&out[1]){
+        AcquireSRWLockExclusive(&pso_lock);
+        for(unsigned i=0;i<MAX_VARIANTS;++i)if(!azguide_psos[i].original){
+            ID3D12PipelineState_AddRef(original);
+            azguide_psos[i]=(AzGuidePSO){original,out[0],out[1]};out[0]=out[1]=NULL;
+            log_msg("NR GUIDE_PSO_READY original=%p fmt=41 private=1",(void *)original);break;
+        }
+        ReleaseSRWLockExclusive(&pso_lock);
+    }
+    if(out[0])ID3D12PipelineState_Release(out[0]);if(out[1])ID3D12PipelineState_Release(out[1]);
+}
 /* Records the selected game's exact passes and builds its full-resolution MV variant. */
 static void consider_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc, ID3D12PipelineState *pso) {
     if (!desc || !pso || !g_device) {
@@ -278,6 +324,7 @@ static void consider_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc, ID3D12P
         return;
     }
 
+    azguide_build(profile,&d,pso);
     remember_pso(pso, variant, ROLE_MV);
     static LONG logged_mv;
     if (!InterlockedExchange(&logged_mv, 1)) {
@@ -825,9 +872,56 @@ static int ensure_mv(UINT w, UINT h) {
     return 1;
 }
 
-static volatile LONG64 mv_seq;          /* motion-vector passes recorded */
-static LONG64 dlss_mv_seq;                /* the motion-vector pass the last DLSS dispatch used */
 
+/* Called under mv_lock, immediately after the normal MV replay. Each probe
+   has unique private textures and RTVs retained until process exit. No
+   shared handle, new root signature, source barrier or stale data guess. */
+static ID3D12Resource *azguide_texture(UINT w,UINT h){
+    D3D12_HEAP_PROPERTIES hp={0};hp.Type=D3D12_HEAP_TYPE_DEFAULT;hp.CreationNodeMask=hp.VisibleNodeMask=1;
+    D3D12_RESOURCE_DESC d={0};d.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;d.Width=w;d.Height=h;
+    d.DepthOrArraySize=1;d.MipLevels=1;d.Format=DXGI_FORMAT_R32_FLOAT;d.SampleDesc.Count=1;d.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    ID3D12Resource *r=NULL;
+    if(FAILED(ID3D12Device_CreateCommittedResource(g_device,&hp,D3D12_HEAP_FLAG_NONE,&d,D3D12_RESOURCE_STATE_RENDER_TARGET,NULL,&IID_ID3D12Resource,(void **)&r)))return NULL;
+    return r;
+}
+static void azguide_record(ID3D12GraphicsCommandList *cl,ListState *s,UINT w,UINT h,UINT vc,UINT ic,UINT sv,UINT si){
+    azguide_latest=NULL;
+    if(!azguide_enabled||azguide_count>=AZGUIDE_MAX||vc!=3||ic!=1||sv||si||!s||
+       !real_CreateDescriptorHeap||!real_CreateRenderTargetView||s->trace_predicated||s->trace_queries||
+       s->trace_query_unknown||s->trace_topology!=D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST||
+       cl->lpVtbl->GetType(cl)!=D3D12_COMMAND_LIST_TYPE_DIRECT||w>3840||h>2160)return;
+    AcquireSRWLockExclusive(&azt_lock);
+    int active=azdbg.active&&azdbg.id==1&&azdbg.observed<azrp_capture_groups(azrp_profile)&&!azt_incomplete;
+    uint64_t resolve=azt_frame+1;
+    if(active&&!s->trace_recording_id)s->trace_recording_id=++azt_generation;
+    uint64_t recording=s->trace_recording_id;
+    ReleaseSRWLockExclusive(&azt_lock);
+    if(!active||!recording)return;
+    AzGuidePSO p={0};
+    AcquireSRWLockShared(&pso_lock);
+    for(unsigned i=0;i<MAX_VARIANTS;++i)if(azguide_psos[i].original==s->pso){p=azguide_psos[i];break;}
+    ReleaseSRWLockShared(&pso_lock);
+    if(!p.stencil||!p.constants)return;
+    AzGuideFrame *g=&azguide_frames[azguide_count++];
+    g->stencil=azguide_texture(w,h);g->constants=azguide_texture(64,1);
+    D3D12_DESCRIPTOR_HEAP_DESC hd={0};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=2;
+    if(!g->stencil||!g->constants||FAILED(real_CreateDescriptorHeap(g_device,&hd,&IID_ID3D12DescriptorHeap,(void **)&g->rtv))||!g->rtv){
+        log_msg("NR GUIDE_SKIP resolve=%llu reason=allocation",resolve);return;
+    }
+    D3D12_CPU_DESCRIPTOR_HANDLE rt=cpu_handle(g->rtv,0,rtv_inc);
+    for(unsigned k=0;k<2;++k){
+        UINT x=k?64:w,y=k?1:h;
+        D3D12_VIEWPORT vp={0,0,(float)x,(float)y,0,1};D3D12_RECT sc={0,0,(LONG)x,(LONG)y};
+        real_CreateRenderTargetView(g_device,k?g->constants:g->stencil,NULL,rt);
+        real_SetPipelineState(cl,k?p.constants:p.stencil);real_OMSetRenderTargets(cl,1,&rt,FALSE,NULL);
+        real_RSSetViewports(cl,1,&vp);real_RSSetScissorRects(cl,1,&sc);real_DrawInstanced(cl,3,1,0,0);
+        rt.ptr+=rtv_inc;
+    }
+    g->list=(uintptr_t)cl;g->recording=recording;g->resolve=resolve;g->seq=(uint64_t)mv_seq+1;
+    g->w=w;g->h=h;azguide_latest=g;
+    log_msg("NR GUIDE_RECORDED resolve=%llu recording=%llu list=%p mvSeq=%llu size=%ux%u stencil=%p constants=%p cameraAndExposureCandidate=1",
+        resolve,recording,(void *)cl,g->seq,w,h,(void *)g->stencil,(void *)g->constants);
+}
 static void record_mv_pass(ID3D12GraphicsCommandList *cl, ListState *s, ID3D12PipelineState *variant,
                            UINT vc, UINT ic, UINT sv, UINT si) {
     const GameProfile *profile = game_profile_active();
@@ -848,6 +942,7 @@ static void record_mv_pass(ID3D12GraphicsCommandList *cl, ListState *s, ID3D12Pi
         real_RSSetScissorRects(cl, 1, &sc);
         real_DrawInstanced(cl, vc, ic, sv, si);
         transition(cl, mv_tex, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        if(azguide_enabled)azguide_record(cl,s,w,h,vc,ic,sv,si);
         /* Restore the game's state exactly as it set it. */
         real_SetPipelineState(cl, s->pso);
         real_OMSetRenderTargets(cl, s->num_rtv, s->num_rtv ? s->rtv : NULL, s->rtv_single,
@@ -886,6 +981,7 @@ static void record_mv_pass_indexed(ID3D12GraphicsCommandList *cl, ListState *s, 
         real_RSSetViewports(cl, 1, &vp);
         real_RSSetScissorRects(cl, 1, &sc);
         real_DrawIndexedInstanced(cl, index_count, instance_count, start_index, base_vertex, start_instance);
+        if(azguide_enabled)azguide_latest=NULL; /* no invented indexed-pass coverage */
         transition(cl, mv_tex, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         real_SetPipelineState(cl, s->pso);
         real_OMSetRenderTargets(cl, s->num_rtv, s->num_rtv ? s->rtv : NULL, s->rtv_single,
