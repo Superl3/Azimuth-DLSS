@@ -15,6 +15,8 @@ param(
     [switch]$VisibleSR,
     [switch]$VisibleHDR,
     [switch]$HDRLive,
+    [switch]$PresentTrace,
+    [switch]$ProducerGpuWait,
     [switch]$VisibleMarker,
     [ValidateRange(10,120)][int]$VisibleSeconds = 10,
     [switch]$AutoTest,
@@ -58,6 +60,8 @@ if($PSBoundParameters.ContainsKey('VisibleSeconds') -and !$VisibleSR){throw '-Vi
 if($VisibleSR -and (!$PreviewSRReplay -or !$PreviewJitter)){throw '-VisibleSR requires -PreviewSRReplay and -PreviewJitter.'}
 if($VisibleSR -and $ExitAfterCapture -and !$AutoTest){throw 'For automatic VisibleSR shutdown use -AutoTest; otherwise omit -ExitAfterCapture.'}
 if($PreviewSRReplay -and !$PreviewReplay){throw '-PreviewSRReplay requires -PreviewReplay.'}
+if($ProducerGpuWait -and !$PreviewSRReplay){throw '-ProducerGpuWait requires -PreviewSRReplay.'}
+if($PresentTrace -and !$VisibleSR){throw '-PresentTrace requires -VisibleSR or -VisibleHDR.'}
 if($PreviewReplay -and !$PreviewPostFx){throw '-PreviewReplay requires -PreviewPostFx.'}
 if ($ExitAfterCapture -and ((!$AutoResolve -and !$AutoTest) -or $CollectOnly)) {
     throw '-ExitAfterCapture requires -AutoResolve or -AutoTest and a new game launch.'
@@ -192,7 +196,7 @@ try {
             $previous = (Get-Item -LiteralPath $log).LastWriteTimeUtc
             Copy-Item -LiteralPath $log -Destination (Join-Path $dest ($tag + '-previous.log'))
         }
-        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM','AZIMUTH_DEBUG_AUTO_RESOLVE','AZIMUTH_DEBUG_AUTO_TEST','AZIMUTH_DEBUG_PRODUCER_WAIT_MS','AZIMUTH_DEBUG_AUTO_WARMUP_MS','AZIMUTH_DEBUG_AUTO_READY_FILE','AZIMUTH_SR_OUTPUT','AZIMUTH_SR_QUALITY','AZIMUTH_DEBUG_PREVIEW_POSTFX','AZIMUTH_DEBUG_PREVIEW_JITTER','AZIMUTH_DEBUG_POSTFX_REPLAY','AZIMUTH_DEBUG_SR_REPLAY','AZIMUTH_DEBUG_VISIBLE_SR','AZIMUTH_DEBUG_VISIBLE_HDR','AZIMUTH_DEBUG_HDR_LIVE','AZIMUTH_DEBUG_VISIBLE_MARKER','AZIMUTH_DEBUG_VISIBLE_SECONDS','AZIMUTH_DEBUG_QUEUE_TRACE')) {
+        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM','AZIMUTH_DEBUG_AUTO_RESOLVE','AZIMUTH_DEBUG_AUTO_TEST','AZIMUTH_DEBUG_PRODUCER_WAIT_MS','AZIMUTH_DEBUG_PRODUCER_GPU_WAIT','AZIMUTH_DEBUG_PRESENT_TRACE','AZIMUTH_DEBUG_AUTO_WARMUP_MS','AZIMUTH_DEBUG_AUTO_READY_FILE','AZIMUTH_SR_OUTPUT','AZIMUTH_SR_QUALITY','AZIMUTH_DEBUG_PREVIEW_POSTFX','AZIMUTH_DEBUG_PREVIEW_JITTER','AZIMUTH_DEBUG_POSTFX_REPLAY','AZIMUTH_DEBUG_SR_REPLAY','AZIMUTH_DEBUG_VISIBLE_SR','AZIMUTH_DEBUG_VISIBLE_HDR','AZIMUTH_DEBUG_HDR_LIVE','AZIMUTH_DEBUG_VISIBLE_MARKER','AZIMUTH_DEBUG_VISIBLE_SECONDS','AZIMUTH_DEBUG_QUEUE_TRACE')) {
             $oldEnv[$key] = [Environment]::GetEnvironmentVariable($key,'Process')
         }
         [Environment]::SetEnvironmentVariable('AZIMUTH_SR_MODE',$(if($Preview){'preview'}else{'debug'}),'Process')
@@ -215,6 +219,8 @@ try {
         [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_AUTO_RESOLVE',[string]$AutoResolve,'Process')
         [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_AUTO_TEST',$(if($AutoTest){'1'}else{'0'}),'Process')
         [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_PRODUCER_WAIT_MS',[string]$ProducerWaitMs,'Process')
+        [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_PRODUCER_GPU_WAIT',$(if($ProducerGpuWait){'1'}else{'0'}),'Process')
+        [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_PRESENT_TRACE',$(if($PresentTrace){'1'}else{'0'}),'Process')
         [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_AUTO_WARMUP_MS',[string]$AutoWarmupMs,'Process')
         [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_AUTO_READY_FILE',$(if($ReadyFile){$ReadyFile}else{$null}),'Process')
         if($ShaderDisasm){Write-Host 'Selected shader assembly is included in the ZIP; review before sharing privately.'}
@@ -232,6 +238,8 @@ try {
             elseif($VisibleSR){Write-Warning "Visible SR SDR alpha: after capture start, up to $VisibleSeconds seconds of gated native final-target replacement. Native HUD pixels retained; SDR only: explicitly disable HDR in the game. No swapchain references are retained; actual Present needs external ETW or screen evidence."}
             else{Write-Host 'Preview captures offscreen SR and selected GPU textures; no visible SR replacement.'}
             if($PreviewJitter){Write-Warning 'Experimental viewport jitter can affect the displayed native fallback scene.'}
+            if($ProducerGpuWait){Write-Warning 'Experimental deferred producer dependency: queue Wait at actual submission; exceptional failure can block for safe completion.'}
+            if($PresentTrace){Write-Warning 'Experimental passive Present/Resize/ColorSpace vtable instrumentation; no retained interfaces, no FG or timing changes requested.'}
         }
         else{Write-Host 'This launcher collects CPU metadata only. To capture GPU frames, use the RenderDoc procedure and -CollectOnly.'}
         $started = [DateTime]::UtcNow
@@ -366,6 +374,7 @@ try {
         auto_gate_open = [bool]($content -match '(?m)^PREVIEW AUTO_GATE_OPEN ')
         auto_ready = [bool]($content -match '(?m)^PREVIEW AUTO_READY ')
         visible_hdr_requested = [bool]$VisibleHDR; hdr_live_requested = [bool]$HDRLive
+        present_trace_requested = [bool]$PresentTrace; producer_gpu_wait_requested = [bool]$ProducerGpuWait
         visible_trial_complete = [bool]($content -match '(?m)^VISIBLE TRIAL_END ')
         visible_seconds_requested = $(if($VisibleSR){$VisibleSeconds}else{$null})
         visible_duration_ms_observed = $(if($content -match '(?m)^VISIBLE CONFIG enabled=1 durationMs=(\d+) '){[int]$Matches[1]}else{$null})

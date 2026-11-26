@@ -61,6 +61,15 @@ int main(void) {
     assert(!azpv_source_waitable((AzpvBatchLife){PV_FAILED,0},0));
     assert(!azpv_source_waitable((AzpvBatchLife){PV_SUBMITTED,0},UINT64_MAX));
     assert(!azpv_source_waitable((AzpvBatchLife){PV_SUBMITTED,0},1));
+    assert(azpv_source_defer((AzpvBatchLife){PV_SUBMITTED,0},0,5,6,1,1));
+    assert(!azpv_source_defer((AzpvBatchLife){PV_SUBMITTED,1},0,5,6,1,1));
+    assert(!azpv_source_defer((AzpvBatchLife){PV_FAILED,0},0,5,6,1,1));
+    assert(!azpv_source_defer((AzpvBatchLife){PV_SUBMITTED,0},UINT64_MAX,5,6,1,1));
+    assert(!azpv_source_defer((AzpvBatchLife){PV_SUBMITTED,0},1,5,6,1,1));
+    assert(!azpv_source_defer((AzpvBatchLife){PV_SUBMITTED,0},0,5,5,1,1));
+    assert(!azpv_source_defer((AzpvBatchLife){PV_SUBMITTED,0},0,0,6,1,1));
+    assert(!azpv_source_defer((AzpvBatchLife){PV_SUBMITTED,0},0,5,6,0,1));
+    assert(!azpv_source_defer((AzpvBatchLife){PV_SUBMITTED,0},0,5,6,1,0));
     AzvisTail tail={0};
     azvis_tail_begin(&tail,210,1);
     azvis_tail_barrier(&tail,210,1,1,1,4,128);
