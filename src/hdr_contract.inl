@@ -4,9 +4,9 @@
    Only the exact t2 resource may be retained for bounded readback. */
 typedef struct {
     uintptr_t scene,curve,image;
-    D3D12_RESOURCE_STATES scene_state;
-    int scene_readable,inputs_ok;
-    ID3D12Resource *scene_ref;
+    D3D12_RESOURCE_STATES scene_state,image_state;
+    int scene_readable,inputs_ok,replay_inputs_ok;
+    ID3D12Resource *scene_ref,*image_ref;
 } AzHdrContract;
 static AztDesc *azhdr_table_desc(ListState *s,const AzvisReg *reg){
     if(reg->mode!=AZRB_TABLE||reg->root>=AZRB_TABLES||!(s->trace_tables_mask&azrb_bit(reg->root)))return NULL;
@@ -80,6 +80,12 @@ static AzHdrContract azhdr_inspect(ID3D12GraphicsCommandList *cl,ListState *s,un
     c.scene_state=state[2];c.scene_readable=!azt_incomplete&&shape[2]&&read[2]&&c.scene&&c.scene!=target&&c.scene!=c.image;
     if(c.scene_readable){c.scene_ref=d[2]->res;ID3D12Resource_AddRef(c.scene_ref);}
     c.inputs_ok=!azt_incomplete&&shape[0]&&shape[1]&&shape[2]&&read[0]&&read[1]&&read[2]&&sok&&cbok&&c.scene!=c.image&&c.scene!=target&&c.image!=target;
-    log_msg("POSTFX HDR_CONTRACT resolve=%llu list=%p recording=%llu root=%p t0=%p t1=%p t2=%p target=%p samplerMapped=%d samplerMode=%u samplerRoot=%u cb0Mapped=%d cb0Mode=%u cb0Root=%u cb0Observed=%d levelsValuesKnown=0 samplerValuesKnown=0 inputsVerified=%d t2Readable=%d inputDomain=pre_final_encoded outputMath=BT2020_PQ outputColorSpace=unknown nativePreserved=1",resolve,(void *)cl,s->trace_recording_id,(void *)s->trace_graphics_rs,(void *)c.image,(void *)c.curve,(void *)c.scene,(void *)target,sok,sampler.mode,sampler.root,cbmap,cb.mode,cb.root,cbok,c.inputs_ok,c.scene_readable);
+    /* The native final draw already used the original curve and levels.
+       We never transition or alter these resources, only copy their descriptors.
+       Both inputs that WILL be copied must have proven local read states. */
+    c.replay_inputs_ok=!azt_incomplete&&shape[0]&&shape[1]&&shape[2]&&read[0]&&read[2]&&sok&&cbok&&c.scene&&c.image&&c.curve&&target&&c.scene!=c.image&&c.scene!=target&&c.image!=target;
+    c.image_state=state[0];
+    if(azvis_hdr&&c.replay_inputs_ok){c.image_ref=d[0]->res;ID3D12Resource_AddRef(c.image_ref);}
+    log_msg("POSTFX HDR_CONTRACT resolve=%llu list=%p recording=%llu root=%p t0=%p t1=%p t2=%p target=%p samplerMapped=%d samplerMode=%u samplerRoot=%u cb0Mapped=%d cb0Mode=%u cb0Root=%u cb0Observed=%d levelsValuesKnown=0 samplerValuesKnown=0 inputsVerified=%d t2Readable=%d inputDomain=pre_final_encoded outputMath=BT2020_PQ outputColorSpace=unknown nativePreserved=1 replayInputs=%d",resolve,(void *)cl,s->trace_recording_id,(void *)s->trace_graphics_rs,(void *)c.image,(void *)c.curve,(void *)c.scene,(void *)target,sok,sampler.mode,sampler.root,cbmap,cb.mode,cb.root,cbok,c.inputs_ok,c.scene_readable,c.replay_inputs_ok);
     return c;
 }
