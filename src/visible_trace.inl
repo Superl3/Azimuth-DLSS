@@ -38,6 +38,15 @@ static long long azvis_qpc(void){LARGE_INTEGER t;QueryPerformanceCounter(&t);ret
 static void visible_count_work(ID3D12GraphicsCommandList *cl,ListState *s,const char *method,ID3D12Resource *dst,ID3D12Resource *src,UINT a,UINT b,UINT c,UINT d){
     if(!azvis_observing()||!s)return;
     ++s->trace_work_seq;
+    if(s->trace_watch_active){
+        unsigned kind=AZTAIL_OTHER;uintptr_t target=0;
+        if(!strcmp(method,"ClearRenderTargetView")&&d==1){kind=AZTAIL_CLEAR;target=(uintptr_t)dst;}
+        else if(!strcmp(method,"DrawInstanced")&&a==3&&b==1&&!c&&!d&&s->num_rtv==1){
+            const ViewEntry *r=view_find(s->rtv[0].ptr);
+            if(r){kind=AZTAIL_FINAL;target=(uintptr_t)r->resource;}
+        }
+        azvis_tail_work(&s->trace_tail,s->trace_work_seq,kind,target);
+    }
     if(!s->trace_watch_active||s->trace_watch_count>=64)return;
     ++s->trace_watch_count;
     AcquireSRWLockShared(&azt_lock);
@@ -67,7 +76,14 @@ static void visible_count_work(ID3D12GraphicsCommandList *cl,ListState *s,const 
     if(s->trace_watch_count==64)log_msg("VISIBLE WORK_LIMIT resolve=%llu recording=%llu",s->trace_watch_resolve,s->trace_recording_id);
 }
 static void visible_work_barriers(ID3D12GraphicsCommandList *cl,ListState *s,UINT n,const D3D12_RESOURCE_BARRIER *b){
-    if(!s||!s->trace_watch_active||!b||s->trace_watch_count>=64)return;
+    if(!s||!s->trace_watch_active||!b)return;
+    for(UINT i=0;i<n;++i){
+        const D3D12_RESOURCE_BARRIER *x=&b[i];
+        int transition=x->Type==D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        int full=transition&&x->Flags==D3D12_RESOURCE_BARRIER_FLAG_NONE&&x->Transition.Subresource==D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        azvis_tail_barrier(&s->trace_tail,s->trace_work_seq,transition,full,transition?(uintptr_t)x->Transition.pResource:0,transition?(unsigned)x->Transition.StateBefore:0,transition?(unsigned)x->Transition.StateAfter:0);
+    }
+    if(s->trace_watch_count>=64)return;
     for(UINT i=0;i<n&&s->trace_watch_count<64;++i){
         const D3D12_RESOURCE_BARRIER *x=&b[i];++s->trace_watch_count;
         uintptr_t a=0,c=0;UINT before=0,after=0,sub=0;

@@ -264,7 +264,9 @@ static int visible_finalize(AzvisFrame *v,ID3D12GraphicsCommandList *cl,ListStat
         log_msg("VISIBLE SKIP resolve=%llu stage=final reason=chain_recording_or_native_size pre=%d composite=%d expectedList=%p actualList=%p expectedRecording=%llu actualRecording=%llu",resolve,v->pre_ready,v->composite_ready,(void *)v->list,(void *)cl,v->recording,s->trace_recording_id);return 0;
     }
     int adjacent=azpv_adjacent_work(v->composite_work,s->trace_work_seq);
-    int probe=!adjacent;
+    int clear_tail=azvis_tail_proven(&s->trace_tail,v->composite_work,s->trace_work_seq,(uintptr_t)native,(uintptr_t)target);
+    int probe=!adjacent&&!clear_tail;
+    log_msg("VISIBLE TAIL_GATE resolve=%llu adjacent=%d clearTail=%d proofStage=%u composite=%p clearTarget=%p finalTarget=%p priorWork=%llu finalWork=%llu recording=%llu",resolve,adjacent,clear_tail,s->trace_tail.stage,(void *)s->trace_tail.composite,(void *)s->trace_tail.target,(void *)target,v->composite_work,s->trace_work_seq,s->trace_recording_id);
     if(probe){
         log_msg("VISIBLE SKIP resolve=%llu stage=final reason=chain_recording_or_nonadjacent_work pre=%d composite=%d priorWork=%llu finalWork=%llu expectedList=%p actualList=%p expectedRecording=%llu actualRecording=%llu",resolve,v->pre_ready,v->composite_ready,v->composite_work,s->trace_work_seq,(void *)v->list,(void *)cl,v->recording,s->trace_recording_id);
         if(!allow_probe)return 0;

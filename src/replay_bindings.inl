@@ -329,7 +329,7 @@ static int azrp_prepare_bindings(ListState *s,ID3D12Resource *scene,ID3D12Resour
     if(verbose)log_msg("POSTFX SR_PLAN resolve=%llu path=C_extended layout=%s req=%u entries=%u descriptorErrors=0x%05x common=%d candidate=%d",
         resolve,azrb_finish_name(c),bad_c,total_c,errors,common,available[2]);
     if(!common){
-        const char *reason=azt_incomplete?"trace_incomplete":!draw_ready?"original_draw_gate":!producer_ready||!snapshot?"producer_not_ready":
+        const char *reason=azt_incomplete?"trace_incomplete":!producer_ready||!snapshot?"producer_not_ready":!draw_ready?"original_draw_gate":
             !graphics_ok?"graphics_restore_unproven":!compute_ok?"compute_restore_unproven":!bindings_ok?"unknown_original_bindings":!heap_ok?"resource_heap":"required_binding_unavailable";
         log_msg("POSTFX SR_REPLAY SKIP resolve=%llu reason=%s root=%p descriptorErrors=0x%05x",resolve,reason,(void *)s->trace_graphics_rs,errors);
         ReleaseSRWLockExclusive(&azt_lock);return 0;

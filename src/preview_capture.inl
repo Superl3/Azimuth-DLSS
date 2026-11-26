@@ -19,6 +19,7 @@ typedef struct {
 typedef struct {
     ID3D12GraphicsCommandList *list;
     ID3D12Fence *fence;
+    HANDLE ready_event;
     unsigned long long resolve;
     unsigned count,good;
     AzpvBatchLife life;
@@ -48,6 +49,7 @@ static int azpv_enabled,azpv_postfx,azpv_done;
 static AzPreviewReady azpv_ready;
 static AzAutoScene azpv_auto_scene,azpv_auto_sr;
 static int azpv_auto_test;
+static unsigned azpv_producer_wait_ms;
 static struct {uint64_t resolve;uintptr_t postfx,composite;unsigned stages;} azpv_auto_chain;
 static wchar_t azpv_dir[MAX_PATH];
 static char azpv_dirname[80];
@@ -60,6 +62,9 @@ static void preview_init(void) {
     azpv_auto_test=n==1&&b[0]=='1';
     postfx_replay_init();
     visible_init();
+    UINT wait_ms=0;
+    if(azt_env_uint("AZIMUTH_DEBUG_PRODUCER_WAIT_MS",&wait_ms)&&wait_ms<=12)azpv_producer_wait_ms=wait_ms;
+    log_msg("PREVIEW PRODUCER_CONFIG waitMs=%u policy=submitted_retired_private_fence_only",azpv_producer_wait_ms);
     azpv_enabled=GetModuleHandleW(L"renderdoc.dll")==NULL;
     log_msg("PREVIEW CONFIG readback=%d postfx=%d groups=%u maxBytes=%llu",
         azpv_enabled,azpv_postfx,azrp_capture_groups(azrp_profile),(unsigned long long)AZPV_LIMIT);
@@ -138,12 +143,36 @@ static ID3D12Resource *preview_sr_snapshot(ID3D12GraphicsCommandList *cl,ID3D12R
     hooks_transition(cl,copy,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     return copy;
 }
-static int preview_sr_ready(const AzpvGroup *g,ID3D12GraphicsCommandList *cl,unsigned long long recording) {
-    if(!g->sr_snapshot||!g->core_batch)return 0;
-    const AzpvBatch *b=g->core_batch;
-    UINT64 value=0;
-    if(b->life.state==PV_SUBMITTED||b->life.state==PV_SAVED)value=b->fence->lpVtbl->GetCompletedValue(b->fence);
-    return azpv_source_ready(b->life,b->recording,recording,b->list==cl,value);
+static int preview_sr_ready(const AzpvGroup *g,ID3D12GraphicsCommandList *cl,unsigned long long recording,int draw_ready) {
+    AzpvBatch *b=g->core_batch;
+    if(!g->sr_snapshot||!b){
+        log_msg("POSTFX SR_PRODUCER resolve=%llu reason=no_snapshot_or_batch ready=0",g->resolve);return 0;
+    }
+    UINT64 before=0,value=0;
+    if(b->life.state==PV_SUBMITTED||b->life.state==PV_SAVED)before=b->fence->lpVtbl->GetCompletedValue(b->fence);
+    value=before;
+    int ready=azpv_source_ready(b->life,b->recording,recording,b->list==cl,value);
+    DWORD wr=WAIT_FAILED;uint64_t start=GetTickCount64();int attempted=0;
+    /* CPU-side bounded alpha wait on the private producer signal ALREADY
+       submitted and on a successfully retired recording. No queue Wait,
+       no guessed ordering, no source reuse. A timeout leaves native
+       rendering untouched. The batch owns the event until completion. */
+    if(!ready&&draw_ready&&azpv_producer_wait_ms&&b->queue&&azpv_source_waitable(b->life,value)){
+        attempted=1;
+        if(!b->ready_event){
+            HANDLE event=CreateEventW(NULL,FALSE,FALSE,NULL);
+            if(event){
+                HRESULT hr=b->fence->lpVtbl->SetEventOnCompletion(b->fence,1,event);
+                if(SUCCEEDED(hr))b->ready_event=event;else CloseHandle(event);
+            }
+        }
+        if(b->ready_event)wr=WaitForSingleObject(b->ready_event,azpv_producer_wait_ms);
+        value=b->fence->lpVtbl->GetCompletedValue(b->fence);
+        ready=azpv_source_ready(b->life,b->recording,recording,b->list==cl,value);
+    }
+    log_msg("POSTFX SR_PRODUCER resolve=%llu producerRecording=%llu consumerRecording=%llu sameList=%d state=%d current=%d queue=%p before=%llu completed=%llu waitAttempted=%d waitResult=%lu waitElapsedMs=%llu ready=%d",
+        g->resolve,b->recording,recording,b->list==cl,b->life.state,b->life.current,(void *)b->queue,(unsigned long long)before,(unsigned long long)value,attempted,(unsigned long)wr,(unsigned long long)(GetTickCount64()-start),ready);
+    return ready;
 }
 /* Only live groups are recycled. Both recordings must be retired and
    complete. Failed or repeated submissions quarantine the slot until
@@ -161,6 +190,7 @@ static void preview_reap_live(unsigned long long retire_before){
         for(unsigned i=0;i<azpv_batch_count;++i){
             AzpvBatch *b=&azpv_batches[i];
             if(!b->life.state||b->group!=g)continue;
+            if(b->ready_event)CloseHandle(b->ready_event);
             ID3D12Fence_Release(b->fence);ID3D12GraphicsCommandList_Release(b->list);memset(b,0,sizeof(*b));
         }
         if(p->visible.routed)log_msg("VISIBLE FINAL_GPU_COMPLETE resolve=%llu target=%p liveSlot=%u",p->resolve,(void *)p->visible.target_id,g);
@@ -368,7 +398,7 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
             if(azrp_sr_enabled){
                 g->requested_mask|=256u;
                 int draw_ready=chain&&!(missing&~16u)&&s->trace_recording_id;
-                int producer_ready=preview_sr_ready(g,cl,s->trace_recording_id);
+                int producer_ready=preview_sr_ready(g,cl,s->trace_recording_id,draw_ready);
                 AzpvBatch *batch=draw_ready&&producer_ready?preview_batch(i,cl,s->trace_recording_id):NULL;
                 AzrpBindings bindings;
                 /* Independent preflight runs even when the producer or
@@ -389,6 +419,7 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
             /* Independent of successful SR preparation, observe the
                native tail so an earlier gate cannot hide the next gap. */
             s->trace_watch_resolve=resolve;s->trace_watch_count=0;s->trace_watch_active=1;
+            azvis_tail_begin(&s->trace_tail,s->trace_work_seq,(uintptr_t)target);
             log_msg("VISIBLE WORK_WATCH resolve=%llu list=%p recording=%llu work=%llu composite=%p privateComposite=%d",resolve,(void *)cl,s->trace_recording_id,s->trace_work_seq,(void *)target,g->visible.composite_ready);
         }
         if(capture&&hash==0x577d52ef&&azrp_profile.wide&&azrp_sr_enabled){
@@ -526,6 +557,7 @@ static void preview_poll(void) {
             /* Wait for the successful reset too, so a repeated submission
                cannot race mapping or silently overwrite the captured data. */
             else if(azpv_can_map(b->life,value)){
+                if(b->ready_event){CloseHandle(b->ready_event);b->ready_event=NULL;}
                 for(unsigned k=0;k<b->count;++k){
                     if(preview_save(b,&b->shots[k]))++b->good;
                     else b->shots[k].name=NULL;

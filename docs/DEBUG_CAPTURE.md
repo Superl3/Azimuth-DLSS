@@ -650,3 +650,41 @@ gate, the ordinary warmup suffices. PREVIEW AUTO_READY trigger is
 scene_chain or fresh_sr_fallback; no output safety gate is relaxed.
 Use the external ready file if the game might sit at a rendered menu.
 F11 and F8 polling are both bypassed in AutoTest.
+
+
+### 75da3ea dynamic SDR capture: exact final-clear tail and producer completion
+
+The no-hotkey test used a gameplay ReadyFile, completed all 10 seconds,
+exited normally, and saved 19 RAW files. Resolve 2440 produced both
+hudprobe and finalprobe. All 594 native final candidates had the same
+tail: composite RT->PS_RESOURCE, distinct final target COPY_SOURCE->RT,
+whole ClearRenderTargetView of that target, then the exact SDR final
+draw, followed by final RT->COPY_SOURCE. The clear is NOT a write to
+the composite. The new narrowly matched alternative records these
+two explicit full-resource barriers, verifies the actual clear view,
+dimensions, resource identity, state and recording, and requires the
+immediately following final draw to target that exact resource.
+Any other counted work or barrier invalidates this proof; the existing
+direct-adjacency gate, independent final shader/descriptor/restore
+checks and offscreen diagnostic fallback remain. This is not exhaustive
+tracking of modern command-list interfaces or heap aliasing.
+Additional base-list buffer copies, tiled copies, depth clears and
+query resolves invalidate the clear-tail alternative.
+
+The second capture and subsequent live candidates repeatedly skipped
+before postfx. Resolve 2441 explicitly had producerReady=0 even with
+snapshot=1 and 20/20 bindings. The producer and consumer were distinct
+recordings of the same list and submitted on the same direct queue.
+Do not assume future consumer submission order from pointer reuse.
+POSTFX SR_PRODUCER now reports the producer recording, state, reset,
+queue, fence values and timing for all candidates. -ProducerWaitMs
+(default 8 in AutoTest, 0 otherwise, max 12) optionally waits on an
+already submitted, successfully reset private producer fence only.
+It checks the actual completed value again before any replay commands.
+No GPU queue wait and no CPU wait on an unsubmitted or current list.
+A timeout/failure preserves native output. This bounded CPU wait occurs
+under the preview ownership lock and can reduce frame rate; Windows
+scheduling may exceed the requested timeout. It is an alpha diagnostic
+aid, not a production frame-pacing solution. The event stays alive until
+the associated fence is safely completed or process exit. The launcher
+still shuts down normally after the full trial and capture.

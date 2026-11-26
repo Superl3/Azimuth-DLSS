@@ -14,6 +14,7 @@ param(
     [switch]$PreviewSRReplay,
     [switch]$VisibleSR,
     [switch]$AutoTest,
+    [ValidateRange(0,12)][int]$ProducerWaitMs = 0,
     [ValidateRange(500,15000)][int]$AutoWarmupMs = 2000,
     [string]$ReadyFile = '',
     [ValidateRange(0,10)][int]$PostRollSeconds = 2,
@@ -33,6 +34,7 @@ if($AutoTest){
     $Preview=$true; $PreviewPostFx=$true; $PreviewReplay=$true; $PreviewSRReplay=$true
     $PreviewJitter=$true; $ShaderDisasm=$true
     if(!$CollectOnly){$ExitAfterCapture=$true}
+    if(!$PSBoundParameters.ContainsKey('ProducerWaitMs')){$ProducerWaitMs=8}
     if(!$Label){$Label='FH2-auto-'+$Output}
     if(!$RenderSetting){$RenderSetting=$(if($Output -eq '1920x1080'){'1280x720 expected (verify measured size)'}else{'2592x1080 expected (verify measured size)'})}
     if(!$GameDir -and !(Test-Path -LiteralPath (Join-Path $PSScriptRoot 'azimuth.exe') -PathType Leaf)){throw '-AutoTest requires -GameDir when launched outside the game folder.'}
@@ -160,7 +162,7 @@ try {
             $previous = (Get-Item -LiteralPath $log).LastWriteTimeUtc
             Copy-Item -LiteralPath $log -Destination (Join-Path $dest ($tag + '-previous.log'))
         }
-        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM','AZIMUTH_DEBUG_AUTO_RESOLVE','AZIMUTH_DEBUG_AUTO_TEST','AZIMUTH_DEBUG_AUTO_WARMUP_MS','AZIMUTH_DEBUG_AUTO_READY_FILE','AZIMUTH_SR_OUTPUT','AZIMUTH_SR_QUALITY','AZIMUTH_DEBUG_PREVIEW_POSTFX','AZIMUTH_DEBUG_PREVIEW_JITTER','AZIMUTH_DEBUG_POSTFX_REPLAY','AZIMUTH_DEBUG_SR_REPLAY','AZIMUTH_DEBUG_VISIBLE_SR','AZIMUTH_DEBUG_QUEUE_TRACE')) {
+        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM','AZIMUTH_DEBUG_AUTO_RESOLVE','AZIMUTH_DEBUG_AUTO_TEST','AZIMUTH_DEBUG_PRODUCER_WAIT_MS','AZIMUTH_DEBUG_AUTO_WARMUP_MS','AZIMUTH_DEBUG_AUTO_READY_FILE','AZIMUTH_SR_OUTPUT','AZIMUTH_SR_QUALITY','AZIMUTH_DEBUG_PREVIEW_POSTFX','AZIMUTH_DEBUG_PREVIEW_JITTER','AZIMUTH_DEBUG_POSTFX_REPLAY','AZIMUTH_DEBUG_SR_REPLAY','AZIMUTH_DEBUG_VISIBLE_SR','AZIMUTH_DEBUG_QUEUE_TRACE')) {
             $oldEnv[$key] = [Environment]::GetEnvironmentVariable($key,'Process')
         }
         [Environment]::SetEnvironmentVariable('AZIMUTH_SR_MODE',$(if($Preview){'preview'}else{'debug'}),'Process')
@@ -178,6 +180,7 @@ try {
         [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_SHADER_DISASM',$(if($ShaderDisasm){'1'}else{'0'}),'Process')
         [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_AUTO_RESOLVE',[string]$AutoResolve,'Process')
         [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_AUTO_TEST',$(if($AutoTest){'1'}else{'0'}),'Process')
+        [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_PRODUCER_WAIT_MS',[string]$ProducerWaitMs,'Process')
         [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_AUTO_WARMUP_MS',[string]$AutoWarmupMs,'Process')
         [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_AUTO_READY_FILE',$(if($ReadyFile){$ReadyFile}else{$null}),'Process')
         if($ShaderDisasm){Write-Host 'Selected shader assembly is included in the ZIP; review before sharing privately.'}
@@ -318,7 +321,7 @@ try {
         auto_ready = [bool]($content -match '(?m)^PREVIEW AUTO_READY ')
         visible_trial_complete = [bool]($content -match '(?m)^VISIBLE TRIAL_END ')
         automatic_completion_seen = $automaticCompletionSeen; automatic_close_requested = $automaticCloseRequested
-        post_roll_seconds = $(if($AutoTest){$PostRollSeconds}else{0})
+        post_roll_seconds = $(if($AutoTest){$PostRollSeconds}else{0}); producer_wait_ms = $ProducerWaitMs
         automatic_resolve = $AutoResolve; automatic_capture = $autoCapture
         automatic_wait_expired = $autoWaitExpired
         files_sha256 = [ordered]@{ 'azimuth.exe' = (FileHashOrNull $exe); 'dxgi.dll' = (FileHashOrNull $proxy); 'azimuth_ngx.dll' = (FileHashOrNull $bridge) }

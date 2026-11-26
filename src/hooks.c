@@ -15,6 +15,7 @@
 #include "game_profile.h"
 #include "common.h"
 #include "replay_binding_policy.h"
+#include "visible_tail_policy.h"
 
 HMODULE proxy_system_dxgi(void);
 
@@ -363,6 +364,7 @@ typedef struct {
     unsigned long long trace_recording_id,trace_work_seq,trace_watch_resolve;
     unsigned trace_watch_count;
     int trace_watch_active;
+    AzvisTail trace_tail;
     D3D_PRIMITIVE_TOPOLOGY trace_topology;
     UINT trace_queries;
     int trace_predicated, trace_query_unknown;

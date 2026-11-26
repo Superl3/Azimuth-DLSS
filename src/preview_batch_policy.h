@@ -23,6 +23,9 @@ static inline int azpv_source_ready(AzpvBatchLife b,uint64_t producer,uint64_t c
     if(same_list&&azpv_can_append(b,producer,consumer))return 1;
     return (b.state==PV_SUBMITTED||b.state==PV_SAVED)&&!b.current&&completed>=1&&completed!=UINT64_MAX;
 }
+static inline int azpv_source_waitable(AzpvBatchLife b,uint64_t completed){
+    return b.state==PV_SUBMITTED&&!b.current&&completed==0;
+}
 /* A completed core fence alone must not retire a group still waiting
    for its consumer recording. Old groups cannot acquire more work
    once the global resolve has advanced; closed groups have seen final. */

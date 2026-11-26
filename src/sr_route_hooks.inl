@@ -2,6 +2,10 @@
 static HRESULT(STDMETHODCALLTYPE *real_CreateCommandQueue)(ID3D12Device *,const D3D12_COMMAND_QUEUE_DESC *,REFIID,void **);
 static HRESULT(STDMETHODCALLTYPE *real_CreateRootSignature)(ID3D12Device *,UINT,const void *,SIZE_T,REFIID,void **);
 static void(STDMETHODCALLTYPE *real_CopyDescriptors)(ID3D12Device *,UINT,const D3D12_CPU_DESCRIPTOR_HANDLE *,const UINT *,UINT,const D3D12_CPU_DESCRIPTOR_HANDLE *,const UINT *,D3D12_DESCRIPTOR_HEAP_TYPE);
+static void(STDMETHODCALLTYPE *real_CopyBufferRegion)(ID3D12GraphicsCommandList *,ID3D12Resource *,UINT64,ID3D12Resource *,UINT64,UINT64);
+static void(STDMETHODCALLTYPE *real_ClearDepthStencilView)(ID3D12GraphicsCommandList *,D3D12_CPU_DESCRIPTOR_HANDLE,D3D12_CLEAR_FLAGS,FLOAT,UINT8,UINT,const D3D12_RECT *);
+static void(STDMETHODCALLTYPE *real_ResolveQueryData)(ID3D12GraphicsCommandList *,ID3D12QueryHeap *,D3D12_QUERY_TYPE,UINT,UINT,ID3D12Resource *,UINT64);
+static void(STDMETHODCALLTYPE *real_CopyTiles)(ID3D12GraphicsCommandList *,ID3D12Resource *,const D3D12_TILED_RESOURCE_COORDINATE *,const D3D12_TILE_REGION_SIZE *,ID3D12Resource *,UINT64,D3D12_TILE_COPY_FLAGS);
 static void(STDMETHODCALLTYPE *real_ResolveSubresource)(ID3D12GraphicsCommandList *,ID3D12Resource *,UINT,ID3D12Resource *,UINT,DXGI_FORMAT);
 static void(STDMETHODCALLTYPE *real_ClearRenderTargetView)(ID3D12GraphicsCommandList *,D3D12_CPU_DESCRIPTOR_HANDLE,const FLOAT *,UINT,const D3D12_RECT *);
 static void(STDMETHODCALLTYPE *real_ClearUnorderedAccessViewUint)(ID3D12GraphicsCommandList *,D3D12_GPU_DESCRIPTOR_HANDLE,D3D12_CPU_DESCRIPTOR_HANDLE,ID3D12Resource *,const UINT *,UINT,const D3D12_RECT *);
@@ -39,8 +43,30 @@ static void STDMETHODCALLTYPE trace_CopyResource(ID3D12GraphicsCommandList *cl,I
 static void STDMETHODCALLTYPE trace_CopyTextureRegion(ID3D12GraphicsCommandList *cl,const D3D12_TEXTURE_COPY_LOCATION *dst,UINT x,UINT y,UINT z,const D3D12_TEXTURE_COPY_LOCATION *src,const D3D12_BOX *box){visible_count_work(cl,state_for(cl),"CopyTextureRegion",dst?dst->pResource:NULL,src?src->pResource:NULL,x,y,z,box!=NULL);if(dst&&src)debug_trace_copy(cl,dst->pResource,src->pResource,"region");if(dst)sr_trace_write(cl,dst->pResource);real_CopyTextureRegion(cl,dst,x,y,z,src,box);preview_hdr_copy(cl,dst,x,y,z,src,box);if(dst&&src)visible_trace_copy(cl,dst->pResource,src->pResource,!x&&!y&&!z&&!box&&dst->Type==D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX&&src->Type==D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX&&!dst->SubresourceIndex&&!src->SubresourceIndex);}
 static void STDMETHODCALLTYPE trace_ResolveSubresource(ID3D12GraphicsCommandList *cl,ID3D12Resource *dst,UINT di,ID3D12Resource *src,UINT si,DXGI_FORMAT fmt){visible_count_work(cl,state_for(cl),"ResolveSubresource",dst,src,di,si,(UINT)fmt,0);debug_trace_copy(cl,dst,src,"resolve");sr_trace_write(cl,dst);real_ResolveSubresource(cl,dst,di,src,si,fmt);}
 static void STDMETHODCALLTYPE trace_ClearRenderTargetView(ID3D12GraphicsCommandList *cl,D3D12_CPU_DESCRIPTOR_HANDLE h,const FLOAT *rgba,UINT n,const D3D12_RECT *rect){
-    AcquireSRWLockExclusive(&azt_lock);AztDesc *d=azt_slot(azt_heap_for_cpu(h.ptr,D3D12_DESCRIPTOR_HEAP_TYPE_RTV),h.ptr,0);ID3D12Resource *res=d?d->res:NULL;ReleaseSRWLockExclusive(&azt_lock);
-    visible_count_work(cl,state_for(cl),"ClearRenderTargetView",res,NULL,n,0,0,0);sr_trace_write(cl,res);real_ClearRenderTargetView(cl,h,rgba,n,rect);
+    ListState *s=state_for(cl);
+    AcquireSRWLockExclusive(&azt_lock);
+    AztDesc *d=azt_slot(azt_heap_for_cpu(h.ptr,D3D12_DESCRIPTOR_HEAP_TYPE_RTV),h.ptr,0);
+    ID3D12Resource *res=d?d->res:NULL;const ViewEntry *live=view_find(h.ptr);
+    AztState *st=res?azt_state(res,0):NULL;
+    int verified=azvis_observing()&&s&&s->trace_watch_active&&!n&&rgba&&d&&d->simple&&
+        d->format==DXGI_FORMAT_R10G10B10A2_UNORM&&d->desc.Width==1920&&d->desc.Height==1080&&
+        d->desc.DepthOrArraySize==1&&d->desc.MipLevels==1&&d->desc.SampleDesc.Count==1&&
+        live&&live->resource==res&&st&&st->known&&st->list==cl&&st->recording==s->trace_recording_id&&
+        st->state==D3D12_RESOURCE_STATE_RENDER_TARGET&&s->num_rtv==1&&s->rtv[0].ptr==h.ptr&&!s->has_dsv;
+    ReleaseSRWLockExclusive(&azt_lock);
+    visible_count_work(cl,s,"ClearRenderTargetView",res,NULL,n,0,0,(UINT)verified);sr_trace_write(cl,res);real_ClearRenderTargetView(cl,h,rgba,n,rect);
+}
+static void STDMETHODCALLTYPE trace_CopyBufferRegion(ID3D12GraphicsCommandList *cl,ID3D12Resource *dst,UINT64 doff,ID3D12Resource *src,UINT64 soff,UINT64 bytes){
+    visible_count_work(cl,state_for(cl),"CopyBufferRegion",dst,src,(UINT)doff,(UINT)soff,(UINT)bytes,0);real_CopyBufferRegion(cl,dst,doff,src,soff,bytes);
+}
+static void STDMETHODCALLTYPE trace_ClearDepthStencilView(ID3D12GraphicsCommandList *cl,D3D12_CPU_DESCRIPTOR_HANDLE h,D3D12_CLEAR_FLAGS flags,FLOAT depth,UINT8 stencil,UINT n,const D3D12_RECT *rect){
+    visible_count_work(cl,state_for(cl),"ClearDepthStencilView",NULL,NULL,(UINT)flags,n,0,0);real_ClearDepthStencilView(cl,h,flags,depth,stencil,n,rect);
+}
+static void STDMETHODCALLTYPE trace_ResolveQueryData(ID3D12GraphicsCommandList *cl,ID3D12QueryHeap *heap,D3D12_QUERY_TYPE type,UINT start,UINT count,ID3D12Resource *dst,UINT64 offset){
+    visible_count_work(cl,state_for(cl),"ResolveQueryData",dst,NULL,(UINT)type,start,count,(UINT)offset);real_ResolveQueryData(cl,heap,type,start,count,dst,offset);
+}
+static void STDMETHODCALLTYPE trace_CopyTiles(ID3D12GraphicsCommandList *cl,ID3D12Resource *tiled,const D3D12_TILED_RESOURCE_COORDINATE *coord,const D3D12_TILE_REGION_SIZE *size,ID3D12Resource *buffer,UINT64 offset,D3D12_TILE_COPY_FLAGS flags){
+    visible_count_work(cl,state_for(cl),"CopyTiles",tiled,buffer,(UINT)flags,(UINT)offset,0,0);real_CopyTiles(cl,tiled,coord,size,buffer,offset,flags);
 }
 static void STDMETHODCALLTYPE trace_ClearUnorderedAccessViewUint(ID3D12GraphicsCommandList *cl,D3D12_GPU_DESCRIPTOR_HANDLE gh,D3D12_CPU_DESCRIPTOR_HANDLE ch,ID3D12Resource *res,const UINT *values,UINT n,const D3D12_RECT *rect){visible_count_work(cl,state_for(cl),"ClearUnorderedAccessViewUint",res,NULL,n,0,0,0);sr_trace_write(cl,res);real_ClearUnorderedAccessViewUint(cl,gh,ch,res,values,n,rect);}
 static void STDMETHODCALLTYPE trace_ClearUnorderedAccessViewFloat(ID3D12GraphicsCommandList *cl,D3D12_GPU_DESCRIPTOR_HANDLE gh,D3D12_CPU_DESCRIPTOR_HANDLE ch,ID3D12Resource *res,const FLOAT *values,UINT n,const D3D12_RECT *rect){visible_count_work(cl,state_for(cl),"ClearUnorderedAccessViewFloat",res,NULL,n,0,0,0);sr_trace_write(cl,res);real_ClearUnorderedAccessViewFloat(cl,gh,ch,res,values,n,rect);}
@@ -68,5 +94,6 @@ static void sr_trace_hook_list(ID3D12GraphicsCommandList *cl){
     AZT_HOOK_CL(ClearUnorderedAccessViewUint);AZT_HOOK_CL(ClearUnorderedAccessViewFloat);AZT_HOOK_CL(Dispatch);
     AZT_HOOK_CL(ExecuteIndirect);AZT_HOOK_CL(ExecuteBundle);AZT_HOOK_CL(DiscardResource);AZT_HOOK_CL(IASetPrimitiveTopology);
     AZT_HOOK_CL(SetPredication);AZT_HOOK_CL(BeginQuery);AZT_HOOK_CL(EndQuery);
+    if(azvis_enabled){AZT_HOOK_CL(CopyBufferRegion);AZT_HOOK_CL(ClearDepthStencilView);AZT_HOOK_CL(ResolveQueryData);AZT_HOOK_CL(CopyTiles);}
 }
 #undef AZT_HOOK_CL
