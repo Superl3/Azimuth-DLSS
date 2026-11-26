@@ -97,12 +97,13 @@ static NVSDK_NGX_PerfQuality_Value ngx_quality(int quality) {
     case AZSR_QUALITY: return NVSDK_NGX_PerfQuality_Value_MaxQuality;
     case AZSR_BALANCED: return NVSDK_NGX_PerfQuality_Value_Balanced;
     case AZSR_PERFORMANCE: return NVSDK_NGX_PerfQuality_Value_MaxPerf;
+    case AZSR_ULTRA_PERFORMANCE: return NVSDK_NGX_PerfQuality_Value_UltraPerformance;
     default: return NVSDK_NGX_PerfQuality_Value_DLAA;
     }
 }
 
 EXPORT int azngx_get_optimal(unsigned ow, unsigned oh, int quality, AzSROptimal *o, int *ngx_result) {
-    if (!g_ready || !o || !ow || !oh || quality < AZSR_QUALITY || quality > AZSR_PERFORMANCE) {
+    if (!g_ready || !o || !ow || !oh || quality < AZSR_QUALITY || quality > AZSR_ULTRA_PERFORMANCE) {
         *ngx_result = (int)NVSDK_NGX_Result_FAIL_InvalidParameter;
         return 0;
     }
@@ -121,7 +122,7 @@ EXPORT int azngx_evaluate_sr(ID3D12GraphicsCommandList *cl, ID3D12Resource *colo
         *ngx_result = (int)NVSDK_NGX_Result_FAIL_NotInitialized;
         return 0;
     }
-    if (!w || !h || !ow || !oh || quality < AZSR_NATIVE || quality > AZSR_PERFORMANCE ||
+    if (!w || !h || !ow || !oh || quality < AZSR_NATIVE || quality > AZSR_ULTRA_PERFORMANCE ||
         (quality == AZSR_NATIVE ? (w != ow || h != oh) : (w >= ow || h >= oh))) {
         *ngx_result = (int)NVSDK_NGX_Result_FAIL_InvalidParameter;
         return 0;
@@ -158,7 +159,8 @@ EXPORT int azngx_evaluate_sr(ID3D12GraphicsCommandList *cl, ID3D12Resource *colo
         if (quality != AZSR_NATIVE) cp.InFeatureCreateFlags |= NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
         if(quality!=AZSR_NATIVE&&g_preset){
             const char *key=quality==AZSR_QUALITY?NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality:
-                quality==AZSR_BALANCED?NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced:NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance;
+                quality==AZSR_BALANCED?NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced:
+                quality==AZSR_ULTRA_PERFORMANCE?NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance:NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance;
             g_params->Set(key,(unsigned int)g_preset);
         }
         NVSDK_NGX_Result r = NGX_D3D12_CREATE_DLSS_EXT(cl, 1, 1, &g_feature, g_params, &cp);

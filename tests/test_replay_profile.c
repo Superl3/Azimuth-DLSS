@@ -19,6 +19,10 @@ int main(void){
     assert(!azrp_profile_explicit("-1x720","1920x1080").ow);
     assert(!azrp_profile_explicit("1280x720junk","1920x1080").ow);
     assert(!azrp_profile_explicit("1280x720","9999999999999x2160").ow);
+    AzReplayProfile automatic=azrp_profile_request("auto","3840x1600");
+    assert(!automatic.rw&&automatic.ow==3840&&automatic.oh==1600);
+    assert(azrp_profile_sizes((AzSRSize){1728,720},(AzSRSize){3840,1600}).rw==1728);
+    assert(!azrp_profile_sizes((AzSRSize){1728,720},(AzSRSize){3840,2160}).ow);
     puts("PASS: explicit SDR/wide replay profiles, exact 27/40 coordinate scale, bounded wide RAW group");
     return 0;
 }

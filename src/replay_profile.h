@@ -22,11 +22,21 @@ static inline int azrp_parse_size(const char *s,AzSRSize *o){
     if(*s||v[0]<320||v[1]<200||v[0]>3840||v[1]>2160)return 0;
     *o=(AzSRSize){v[0],v[1]};return 1;
 }
+static inline AzReplayProfile azrp_profile_sizes(AzSRSize r,AzSRSize o){
+    if(r.w<320||r.h<200||o.w>3840||o.h>2160||!azsr_less(r,o)||!azsr_same_aspect(r,o)||
+       r.w*3u<o.w||r.h*3u<o.h)return (AzReplayProfile){0};
+    return (AzReplayProfile){r.w,r.h,o.w,o.h,(uint64_t)o.w*o.h>1920ull*1080u};
+}
+static inline AzReplayProfile azrp_profile_request(const char *render,const char *output){
+    AzSRSize o={0};
+    if(render&&!strcmp(render,"auto")&&azrp_parse_size(output,&o))
+        return (AzReplayProfile){0,0,o.w,o.h,(uint64_t)o.w*o.h>1920ull*1080u};
+    return (AzReplayProfile){0};
+}
 static inline AzReplayProfile azrp_profile_explicit(const char *render,const char *output){
     AzSRSize r={0},o={0};
-    if(!azrp_parse_size(render,&r)||!azrp_parse_size(output,&o)||!azsr_less(r,o)||!azsr_same_aspect(r,o)||
-       r.w*3u<o.w||r.h*3u<o.h)return (AzReplayProfile){0,0,0,0,0};
-    return (AzReplayProfile){r.w,r.h,o.w,o.h,(uint64_t)o.w*o.h>1920ull*1080u};
+    if(!azrp_parse_size(render,&r)||!azrp_parse_size(output,&o))return (AzReplayProfile){0};
+    return azrp_profile_sizes(r,o);
 }
 static inline int azrp_match_render(AzReplayProfile p,uint64_t w,unsigned h){return p.rw&&w==p.rw&&h==p.rh;}
 static inline int azrp_match_output(AzReplayProfile p,uint64_t w,unsigned h){return p.ow&&w==p.ow&&h==p.oh;}

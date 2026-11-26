@@ -79,6 +79,10 @@ static void preview_init(void) {
     log_msg("PREVIEW CONFIG readback=%d postfx=%d groups=%u maxBytes=%llu",
         azpv_enabled,azpv_postfx,azrp_capture_groups(azrp_profile),(unsigned long long)AZPV_LIMIT);
 }
+int hooks_sr_accept_profile(unsigned rw,unsigned rh,unsigned ow,unsigned oh){
+    if(!azrp_accept_profile(rw,rh,ow,oh))return 0;
+    azvis_accept_profile();return 1;
+}
 static int preview_format(DXGI_FORMAT f) {
     return f==DXGI_FORMAT_R11G11B10_FLOAT||f==DXGI_FORMAT_R16G16_FLOAT||
            f==DXGI_FORMAT_D32_FLOAT||f==DXGI_FORMAT_R32_FLOAT||f==DXGI_FORMAT_R32_TYPELESS||
@@ -276,7 +280,7 @@ done: ReleaseSRWLockExclusive(&azpv_lock);
    A full-region same-recording copy before composite is a candidate,
    not proof that no later write touched the destination. */
 static void preview_hdr_copy(ID3D12GraphicsCommandList *cl,const D3D12_TEXTURE_COPY_LOCATION *dst,UINT x,UINT y,UINT z,const D3D12_TEXTURE_COPY_LOCATION *src,const D3D12_BOX *box){
-    if(!azpv_enabled||(!azrp_profile.wide&&!azvis_hdr)||!azrp_sr_enabled||!dst||!src||!dst->pResource||!src->pResource)return;
+    if(!azpv_enabled||!azrp_ready()||(!azrp_profile.wide&&!azvis_hdr)||!azrp_sr_enabled||!dst||!src||!dst->pResource||!src->pResource)return;
     AcquireSRWLockShared(&azt_lock);unsigned long long resolve=azt_frame;
     ListState *s=state_for(cl);unsigned long long recording=s?s->trace_recording_id:0;
     int active=(azdbg.active&&azdbg.id==1)||(azvis_hdr&&azvis_window_locked());
@@ -346,7 +350,7 @@ static void preview_auto_observe_locked(ID3D12GraphicsCommandList *cl,ListState 
 /* Opt-in snapshots of exact observed fullscreen passes only. Require
    matching live RTV metadata and a known RT state in this recording. */
 static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int start_zero) {
-    if(!azpv_enabled||!azpv_postfx||!s)return;
+    if(!azpv_enabled||!azrp_ready()||!azpv_postfx||!s)return;
     ID3D12Resource *target=NULL,*input=NULL;
     AzHdrContract hdr={0};
     uintptr_t identity=0;DWORD hash=0;unsigned long long resolve=0;

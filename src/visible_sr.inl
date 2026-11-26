@@ -12,6 +12,7 @@ static volatile LONG azvis_chain_changed;
 static SRWLOCK azvis_pso_lock=SRWLOCK_INIT;
 static struct {ID3D12PipelineState *original,*merge,*scene;} azvis_psos[AZVIS_PSO_MAX];
 static unsigned azvis_pso_count;
+static AzrpDeferred *azvis_pending[AZVIS_PSO_MAX];
 typedef struct {
     int enabled,pre_ready,composite_ready,routed;
     ID3D12GraphicsCommandList *list;
@@ -89,6 +90,10 @@ static void visible_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *d,ID3D12Pipeli
         log_msg("VISIBLE PSO SKIP reason=unsupported_final_state");return;
     }
     AcquireSRWLockExclusive(&azvis_pso_lock);
+    if(azrp_auto&&!azrp_ready()){
+        if(!azrp_defer(azvis_pending,AZVIS_PSO_MAX,d,pso))log_msg("SR AUTO_PSO_SKIP role=final reason=copy_or_capacity");
+        goto done;
+    }
     for(unsigned i=0;i<azvis_pso_count;++i)if(azvis_psos[i].original==pso)goto done;
     if(azvis_pso_count>=AZVIS_PSO_MAX)goto done;
     ID3D12PipelineState *variants[2]={NULL,NULL};
@@ -118,6 +123,13 @@ static void visible_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *d,ID3D12Pipeli
     azvis_psos[i].original=pso;azvis_psos[i].merge=variants[0];azvis_psos[i].scene=variants[1];
     log_msg("VISIBLE PSO READY original=%p merge=%p native_final_lut=1 hdr=%d sceneMerge=%p",(void *)pso,(void *)variants[0],pair==2,(void *)variants[1]);
 done: ReleaseSRWLockExclusive(&azvis_pso_lock);
+}
+static void azvis_accept_profile(void){
+    AzrpDeferred *pending[AZVIS_PSO_MAX]={0};AcquireSRWLockExclusive(&azvis_pso_lock);
+    memcpy(pending,azvis_pending,sizeof(pending));memset(azvis_pending,0,sizeof(azvis_pending));ReleaseSRWLockExclusive(&azvis_pso_lock);
+    for(unsigned i=0;i<AZVIS_PSO_MAX;++i)if(pending[i]){
+        visible_pso(&pending[i]->d,pending[i]->original);azrp_free_deferred(pending[i]);
+    }
 }
 static int azvis_texture(ID3D12Resource *r,UINT w,UINT h){
     if(!r)return 0;
