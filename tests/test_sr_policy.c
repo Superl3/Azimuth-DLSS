@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include "../src/sr_experiment.h"
 int main(void) {
+    assert(azsr_preset("default")==0&&azsr_preset("J")==10&&azsr_preset("k")==11&&azsr_preset("L")==12&&azsr_preset("M")==13);
+    assert(azsr_preset("B")==-1&&azsr_preset("Kjunk")==-1);
     AzSRSize r = {2560, 1067}, o = {3840, 1600};
     AzSRFrame f = {r,r,r,r,o,1,1,1};
     assert(azsr_decide(AZSR_PROBE,f) == AZSR_EVALUATE_ONLY);

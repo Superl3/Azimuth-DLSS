@@ -83,7 +83,7 @@ static HRESULT STDMETHODCALLTYPE azdx_present1(IDXGISwapChain1 *sc,UINT sync,UIN
     HRESULT hr=original(sc,sync,flags,params);azdx_end(id,hr);return hr;
 }
 static void azdx_resize_guard(const char *method,void *sc,UINT count,UINT w,UINT h,DXGI_FORMAT fmt){
-    if(azvis_observing())InterlockedExchange(&azvis_chain_changed,1);
+    if(azvis_observing()){InterlockedExchange(&azvis_chain_changed,1);dlss_sr_play_disable("swapchain_resize");}
     log_msg("DXGI RESIZE_BEGIN method=%s chain=%p size=%ux%u buffers=%u fmt=%u trialDisabled=%d qpc=%lld",
         method,sc,w,h,count,(unsigned)fmt,azvis_observing(),azvis_qpc());
 }
@@ -110,28 +110,30 @@ static HRESULT STDMETHODCALLTYPE azdx_color(IDXGISwapChain3 *sc,DXGI_COLOR_SPACE
     Fn original=(Fn)azdx_original(VT_SLOT(sc,IDXGISwapChain3Vtbl,SetColorSpace1));
     if(!original)return E_UNEXPECTED;
     HRESULT hr=original(sc,color);
-    if(SUCCEEDED(hr)&&azvis_observing())InterlockedExchange(&azvis_chain_changed,1);
+    if(SUCCEEDED(hr)&&azvis_observing()){InterlockedExchange(&azvis_chain_changed,1);dlss_sr_play_disable("colorspace_change");}
     log_msg("DXGI COLORSPACE chain=%p value=%u hr=%08lx trialDisabled=%d qpc=%lld",(void *)sc,(unsigned)color,(unsigned long)hr,SUCCEEDED(hr)&&azvis_observing(),azvis_qpc());
     return hr;
 }
 static void azdx_install(IDXGISwapChain1 *sc){
     char value[8];DWORD n=GetEnvironmentVariableA("AZIMUTH_DEBUG_PRESENT_TRACE",value,sizeof(value));
-    if(n!=1||value[0]!='1'||!sc)return;
-    int p=azdx_patch(VT_SLOT(sc,IDXGISwapChain1Vtbl,Present),(void *)azdx_present);
-    int p1=azdx_patch(VT_SLOT(sc,IDXGISwapChain1Vtbl,Present1),(void *)azdx_present1);
+    int play=dlss_sr_play_mode();
+    if(!sc||(!play&&(n!=1||value[0]!='1')))return;
+    int p=play?0:azdx_patch(VT_SLOT(sc,IDXGISwapChain1Vtbl,Present),(void *)azdx_present);
+    int p1=play?0:azdx_patch(VT_SLOT(sc,IDXGISwapChain1Vtbl,Present1),(void *)azdx_present1);
     int r=azdx_patch(VT_SLOT(sc,IDXGISwapChain1Vtbl,ResizeBuffers),(void *)azdx_resize);
     int p3=0,p13=0,r3=0,r1=0,color=0;
     uintptr_t id3=0;
     IDXGISwapChain3 *s3=NULL;
     if(SUCCEEDED(IUnknown_QueryInterface((IUnknown *)sc,&IID_IDXGISwapChain3,(void **)&s3))&&s3){
         id3=(uintptr_t)s3;
-        p3=azdx_patch(VT_SLOT(s3,IDXGISwapChain3Vtbl,Present),(void *)azdx_present);
-        p13=azdx_patch(VT_SLOT(s3,IDXGISwapChain3Vtbl,Present1),(void *)azdx_present1);
+        p3=play?0:azdx_patch(VT_SLOT(s3,IDXGISwapChain3Vtbl,Present),(void *)azdx_present);
+        p13=play?0:azdx_patch(VT_SLOT(s3,IDXGISwapChain3Vtbl,Present1),(void *)azdx_present1);
         r3=azdx_patch(VT_SLOT(s3,IDXGISwapChain3Vtbl,ResizeBuffers),(void *)azdx_resize);
         r1=azdx_patch(VT_SLOT(s3,IDXGISwapChain3Vtbl,ResizeBuffers1),(void *)azdx_resize1);
         color=azdx_patch(VT_SLOT(s3,IDXGISwapChain3Vtbl,SetColorSpace1),(void *)azdx_color);
         s3->lpVtbl->Release(s3);
     }
+    if(play&&(!r||!r3||!r1||!color))dlss_sr_play_disable("resize_colorspace_hook_unavailable");
     log_msg("DXGI TRACE_INSTALL chain=%p chain3=%p present=%d present1=%d resize=%d present3=%d present13=%d resize3=%d resize1=%d color=%d noRetainedRefs=1 qpc=%lld",
         (void *)sc,(void *)id3,p,p1,r,p3,p13,r3,r1,color,azvis_qpc());
 }

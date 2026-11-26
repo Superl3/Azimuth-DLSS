@@ -3,6 +3,9 @@ param(
     [string]$GameDir,
     [string]$Label = '',
     [string]$Output = '',
+    [string]$RenderSize = '',
+    [ValidateSet('default','J','K','L','M')][string]$Preset = 'default',
+    [switch]$NoJitter,
     [string]$RenderSetting = '',
     [switch]$InstallProxy,
     [switch]$CollectOnly,
@@ -37,14 +40,14 @@ if($VisibleHDR){$VisibleSR=$true}
 # Explicit automatic test preset: no debug hotkeys, no install prompts.
 # The caller controls actual game/monitor settings and any game menus.
 if($AutoTest){
-    if(!$Output -or $Output -notin @('1920x1080','3840x1600')){throw '-AutoTest requires -Output 1920x1080 or 3840x1600.'}
+    if(!$Output -or (!$RenderSize -and $Output -notin @('1920x1080','3840x1600'))){throw '-AutoTest requires measured -Output, with -RenderSize for other resolutions.'}
     if(!$CollectOnly -and !$InstallProxy){throw '-AutoTest requires explicit -InstallProxy consent for temporary DLL installation.'}
     $Preview=$true; $PreviewPostFx=$true; $PreviewReplay=$true; $PreviewSRReplay=$true
-    $PreviewJitter=$true; $ShaderDisasm=$true
+    $PreviewJitter=!$NoJitter; $ShaderDisasm=$true
     if(!$CollectOnly){$ExitAfterCapture=$true}
     if(!$PSBoundParameters.ContainsKey('ProducerWaitMs')){$ProducerWaitMs=8}
     if(!$Label){$Label='FH2-auto-'+$Output}
-    if(!$RenderSetting){$RenderSetting=$(if($Output -eq '1920x1080'){'1280x720 expected (verify measured size)'}else{'2592x1080 expected (verify measured size)'})}
+    if(!$RenderSetting){$RenderSetting=$(if($RenderSize){"$RenderSize expected (verify measured size)"}elseif($Output -eq '1920x1080'){'1280x720 expected (verify measured size)'}else{'2592x1080 expected (verify measured size)'})}
     if(!$GameDir -and !(Test-Path -LiteralPath (Join-Path $PSScriptRoot 'azimuth.exe') -PathType Leaf)){throw '-AutoTest requires -GameDir when launched outside the game folder.'}
 }
 if($ReadyFile -and (!$AutoTest -or $CollectOnly)){throw '-ReadyFile requires a new -AutoTest launch.'}
@@ -57,7 +60,8 @@ if($ReadyFile){
 if(($PreviewPostFx -or $PreviewJitter -or $PreviewReplay) -and !$Preview){throw 'Preview options require -Preview.'}
 if($VisibleMarker -and !$VisibleSR){throw '-VisibleMarker requires -VisibleSR.'}
 if($PSBoundParameters.ContainsKey('VisibleSeconds') -and !$VisibleSR){throw '-VisibleSeconds requires -VisibleSR.'}
-if($VisibleSR -and (!$PreviewSRReplay -or !$PreviewJitter)){throw '-VisibleSR requires -PreviewSRReplay and -PreviewJitter.'}
+if($NoJitter){$PreviewJitter=$false}
+if($VisibleSR -and (!$PreviewSRReplay -or (!$PreviewJitter -and !$NoJitter))){throw '-VisibleSR requires -PreviewSRReplay and either -PreviewJitter or -NoJitter.'}
 if($VisibleSR -and $ExitAfterCapture -and !$AutoTest){throw 'For automatic VisibleSR shutdown use -AutoTest; otherwise omit -ExitAfterCapture.'}
 if($PreviewSRReplay -and !$PreviewReplay){throw '-PreviewSRReplay requires -PreviewReplay.'}
 if($ProducerGpuWait -and !$PreviewSRReplay){throw '-ProducerGpuWait requires -PreviewSRReplay.'}
@@ -84,8 +88,13 @@ if ($Label -notmatch '^[A-Za-z0-9_-]{1,48}$') { throw 'Label must contain 1-48 l
 if (!$Output) { $Output = Read-Host 'Expected display resolution, e.g. 3840x1600 (or unknown)' }
 if ($Output -ne 'unknown' -and $Output -notmatch '^[1-9]\d*x[1-9]\d*$') { throw 'Output must be WxH or unknown.' }
 if($Preview -and $Output -eq 'unknown'){throw 'Preview requires an explicit higher output resolution.'}
-if($PreviewReplay -and $Output -notin @('1920x1080','3840x1600')){throw 'Postprocess replay supports 1280x720 -> 1920x1080 or 2592x1080 -> 3840x1600.'}
-if($VisibleSR -and !$VisibleHDR -and $Output -ne '1920x1080'){throw 'SDR VisibleSR remains 1920x1080 only; use -VisibleHDR for the measured wide HDR profile.'}
+if($RenderSize){
+    if(!$PreviewReplay -or $RenderSize -notmatch '^([1-9]\d{2,3})x([1-9]\d{2,3})$'){throw '-RenderSize requires preview replay and explicit WxH.'}
+    $rw=[int]$Matches[1];$rh=[int]$Matches[2]
+    if($Output -notmatch '^([1-9]\d{2,3})x([1-9]\d{2,3})$'){throw 'Explicit profile requires output WxH.'}
+    $ow=[int]$Matches[1];$oh=[int]$Matches[2]
+    if($rw -lt 320 -or $rh -lt 200 -or $ow -gt 3840 -or $oh -gt 2160 -or $rw -ge $ow -or $rh -ge $oh -or $rw*3 -lt $ow -or $rh*3 -lt $oh -or [math]::Abs(($rw*$oh)/($ow*$rh)-1) -gt 0.01){throw 'Unsupported fixed profile dimensions or aspect.'}
+}elseif($PreviewReplay -and $Output -notin @('1920x1080','3840x1600')){throw 'Use -RenderSize with other output resolutions.'}
 if (!$RenderSetting) { $RenderSetting = Read-Host 'Actual Azimuth render setting (native/low/etc.; this is a label only)' }
 $dest = [IO.Path]::GetFullPath($Destination)
 New-Item -ItemType Directory -Path $dest -Force | Out-Null
@@ -196,12 +205,14 @@ try {
             $previous = (Get-Item -LiteralPath $log).LastWriteTimeUtc
             Copy-Item -LiteralPath $log -Destination (Join-Path $dest ($tag + '-previous.log'))
         }
-        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM','AZIMUTH_DEBUG_AUTO_RESOLVE','AZIMUTH_DEBUG_AUTO_TEST','AZIMUTH_DEBUG_PRODUCER_WAIT_MS','AZIMUTH_DEBUG_PRODUCER_GPU_WAIT','AZIMUTH_DEBUG_PRESENT_TRACE','AZIMUTH_DEBUG_AUTO_WARMUP_MS','AZIMUTH_DEBUG_AUTO_READY_FILE','AZIMUTH_SR_OUTPUT','AZIMUTH_SR_QUALITY','AZIMUTH_DEBUG_PREVIEW_POSTFX','AZIMUTH_DEBUG_PREVIEW_JITTER','AZIMUTH_DEBUG_POSTFX_REPLAY','AZIMUTH_DEBUG_SR_REPLAY','AZIMUTH_DEBUG_VISIBLE_SR','AZIMUTH_DEBUG_VISIBLE_HDR','AZIMUTH_DEBUG_HDR_LIVE','AZIMUTH_DEBUG_VISIBLE_MARKER','AZIMUTH_DEBUG_VISIBLE_SECONDS','AZIMUTH_DEBUG_QUEUE_TRACE')) {
+        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM','AZIMUTH_DEBUG_AUTO_RESOLVE','AZIMUTH_DEBUG_AUTO_TEST','AZIMUTH_DEBUG_PRODUCER_WAIT_MS','AZIMUTH_DEBUG_PRODUCER_GPU_WAIT','AZIMUTH_DEBUG_PRESENT_TRACE','AZIMUTH_DEBUG_AUTO_WARMUP_MS','AZIMUTH_DEBUG_AUTO_READY_FILE','AZIMUTH_SR_OUTPUT','AZIMUTH_SR_RENDER','AZIMUTH_SR_PRESET','AZIMUTH_SR_QUALITY','AZIMUTH_DEBUG_PREVIEW_POSTFX','AZIMUTH_DEBUG_PREVIEW_JITTER','AZIMUTH_DEBUG_POSTFX_REPLAY','AZIMUTH_DEBUG_SR_REPLAY','AZIMUTH_DEBUG_VISIBLE_SR','AZIMUTH_DEBUG_VISIBLE_HDR','AZIMUTH_DEBUG_HDR_LIVE','AZIMUTH_DEBUG_VISIBLE_MARKER','AZIMUTH_DEBUG_VISIBLE_SECONDS','AZIMUTH_DEBUG_QUEUE_TRACE')) {
             $oldEnv[$key] = [Environment]::GetEnvironmentVariable($key,'Process')
         }
         [Environment]::SetEnvironmentVariable('AZIMUTH_SR_MODE',$(if($Preview){'preview'}else{'debug'}),'Process')
         if($Preview){
             [Environment]::SetEnvironmentVariable('AZIMUTH_SR_OUTPUT',$Output,'Process')
+            [Environment]::SetEnvironmentVariable('AZIMUTH_SR_RENDER',$(if($RenderSize){$RenderSize}else{$null}),'Process')
+            [Environment]::SetEnvironmentVariable('AZIMUTH_SR_PRESET',$Preset.ToLowerInvariant(),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_SR_QUALITY',$Quality,'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_PREVIEW_POSTFX',$(if($PreviewPostFx){'1'}else{'0'}),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_PREVIEW_JITTER',$(if($PreviewJitter){'1'}else{'0'}),'Process')
@@ -374,6 +385,7 @@ try {
         auto_gate_open = [bool]($content -match '(?m)^PREVIEW AUTO_GATE_OPEN ')
         auto_ready = [bool]($content -match '(?m)^PREVIEW AUTO_READY ')
         visible_hdr_requested = [bool]$VisibleHDR; hdr_live_requested = [bool]$HDRLive
+        sr_render_requested = $RenderSize; sr_preset_requested = $Preset; sr_no_jitter_requested = [bool]$NoJitter
         present_trace_requested = [bool]$PresentTrace; producer_gpu_wait_requested = [bool]$ProducerGpuWait
         visible_trial_complete = [bool]($content -match '(?m)^VISIBLE TRIAL_END ')
         visible_seconds_requested = $(if($VisibleSR){$VisibleSeconds}else{$null})

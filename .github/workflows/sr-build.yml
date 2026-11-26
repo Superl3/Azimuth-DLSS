@@ -135,7 +135,7 @@ jobs:
           New-Item -ItemType Directory -Path sr-build/tools -Force | Out-Null
           Copy-Item tools/capture_sr.py,tools/analyze_sr_trace.py,tools/analyze_fg_trace.py,tools/analyze_debug_trace.py -Destination sr-build/tools
           Copy-Item docs/CAPTURE_FH2.md,docs/FG_INTEGRATION.md,docs/DEBUG_CAPTURE.md -Destination sr-build
-          Copy-Item debug/Start-DebugCapture.cmd,debug/Start-DebugCapture.ps1 -Destination sr-build
+          Copy-Item debug/Start-DebugCapture.cmd,debug/Start-DebugCapture.ps1,release/azimuth_sr.ini,docs/SR_PLAY.md,docs/SR_PROFILES.md -Destination sr-build
           Get-FileHash sr-build/*.dll -Algorithm SHA256 | Format-Table -AutoSize | Out-String | Set-Content sr-build/SHA256.txt
       - uses: actions/upload-artifact@v4
         with:
