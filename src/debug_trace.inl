@@ -98,7 +98,14 @@ static void debug_trace_poll(void) {
     debug_auto_gate_poll(now);
     AcquireSRWLockExclusive(&azt_lock);
     if(azdebug_expired(&azdbg,now))azdbg_finish_locked("timeout");
-    if(azpv_auto_test){
+    if(dlss_sr_play_mode()){
+        /* Require native chain readiness, never the diagnostics-only fallback. */
+        if(azvis_enabled&&dlss_sr_play_available()&&azdebug_auto_scene_due(&azdbg,&azpv_auto_scene,&azpv_ready,azt_frame,now,0,azdbg_auto_warmup,1)){
+            azdbg.id=1;azdbg.started_ms=now;azdbg.active=0;
+            InterlockedExchange(&azvis_trace_active,1);
+            log_msg("SR PLAY_BEGIN resolve=%llu nativeChain=1 duration=unbounded capture=0",azt_frame);
+        }
+    }else if(azpv_auto_test){
         int trigger=azdebug_auto_trigger(&azdbg,&azpv_auto_scene,&azpv_auto_sr,&azpv_ready,azt_frame,now,azdbg_auto_resolve,azdbg_auto_warmup,azdbg_gate_required,azdbg_gate_open);
         if(trigger){
             started=debug_trace_begin_locked(now);

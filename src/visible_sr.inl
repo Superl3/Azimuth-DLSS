@@ -22,7 +22,8 @@ typedef struct {
     ID3D12DescriptorHeap *rtv,*heap;
 } AzvisFrame;
 static int azvis_window_locked(void){
-    return azvis_enabled&&!InterlockedCompareExchange(&azvis_chain_changed,0,0)&&azdbg.id==1&&GetTickCount64()-azdbg.started_ms<azvis_ms;
+    return azvis_enabled&&!InterlockedCompareExchange(&azvis_chain_changed,0,0)&&azdbg.id==1&&
+        (dlss_sr_play_mode()?dlss_sr_play_available():GetTickCount64()-azdbg.started_ms<azvis_ms);
 }
 static void visible_init(void){
     char b[8];DWORD n=GetEnvironmentVariableA("AZIMUTH_DEBUG_VISIBLE_SR",b,sizeof(b));

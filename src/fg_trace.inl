@@ -17,6 +17,7 @@ typedef struct {
 static AzfgChain azfg_chain[AZFG_CHAINS];
 
 static void fg_trace_init(void) {
+    if(dlss_sr_play_mode())return;
     char yes[8];
     DWORD n=GetEnvironmentVariableA("AZIMUTH_FG_TRACE",yes,sizeof(yes));
     if (!dlss_sr_debug_mode() && (!dlss_sr_trace_only() || n!=1 || yes[0]!='1')) return;

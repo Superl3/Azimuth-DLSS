@@ -51,6 +51,9 @@ static AzAutoScene azpv_auto_scene,azpv_auto_sr;
 static int azpv_auto_test;
 static unsigned azpv_producer_wait_ms;
 static int azpv_gpu_wait;
+/* Reuse only private immutable snapshots after all recording fences retire. */
+static ID3D12Resource *azpv_snapshot_cache[AZPV_TOTAL];
+static uint64_t azpv_play_attempts,azpv_play_recorded,azpv_play_completed,azpv_play_busy,azpv_play_native,azpv_play_reuse,azpv_play_stats_ms;
 static struct {uint64_t resolve;uintptr_t postfx,composite;unsigned stages;} azpv_auto_chain;
 static wchar_t azpv_dir[MAX_PATH];
 static char azpv_dirname[80];
@@ -69,6 +72,10 @@ static void preview_init(void) {
     azpv_gpu_wait=n==1&&b[0]=='1';
     log_msg("PREVIEW PRODUCER_CONFIG waitMs=%u gpuWait=%d policy=submitted_retired_private_fence_only",azpv_producer_wait_ms,azpv_gpu_wait);
     azpv_enabled=GetModuleHandleW(L"renderdoc.dll")==NULL;
+    if(dlss_sr_play_mode()){
+        azpv_done=1;
+        if(!azpv_enabled||!azvis_enabled)dlss_sr_play_disable("replay_or_capture_runtime");
+    }
     log_msg("PREVIEW CONFIG readback=%d postfx=%d groups=%u maxBytes=%llu",
         azpv_enabled,azpv_postfx,azrp_capture_groups(azrp_profile),(unsigned long long)AZPV_LIMIT);
 }
@@ -131,7 +138,7 @@ static AzpvBatch *preview_batch(unsigned group,ID3D12GraphicsCommandList *cl,uns
    Unlike the reusable NGX UAV, this snapshot cannot be overwritten by a
    later resolve. Replay waits only by checking completion, never blocking
    the render thread or inventing a cross-queue dependency. */
-static ID3D12Resource *preview_sr_snapshot(ID3D12GraphicsCommandList *cl,ID3D12Resource *out) {
+static ID3D12Resource *preview_sr_snapshot(ID3D12GraphicsCommandList *cl,ID3D12Resource *out,unsigned group) {
     if(!azrp_sr_enabled||!real_CopyResource||!out)return NULL;
     D3D12_RESOURCE_DESC rd;out->lpVtbl->GetDesc(out,&rd);
     if(!azrp_match_output(azrp_profile,rd.Width,rd.Height)||rd.Format!=DXGI_FORMAT_R11G11B10_FLOAT||
@@ -139,7 +146,11 @@ static ID3D12Resource *preview_sr_snapshot(ID3D12GraphicsCommandList *cl,ID3D12R
     rd.Flags=D3D12_RESOURCE_FLAG_NONE;
     D3D12_HEAP_PROPERTIES hp={0};hp.Type=D3D12_HEAP_TYPE_DEFAULT;hp.CreationNodeMask=hp.VisibleNodeMask=1;
     ID3D12Resource *copy=NULL;
-    if(FAILED(ID3D12Device_CreateCommittedResource(g_device,&hp,D3D12_HEAP_FLAG_NONE,&rd,D3D12_RESOURCE_STATE_COPY_DEST,NULL,&IID_ID3D12Resource,(void **)&copy))||!copy)return NULL;
+    if(dlss_sr_play_mode()&&group>=AZPV_GROUPS&&group<AZPV_TOTAL&&azpv_snapshot_cache[group]){
+        copy=azpv_snapshot_cache[group];azpv_snapshot_cache[group]=NULL;
+        hooks_transition(cl,copy,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
+        ++azpv_play_reuse;
+    }else if(FAILED(ID3D12Device_CreateCommittedResource(g_device,&hp,D3D12_HEAP_FLAG_NONE,&rd,D3D12_RESOURCE_STATE_COPY_DEST,NULL,&IID_ID3D12Resource,(void **)&copy))||!copy)return NULL;
     hooks_transition(cl,out,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE);
     real_CopyResource(cl,copy,out);
     hooks_transition(cl,out,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -207,8 +218,12 @@ static void preview_reap_live(unsigned long long retire_before){
             ID3D12Fence_Release(b->fence);ID3D12GraphicsCommandList_Release(b->list);memset(b,0,sizeof(*b));
         }
         if(p->visible.routed)log_msg("VISIBLE FINAL_GPU_COMPLETE resolve=%llu target=%p liveSlot=%u",p->resolve,(void *)p->visible.target_id,g);
+        if(dlss_sr_play_mode()){if(p->visible.routed)++azpv_play_completed;else {++azpv_play_native;dlss_sr_play_miss();}}
         if(p->scene)ID3D12Resource_Release(p->scene);
-        if(p->sr_snapshot)ID3D12Resource_Release(p->sr_snapshot);
+        if(p->sr_snapshot){
+            if(dlss_sr_play_mode()&&!azpv_snapshot_cache[g])azpv_snapshot_cache[g]=p->sr_snapshot;
+            else ID3D12Resource_Release(p->sr_snapshot);
+        }
         visible_release(&p->visible);
         memset(p,0,sizeof(*p));
     }
@@ -224,7 +239,7 @@ void hooks_preview_record(ID3D12GraphicsCommandList *cl,ID3D12Resource *color,ID
         if(fresh_mv&&!reset)azdebug_auto_scene_note(&azpv_auto_sr,azt_frame+1,now);
         else memset(&azpv_auto_sr,0,sizeof(azpv_auto_sr));
     }
-    int wanted=azdbg.active&&azdbg.id==1&&azdbg.observed<azrp_capture_groups(azrp_profile);
+    int wanted=!dlss_sr_play_mode()&&azdbg.active&&azdbg.id==1&&azdbg.observed<azrp_capture_groups(azrp_profile);
     int live=azvis_window_locked()&&(!azvis_hdr||azvis_hdr_live||wanted);
     unsigned long long resolve=azt_frame+1;
     ListState *s=state_for(cl);
@@ -238,7 +253,8 @@ void hooks_preview_record(ID3D12GraphicsCommandList *cl,ID3D12Resource *color,ID
     unsigned group=AZPV_TOTAL;
     if(wanted&&azpv_count<azrp_capture_groups(azrp_profile)&&!azpv_done)group=azpv_count++;
     else if(live)for(unsigned i=AZPV_GROUPS;i<AZPV_TOTAL;++i)if(!azpv_groups[i].resolve){group=i;break;}
-    if(group==AZPV_TOTAL){if(live)log_msg("VISIBLE SKIP resolve=%llu stage=producer reason=slot_busy",resolve);goto done;}
+    if(dlss_sr_play_mode()&&live)++azpv_play_attempts;
+    if(group==AZPV_TOTAL){if(live){if(dlss_sr_play_mode()){++azpv_play_busy;dlss_sr_play_miss();}log_msg("VISIBLE SKIP resolve=%llu stage=producer reason=slot_busy",resolve);}goto done;}
     int capture=group<AZPV_GROUPS;
     AzpvGroup *g=&azpv_groups[group];g->resolve=resolve;g->visible.enabled=live;
     ID3D12Resource_AddRef(color);g->scene=color;g->requested_mask=15u;
@@ -251,7 +267,7 @@ void hooks_preview_record(ID3D12GraphicsCommandList *cl,ID3D12Resource *color,ID
     if(!preview_add(batch,motion,read_state,"mv"))log_msg("PREVIEW SKIP resolve=%llu stage=mv",resolve);
     if(!preview_add(batch,out,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,"sr"))log_msg("PREVIEW SKIP resolve=%llu stage=sr",resolve);
     }
-    g->core_batch=batch;g->sr_snapshot=preview_sr_snapshot(cl,out);
+    g->core_batch=batch;g->sr_snapshot=preview_sr_snapshot(cl,out,group);
     if(capture&&!batch->count)batch->life.state=PV_FAILED;
 done: ReleaseSRWLockExclusive(&azpv_lock);
 }
@@ -320,6 +336,7 @@ static void preview_auto_observe_locked(ID3D12GraphicsCommandList *cl,ListState 
        azrp_match_render(azrp_profile,t->desc.Width,t->desc.Height)){
         azpv_auto_chain.composite=(uintptr_t)t->res;azpv_auto_chain.stages=3;
     }else if(bit==4&&azpv_auto_chain.stages==3&&input==azpv_auto_chain.composite&&
+       (!dlss_sr_play_mode()||hash==(azvis_hdr?0x577d52ef:0xa93721c4))&&
        azrp_match_output(azrp_profile,t->desc.Width,t->desc.Height)){
         azpv_auto_chain.stages=7;
         azdebug_auto_scene_note(&azpv_auto_scene,resolve,GetTickCount64());
@@ -487,6 +504,7 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
             }else log_msg("VISIBLE SKIP resolve=%llu stage=final reason=chain_gate missing=0x%x chain=%d",resolve,missing,chain);
         }
     }
+    if(dlss_sr_play_mode()&&routed)++azpv_play_recorded;
     ReleaseSRWLockExclusive(&azpv_lock);
     if(hash==0xa93721c4||hash==0x577d52ef)
         visible_note_final(identity,(uintptr_t)input,cl,s->trace_recording_id,resolve,hash,routed,missing);
@@ -603,11 +621,23 @@ static void preview_poll(void) {
     if(!dlss_sr_preview_mode())return;
     AcquireSRWLockExclusive(&azt_lock);
     int ended=azdbg.id!=0&&!azdbg.active;
+    if(dlss_sr_play_mode()&&azt_incomplete)dlss_sr_play_disable("metadata_capacity");
     unsigned long long retire_before=azt_frame;
     ReleaseSRWLockExclusive(&azt_lock);
     visible_poll_trial();
     AcquireSRWLockExclusive(&azpv_lock);
     preview_reap_live(retire_before);
+    if(dlss_sr_play_mode()){
+        uint64_t now=GetTickCount64();
+        if(now-azpv_play_stats_ms>=5000u){
+            azpv_play_stats_ms=now;unsigned used=0,failed=0;
+            for(unsigned i=AZPV_GROUPS;i<AZPV_TOTAL;++i)used+=azpv_groups[i].resolve!=0;
+            for(unsigned i=0;i<azpv_batch_count;++i)failed+=azpv_batches[i].life.state==PV_FAILED;
+            log_msg("SR PLAY_STATS attempts=%llu recorded=%llu gpuComplete=%llu nativeRetired=%llu slotBusy=%llu snapshotReuse=%llu liveSlots=%u failedBatches=%u resolve=%llu available=%d",
+                (unsigned long long)azpv_play_attempts,(unsigned long long)azpv_play_recorded,(unsigned long long)azpv_play_completed,(unsigned long long)azpv_play_native,(unsigned long long)azpv_play_busy,(unsigned long long)azpv_play_reuse,used,failed,retire_before,dlss_sr_play_available());
+        }
+        goto done;
+    }
     if(azpv_done)goto done;
     unsigned pending=0,files=0,good_groups=0,failed_groups=0;
     unsigned saved_mask[AZPV_GROUPS]={0};

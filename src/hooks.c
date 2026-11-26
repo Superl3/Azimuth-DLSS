@@ -26,6 +26,15 @@ static CRITICAL_SECTION log_lock;
 static HANDLE log_file = INVALID_HANDLE_VALUE;
 
 void log_msg(const char *fmt, ...) {
+    /* The play path keeps summary telemetry without gigabytes of per-draw logs.
+       Retain an initial sample and periodic samples, never suppress SR PLAY_*.
+       Bounded debug/AutoTest logs are unchanged. */
+    static volatile LONG64 play_rows;
+    if(dlss_sr_play_mode()&&strstr(fmt,"resolve=")&&
+       (!strncmp(fmt,"VISIBLE ",8)||!strncmp(fmt,"POSTFX ",7)||!strncmp(fmt,"PREVIEW ",8))){
+        LONG64 n=InterlockedIncrement64(&play_rows);
+        if(n>256&&(n%4096)!=0)return;
+    }
     char buf[1024];
     va_list ap;
     va_start(ap, fmt);
