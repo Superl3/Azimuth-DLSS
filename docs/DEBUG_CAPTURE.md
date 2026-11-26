@@ -527,9 +527,13 @@ The watch is bounded to 64 records per recording and reports truncation;
 unsupported API or shader accesses are not proven absent. Composite
 failure reports expected/actual recording identities. Creation-time
 game chain in the sample is 1280x720, not the 1920x1080 final RTV.
-Lineage draw diagnostics now inspect any texture size, and report
-creation-snapshot backbuffer writers; no bound-only edge authorizes
-routing or proves Present. No swapchain ref is retained.
+Lineage draw diagnostics still inspect fullscreen candidates at any
+texture size. BACKBUFFER_DRAW requires a creation-snapshot address
+and size match, with one sample per buffer per command-list recording.
+BACKBUFFER_SIZE_MISMATCH reports the first conflicting size per
+creation snapshot and buffer. The draw edge's snapshotAddressMatch
+field preserves the address-only observation. Size agreement leaves
+lifetime and Present unverified. No swapchain ref is retained.
 
 In preview mode F8 before a recent streak of three fresh successful SR
 resolves (without reset) is ignored rather than consuming the one-shot
@@ -627,7 +631,9 @@ PreviewJitter, ShaderDisasm and ExitAfterCapture for a new launch.
 are filled without Read-Host. Pass -WaitSeconds 300 if loading is slow.
 No forced termination: on complete DEBUG END + PREVIEW COMPLETE and
 (for VisibleSR) VISIBLE TRIAL_END, keep a two-second native post-roll
-then request normal window close. The total timeout preserves partial
+then request normal window close. The launcher follows newly appended
+log data with a bounded read per poll, including markers split across
+writes. The total timeout preserves partial
 fresh evidence after normal exit, without treating timeout as success.
 The trial result and display proof are separate from capture completion.
 -ReadyFile optionally waits for a nonexisting path in an existing

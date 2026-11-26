@@ -5,14 +5,27 @@ int main(void){
     AzvisChainIdentity chains[AZVIS_CHAINS]={0},a={0};
     AzvisBufferMatch m;
     a.hwnd=11;a.chain=100;a.queue=50;a.count=2;a.buffers[0]=200;a.buffers[1]=201;a.generation=1;
+    a.w=1280;a.h=720;
     assert(azvis_register_chain(chains,&a));
     assert(azvis_match_buffer(chains,201,&m)&&m.chain==100&&m.generation==1&&m.index==1);
+    assert(azvis_snapshot_size_matches(&m,1280,720));
+    assert(!azvis_snapshot_size_matches(&m,1024,1024));
+    assert(!azvis_snapshot_size_matches(&m,1920,720));
+    assert(!azvis_snapshot_size_matches(&m,1280,1080));
+    AzvisBufferSamples first_recording={0},next_recording={0};
+    for(unsigned i=0;i<1000;++i)assert(azvis_sample_buffer(&first_recording,&m)==(i==0));
+    assert(azvis_sample_buffer(&next_recording,&m));
+    assert(azvis_match_buffer(chains,200,&m)&&azvis_sample_buffer(&first_recording,&m));
+    AzvisBufferMatch old_match=m;
     /* Launcher's flip chain is replaced on the same HWND: only its
        numeric observation is invalidated. There is no reference to release. */
     AzvisChainIdentity b=a;b.chain=101;b.generation=2;b.buffers[0]=300;b.buffers[1]=301;
     assert(azvis_register_chain(chains,&b));
     assert(!azvis_match_buffer(chains,200,&m)&&!m.chain);
     assert(azvis_match_buffer(chains,300,&m)&&m.generation==2&&m.chain==101&&m.queue==50);
+    assert(azvis_sample_buffer(&first_recording,&m));
+    assert(!azvis_sample_buffer(&first_recording,&old_match));
+    assert(!azvis_sample_buffer(&first_recording,&m));
     assert(!azvis_register_chain(chains,&a));
     /* An address reused for a different HWND replaces the old observation. */
     b.hwnd=12;b.generation=3;b.buffers[0]=400;b.buffers[1]=401;

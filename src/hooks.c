@@ -15,6 +15,7 @@
 #include "game_profile.h"
 #include "common.h"
 #include "replay_binding_policy.h"
+#include "visible_lineage_policy.h"
 #include "visible_tail_policy.h"
 
 HMODULE proxy_system_dxgi(void);
@@ -365,6 +366,7 @@ typedef struct {
     unsigned trace_watch_count;
     int trace_watch_active;
     AzvisTail trace_tail;
+    AzvisBufferSamples trace_backbuffer_draws;
     D3D_PRIMITIVE_TOPOLOGY trace_topology;
     UINT trace_queries;
     int trace_predicated, trace_query_unknown;
@@ -677,8 +679,10 @@ static void STDMETHODCALLTYPE hook_ClearState(ID3D12GraphicsCommandList *cl,ID3D
         /* ClearState does not close or reset the physical recording.
            Retain its ID but require a new Reset for replay certainty. */
         unsigned long long recording=s->trace_recording_id;
+        AzvisBufferSamples backbuffer_draws=s->trace_backbuffer_draws;
         memset((char *)s+sizeof(s->list),0,sizeof(*s)-sizeof(s->list));
         s->trace_recording_id=recording;s->pso=pso;
+        s->trace_backbuffer_draws=backbuffer_draws;
         s->trace_bindings_uncertain=1;s->trace_query_unknown=1;
     }
 }
