@@ -6,7 +6,7 @@
 #define AZVIS_PSO_MAX 8
 #define AZVIS_MS 10000u
 #define AZPV_CAPTURE_COUNT 2u
-static int azvis_enabled;
+static int azvis_enabled,azvis_marker;
 static volatile LONG azvis_chain_changed;
 static SRWLOCK azvis_pso_lock=SRWLOCK_INIT;
 static struct {ID3D12PipelineState *original,*merge;} azvis_psos[AZVIS_PSO_MAX];
@@ -27,6 +27,9 @@ static void visible_init(void){
     char b[8];DWORD n=GetEnvironmentVariableA("AZIMUTH_DEBUG_VISIBLE_SR",b,sizeof(b));
     azvis_enabled=azrp_enabled&&azrp_sr_enabled&&!azrp_profile.wide&&n==1&&b[0]=='1';
     if(n==1&&b[0]=='1')log_msg("VISIBLE CONFIG enabled=%d durationMs=%u mode=native_hud_region_retention sdr=1 presentVerified=0 swapchainRefs=0",azvis_enabled,AZVIS_MS);
+    n=GetEnvironmentVariableA("AZIMUTH_DEBUG_VISIBLE_MARKER",b,sizeof(b));
+    azvis_marker=azvis_enabled&&n==1&&b[0]=='1';
+    if(azvis_marker)log_msg("VISIBLE MARKER enabled=1 rect=32,32,80,80 pattern=white_border_magenta_cyan_black testOnly=1 stage=pre_sdr_lut");
 }
 static void visible_release(AzvisFrame *v){
     if(v->heap)ID3D12DescriptorHeap_Release(v->heap);
@@ -74,7 +77,14 @@ static void visible_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *d,ID3D12Pipeli
     AcquireSRWLockExclusive(&azvis_pso_lock);
     for(unsigned i=0;i<azvis_pso_count;++i)if(azvis_psos[i].original==pso)goto done;
     if(azvis_pso_count>=AZVIS_PSO_MAX)goto done;
-    ID3DBlob *shader=compile(azvis_merge_hlsl,"main","ps_5_0");
+    char marked[sizeof(azvis_merge_hlsl)+64];
+    const char *source=azvis_merge_hlsl;
+    if(azvis_marker){
+        int n=snprintf(marked,sizeof(marked),"#define AZVIS_MARKER 1\n%s",azvis_merge_hlsl);
+        if(n<0||(size_t)n>=sizeof(marked))goto done;
+        source=marked;
+    }
+    ID3DBlob *shader=compile(source,"main","ps_5_0");
     if(!shader){log_msg("VISIBLE PSO SKIP reason=merge_compile");goto done;}
     D3D12_GRAPHICS_PIPELINE_STATE_DESC desc=*d;
     desc.PS.pShaderBytecode=ID3D10Blob_GetBufferPointer(shader);desc.PS.BytecodeLength=ID3D10Blob_GetBufferSize(shader);
@@ -316,6 +326,6 @@ static int visible_finalize(AzvisFrame *v,ID3D12GraphicsCommandList *cl,ListStat
     LARGE_INTEGER qpc;QueryPerformanceCounter(&qpc);
     if(probe){log_msg("VISIBLE PROBE_FINAL_RECORDED resolve=%llu list=%p recording=%llu target=%p qpc=%lld nativePreserved=1 presentVerified=0",resolve,(void *)cl,v->recording,(void *)v->probe_final,(long long)qpc.QuadPart);return 2;}
     v->routed=1;v->target_id=(uintptr_t)target;
-    log_msg("VISIBLE FINAL_RECORDED resolve=%llu list=%p recording=%llu target=%p qpc=%lld nativeFinalShader=1 presentVerified=0",resolve,(void *)cl,v->recording,(void *)target,(long long)qpc.QuadPart);
+    log_msg("VISIBLE FINAL_RECORDED resolve=%llu list=%p recording=%llu target=%p qpc=%lld nativeFinalShader=1 marker=%d presentVerified=0",resolve,(void *)cl,v->recording,(void *)target,(long long)qpc.QuadPart,azvis_marker);
     return 1;
 }

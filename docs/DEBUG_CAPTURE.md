@@ -688,3 +688,19 @@ scheduling may exceed the requested timeout. It is an alpha diagnostic
 aid, not a production frame-pacing solution. The event stays alive until
 the associated fence is safely completed or process exit. The launcher
 still shuts down normally after the full trial and capture.
+
+
+For actual-display proof without any swapchain lifetime hook, optionally
+add -VisibleMarker to the SDR AutoTest command. A 48x48 high-contrast
+white-border magenta/cyan test pattern (with a black asymmetric cell)
+is inserted into the private merged scene at pixel rectangle
+[32,80)x[32,80), before the original SDR LUT. It is off by default.
+The marker is written only by the diagnostic replacement/probe shader,
+not a desktop overlay; a marker in an offscreen RAW alone is not
+display proof. Compare the captured actual game/desktop video with
+visiblefinal and the VISIBLE FINAL_RECORDED/SUBMITTED/GPU_COMPLETE
+timeline, before, during and after the trial. The mark should never
+appear in native fallback or post-roll. Its absence does not prove
+that no pixels reached the display if capture/downscaling/cropping
+could hide it. The final shader and all safety gates remain unchanged.
+Compile both marker and unmarked shader variants in CI.

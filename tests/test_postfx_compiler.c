@@ -42,6 +42,15 @@ int main(void) {
     if(FAILED(hr)&&err)fprintf(stderr,"Visible shader: %s\n",(const char *)ID3D10Blob_GetBufferPointer(err));
     assert(SUCCEEDED(hr)&&code);
     if(err)ID3D10Blob_Release(err);
+    ID3D10Blob_Release(code);
+    char marked[sizeof(azvis_merge_hlsl)+64];
+    int marked_len=snprintf(marked,sizeof(marked),"#define AZVIS_MARKER 1\n%s",azvis_merge_hlsl);
+    assert(marked_len>0&&(size_t)marked_len<sizeof(marked));
+    code=NULL;err=NULL;
+    hr=compile(marked,(size_t)marked_len,"visible_marker",NULL,NULL,"main","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,&err);
+    if(FAILED(hr)&&err)fprintf(stderr,"Visible marker shader: %s\n",(const char *)ID3D10Blob_GetBufferPointer(err));
+    assert(SUCCEEDED(hr)&&code);
+    if(err)ID3D10Blob_Release(err);
     ID3D10Blob_Release(code);FreeLibrary(mod);
     puts("PASS: real D3DCompile retail checksum and position-remapped DXBC disassembly");
     return 0;

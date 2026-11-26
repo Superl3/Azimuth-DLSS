@@ -13,6 +13,7 @@ param(
     [switch]$PreviewReplay,
     [switch]$PreviewSRReplay,
     [switch]$VisibleSR,
+    [switch]$VisibleMarker,
     [switch]$AutoTest,
     [ValidateRange(0,12)][int]$ProducerWaitMs = 0,
     [ValidateRange(500,15000)][int]$AutoWarmupMs = 2000,
@@ -47,6 +48,7 @@ if($ReadyFile){
     }
 }
 if(($PreviewPostFx -or $PreviewJitter -or $PreviewReplay) -and !$Preview){throw 'Preview options require -Preview.'}
+if($VisibleMarker -and !$VisibleSR){throw '-VisibleMarker requires -VisibleSR.'}
 if($VisibleSR -and (!$PreviewSRReplay -or !$PreviewJitter)){throw '-VisibleSR requires -PreviewSRReplay and -PreviewJitter.'}
 if($VisibleSR -and $ExitAfterCapture -and !$AutoTest){throw 'For automatic VisibleSR shutdown use -AutoTest; otherwise omit -ExitAfterCapture.'}
 if($PreviewSRReplay -and !$PreviewReplay){throw '-PreviewSRReplay requires -PreviewReplay.'}
@@ -162,7 +164,7 @@ try {
             $previous = (Get-Item -LiteralPath $log).LastWriteTimeUtc
             Copy-Item -LiteralPath $log -Destination (Join-Path $dest ($tag + '-previous.log'))
         }
-        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM','AZIMUTH_DEBUG_AUTO_RESOLVE','AZIMUTH_DEBUG_AUTO_TEST','AZIMUTH_DEBUG_PRODUCER_WAIT_MS','AZIMUTH_DEBUG_AUTO_WARMUP_MS','AZIMUTH_DEBUG_AUTO_READY_FILE','AZIMUTH_SR_OUTPUT','AZIMUTH_SR_QUALITY','AZIMUTH_DEBUG_PREVIEW_POSTFX','AZIMUTH_DEBUG_PREVIEW_JITTER','AZIMUTH_DEBUG_POSTFX_REPLAY','AZIMUTH_DEBUG_SR_REPLAY','AZIMUTH_DEBUG_VISIBLE_SR','AZIMUTH_DEBUG_QUEUE_TRACE')) {
+        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM','AZIMUTH_DEBUG_AUTO_RESOLVE','AZIMUTH_DEBUG_AUTO_TEST','AZIMUTH_DEBUG_PRODUCER_WAIT_MS','AZIMUTH_DEBUG_AUTO_WARMUP_MS','AZIMUTH_DEBUG_AUTO_READY_FILE','AZIMUTH_SR_OUTPUT','AZIMUTH_SR_QUALITY','AZIMUTH_DEBUG_PREVIEW_POSTFX','AZIMUTH_DEBUG_PREVIEW_JITTER','AZIMUTH_DEBUG_POSTFX_REPLAY','AZIMUTH_DEBUG_SR_REPLAY','AZIMUTH_DEBUG_VISIBLE_SR','AZIMUTH_DEBUG_VISIBLE_MARKER','AZIMUTH_DEBUG_QUEUE_TRACE')) {
             $oldEnv[$key] = [Environment]::GetEnvironmentVariable($key,'Process')
         }
         [Environment]::SetEnvironmentVariable('AZIMUTH_SR_MODE',$(if($Preview){'preview'}else{'debug'}),'Process')
@@ -174,6 +176,7 @@ try {
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_POSTFX_REPLAY',$(if($PreviewReplay){'1'}else{'0'}),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_SR_REPLAY',$(if($PreviewSRReplay){'1'}else{'0'}),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_VISIBLE_SR',$(if($VisibleSR){'1'}else{'0'}),'Process')
+            [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_VISIBLE_MARKER',$(if($VisibleMarker){'1'}else{'0'}),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_QUEUE_TRACE','1','Process')
         }
         [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_RENDERDOC','0','Process')
@@ -326,7 +329,7 @@ try {
         automatic_wait_expired = $autoWaitExpired
         files_sha256 = [ordered]@{ 'azimuth.exe' = (FileHashOrNull $exe); 'dxgi.dll' = (FileHashOrNull $proxy); 'azimuth_ngx.dll' = (FileHashOrNull $bridge) }
         selected_shader_disassembly = $shaderFiles
-        gpu_raw = $previewFiles; preview_complete = [bool]($content -match '(?m)^PREVIEW COMPLETE '); preview_quality = $(if($Preview){$Quality}else{$null}); preview_jitter_requested = [bool]$PreviewJitter; preview_native_replay_requested = [bool]$PreviewReplay; preview_sr_replay_requested = [bool]$PreviewSRReplay; visible_sr_requested = [bool]$VisibleSR; presentmon_csv_packaged = $presentMonPackaged
+        gpu_raw = $previewFiles; preview_complete = [bool]($content -match '(?m)^PREVIEW COMPLETE '); preview_quality = $(if($Preview){$Quality}else{$null}); preview_jitter_requested = [bool]$PreviewJitter; preview_native_replay_requested = [bool]$PreviewReplay; preview_sr_replay_requested = [bool]$PreviewSRReplay; visible_sr_requested = [bool]$VisibleSR; visible_marker_requested = [bool]$VisibleMarker; presentmon_csv_packaged = $presentMonPackaged
         notice = 'Local evidence. Explicit preview includes selected raw game textures. Optional selected shader assembly. No game binaries or saves. Review privately.'
     }
     $meta | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $stage 'capture.json') -Encoding UTF8
