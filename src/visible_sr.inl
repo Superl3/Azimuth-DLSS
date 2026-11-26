@@ -31,7 +31,7 @@ static void visible_init(void){
     azvis_hdr=requested&&n==1&&b[0]=='1';
     n=GetEnvironmentVariableA("AZIMUTH_DEBUG_HDR_LIVE",b,sizeof(b));
     azvis_hdr_live=azvis_hdr&&n==1&&b[0]=='1';
-    azvis_enabled=azrp_enabled&&azrp_sr_enabled&&(!azrp_profile.wide||azvis_hdr)&&requested;
+    azvis_enabled=azrp_enabled&&azrp_sr_enabled&&requested;
     UINT seconds=0;
     if(azt_env_uint("AZIMUTH_DEBUG_VISIBLE_SECONDS",&seconds))azvis_ms=azvis_duration_ms(seconds);
     if(requested)log_msg("VISIBLE CONFIG enabled=%d durationMs=%u mode=native_hud_region_retention sdr=%d hdr=%d hdrLive=%d presentVerified=0 swapchainRefs=0",azvis_enabled,azvis_ms,!azvis_hdr,azvis_hdr,azvis_hdr_live);
@@ -251,7 +251,7 @@ static int azvis_final_bindings(ListState *s,ID3D12Resource *native,AzvisFrame *
     AztDesc *scene=azt_slot(original,(SIZE_T)h0,0),*curve=azt_slot(original,(SIZE_T)h1,0);
     log_msg("VISIBLE FINAL_REQ resolve=%llu t0=%p expected=%p t0Fmt=%u t0Simple=%u curve=%p curveDim=%u curveWidth=%llu curveShadow=%d curveType=%u",resolve,scene?(void *)scene->res:NULL,(void *)native,scene?(unsigned)scene->format:0,scene?scene->simple:0,curve?(void *)curve->res:NULL,curve?(unsigned)curve->desc.Dimension:0,curve?(unsigned long long)curve->desc.Width:0,curve?curve->shadow_valid:0,curve?curve->shadow_type:0);
     if(!scene||scene->res!=native||!scene->simple||scene->format!=DXGI_FORMAT_R10G10B10A2_UNORM||
-       scene->desc.Width!=1280||scene->desc.Height!=720){reason="final_t0_identity";goto done;}
+       !azrp_match_render(azrp_profile,scene->desc.Width,scene->desc.Height)){reason="final_t0_identity";goto done;}
     if(!curve||!curve->res||!curve->shadow_valid||!curve->shadow||curve->shadow_type!=AZRB_SRV||
        curve->desc.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE1D||!curve->desc.Width||curve->desc.DepthOrArraySize!=1){
         reason="native_curve_shadow";goto done;
@@ -295,7 +295,7 @@ static int visible_finalize(AzvisFrame *v,ID3D12GraphicsCommandList *cl,ListStat
     ReleaseSRWLockShared(&azt_lock);
     if(!active){log_msg("VISIBLE SKIP resolve=%llu stage=final reason=trial_ended_or_chain_changed",resolve);return 0;}
     if(!v->enabled||!v->pre_ready||!v->composite_ready||v->list!=cl||v->recording!=s->trace_recording_id||
-       !azvis_texture(native,1280,720)||!azvis_texture(target,1920,1080)||s->vp_jittered){
+       !azvis_texture(native,azrp_profile.rw,azrp_profile.rh)||!azvis_texture(target,azrp_profile.ow,azrp_profile.oh)||s->vp_jittered){
         log_msg("VISIBLE SKIP resolve=%llu stage=final reason=chain_recording_or_native_size pre=%d composite=%d expectedList=%p actualList=%p expectedRecording=%llu actualRecording=%llu",resolve,v->pre_ready,v->composite_ready,(void *)v->list,(void *)cl,v->recording,s->trace_recording_id);return 0;
     }
     int adjacent=azpv_adjacent_work(v->composite_work,s->trace_work_seq);
@@ -337,7 +337,7 @@ static int visible_finalize(AzvisFrame *v,ID3D12GraphicsCommandList *cl,ListStat
     real_SetPipelineState(cl,merge);real_OMSetRenderTargets(cl,1,&rtv,FALSE,NULL);
     real_DrawInstanced(cl,3,1,0,0);
     hooks_transition(cl,v->merged,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    log_msg("VISIBLE %s resolve=%llu size=1920x1080 policy=native_region alphaRecovered=0",probe?"PROBE_HUD_RECORDED":"HUD_COMPOSITE_RECORDED",resolve);
+    log_msg("VISIBLE %s resolve=%llu size=%ux%u policy=native_region alphaRecovered=0",probe?"PROBE_HUD_RECORDED":"HUD_COMPOSITE_RECORDED",resolve,azrp_profile.ow,azrp_profile.oh);
     azvis_set_tables(cl,&b);real_SetPipelineState(cl,s->pso);
     if(probe)real_OMSetRenderTargets(cl,1,&probe_rtv,FALSE,NULL);
     else real_OMSetRenderTargets(cl,s->num_rtv,s->rtv,s->rtv_single,NULL);

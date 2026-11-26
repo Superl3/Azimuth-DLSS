@@ -24,6 +24,11 @@ static unsigned g_w, g_h, g_ow, g_oh;
 static int g_quality;
 static bool g_ready;
 static unsigned long long g_calls;
+static int g_preset;
+EXPORT int azngx_set_sr_preset(int preset){
+    if(g_feature||(preset!=0&&(preset<10||preset>13)))return 0;
+    g_preset=preset;return 1;
+}
 
 // Features replaced by a resize are released a few frames later, never mid-flight.
 struct Retired {
@@ -151,6 +156,11 @@ EXPORT int azngx_evaluate_sr(ID3D12GraphicsCommandList *cl, ID3D12Resource *colo
         cp.Feature.InPerfQualityValue = ngx_quality(quality);
         cp.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure;
         if (quality != AZSR_NATIVE) cp.InFeatureCreateFlags |= NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
+        if(quality!=AZSR_NATIVE&&g_preset){
+            const char *key=quality==AZSR_QUALITY?NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality:
+                quality==AZSR_BALANCED?NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced:NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance;
+            g_params->Set(key,(unsigned int)g_preset);
+        }
         NVSDK_NGX_Result r = NGX_D3D12_CREATE_DLSS_EXT(cl, 1, 1, &g_feature, g_params, &cp);
         if (NVSDK_NGX_FAILED(r)) {
             *ngx_result = (int)r;

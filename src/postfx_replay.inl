@@ -19,7 +19,8 @@ static void postfx_replay_init(void) {
     char b[8];DWORD n=GetEnvironmentVariableA("AZIMUTH_DEBUG_POSTFX_REPLAY",b,sizeof(b));
     int requested=n==1&&b[0]=='1';
     char output[32]={0};DWORD len=GetEnvironmentVariableA("AZIMUTH_SR_OUTPUT",output,sizeof(output));
-    if(len&&len<sizeof(output))azrp_profile=azrp_profile_for(output);
+    char render[32]={0};DWORD rn=GetEnvironmentVariableA("AZIMUTH_SR_RENDER",render,sizeof(render));
+    if(len&&len<sizeof(output))azrp_profile=rn?(rn<sizeof(render)?azrp_profile_explicit(render,output):(AzReplayProfile){0}):azrp_profile_for(output);
     azrp_enabled=dlss_sr_preview_mode()&&requested&&azrp_profile.ow&&!GetModuleHandleW(L"renderdoc.dll");
     if(requested&&!azrp_enabled)log_msg("POSTFX REPLAY SKIP reason=unsupported_profile_or_capture_runtime");
     if(azrp_enabled){

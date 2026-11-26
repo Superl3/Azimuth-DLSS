@@ -21,6 +21,15 @@ typedef enum AzSRDecision {
     AZSR_REJECT = 0, AZSR_EVALUATE_ONLY = 1, AZSR_COPY_PADDED = 2, AZSR_ROUTE_OUTPUT = 3
 } AzSRDecision;
 
+/* Pinned SDK hint values; actual network selection is runtime-owned. */
+static inline int azsr_preset(const char *s) {
+    if(!s||!s[0])return 0;
+    if(!s[1]){
+        switch(s[0]){case 'J':case 'j':return 10;case 'K':case 'k':return 11;case 'L':case 'l':return 12;case 'M':case 'm':return 13;case '0':return 0;}
+    }
+    const char *d="default";while(*d&&*s==*d){++d;++s;}
+    return !*d&&!*s?0:-1;
+}
 static inline int azsr_equal(AzSRSize a, AzSRSize b) {
     return a.w == b.w && a.h == b.h;
 }

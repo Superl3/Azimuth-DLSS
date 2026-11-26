@@ -9,6 +9,7 @@
    scene colour. hooks.c is unchanged apart from names. */
 #define COBJMACROS
 #include "common.h"
+#include "replay_profile.h"
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
@@ -50,6 +51,10 @@ static AzSRMode sr_mode = AZSR_DLAA;
 static AzSRQuality sr_quality = AZSR_QUALITY;
 static AzSRSize sr_output, sr_render, sr_swapchain;
 static int sr_armed, sr_blocked, sr_optimal_checked;
+static int sr_preset;
+static AzSRSize sr_fixed_render;
+typedef int (*PfnNgxSetPreset)(int);
+static PfnNgxSetPreset p_set_preset;
 static int sr_route_jitter, sr_trace_only, sr_debug_mode, sr_preview_mode, sr_preview_jitter;
 static volatile LONG sr_route_visible;
 static ID3D12Resource *sr_route_last_output;
@@ -93,6 +98,11 @@ static void sr_read_config(void) {
         else if (!strcmp(b, "performance")) sr_quality = AZSR_PERFORMANCE;
         else sr_blocked = 1;
     }
+    n=GetEnvironmentVariableA("AZIMUTH_SR_RENDER",b,sizeof(b));
+    if(n&&(n>=sizeof(b)||!azrp_parse_size(b,&sr_fixed_render)||!azsr_less(sr_fixed_render,sr_output)||!azsr_same_aspect(sr_fixed_render,sr_output)))sr_blocked=1;
+    n=GetEnvironmentVariableA("AZIMUTH_SR_PRESET",b,sizeof(b));
+    if(n){sr_preset=n<sizeof(b)?azsr_preset(b):-1;if(sr_preset<0)sr_blocked=1;}
+    log_msg("SR PRESET requested=%d hintOnly=1",sr_preset);
     if(sr_preview_mode){
         n=GetEnvironmentVariableA("AZIMUTH_DEBUG_PREVIEW_JITTER",b,sizeof(b));
         sr_preview_jitter=n==1&&b[0]=='1';
@@ -177,6 +187,8 @@ static int load(void) {
     }
     *(FARPROC *)&p_evaluate_sr = GetProcAddress(m, "azngx_evaluate_sr");
     *(FARPROC *)&p_optimal = GetProcAddress(m, "azngx_get_optimal");
+    *(FARPROC *)&p_set_preset=GetProcAddress(m,"azngx_set_sr_preset");
+    if(sr_preset>0&&(!p_set_preset||!p_set_preset(sr_preset))){log_msg("SR: requested preset requires compatible bridge");p_evaluate=NULL;return 0;}
     if (sr_mode >= AZSR_PROBE && (!p_evaluate_sr || !p_optimal)) {
         log_msg("SR experiment requires the rebuilt azimuth_ngx.dll");
         return 0;
@@ -323,6 +335,7 @@ int dlss_run(ID3D12GraphicsCommandList *cl, ID3D12Resource *color, D3D12_RESOURC
             if (decision == AZSR_REJECT || cd.SampleDesc.Count != 1 || dd.SampleDesc.Count != 1 ||
                 md.SampleDesc.Count != 1 || md.Format != DXGI_FORMAT_R16G16_FLOAT ||
                 cd.Format != DXGI_FORMAT_R11G11B10_FLOAT) return 0;
+            if(sr_fixed_render.w&&!azsr_equal(sr_fixed_render,f.motion))return 0;
             w = f.motion.w; h = f.motion.h; ow = sr_output.w; oh = sr_output.h;
             if (sr_armed && !azsr_equal(sr_render, f.motion)) {
                 sr_blocked = 1;

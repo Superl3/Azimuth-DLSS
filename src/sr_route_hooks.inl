@@ -49,7 +49,7 @@ static void STDMETHODCALLTYPE trace_ClearRenderTargetView(ID3D12GraphicsCommandL
     ID3D12Resource *res=d?d->res:NULL;const ViewEntry *live=view_find(h.ptr);
     AztState *st=res?azt_state(res,0):NULL;
     int verified=azvis_observing()&&s&&s->trace_watch_active&&!n&&rgba&&d&&d->simple&&
-        d->format==DXGI_FORMAT_R10G10B10A2_UNORM&&d->desc.Width==1920&&d->desc.Height==1080&&
+        d->format==DXGI_FORMAT_R10G10B10A2_UNORM&&azrp_match_output(azrp_profile,d->desc.Width,d->desc.Height)&&
         d->desc.DepthOrArraySize==1&&d->desc.MipLevels==1&&d->desc.SampleDesc.Count==1&&
         live&&live->resource==res&&st&&st->known&&st->list==cl&&st->recording==s->trace_recording_id&&
         st->state==D3D12_RESOURCE_STATE_RENDER_TARGET&&s->num_rtv==1&&s->rtv[0].ptr==h.ptr&&!s->has_dsv;
