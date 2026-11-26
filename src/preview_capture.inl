@@ -18,7 +18,7 @@ typedef struct {
 } AzpvShot;
 typedef struct {
     ID3D12GraphicsCommandList *list;
-    ID3D12Fence *fence;
+    ID3D12Fence *fence,*producer_dependency; /* owned until this batch retires */
     HANDLE ready_event;
     unsigned long long resolve;
     unsigned count,good;
@@ -50,6 +50,7 @@ static AzPreviewReady azpv_ready;
 static AzAutoScene azpv_auto_scene,azpv_auto_sr;
 static int azpv_auto_test;
 static unsigned azpv_producer_wait_ms;
+static int azpv_gpu_wait;
 static struct {uint64_t resolve;uintptr_t postfx,composite;unsigned stages;} azpv_auto_chain;
 static wchar_t azpv_dir[MAX_PATH];
 static char azpv_dirname[80];
@@ -64,7 +65,9 @@ static void preview_init(void) {
     visible_init();
     UINT wait_ms=0;
     if(azt_env_uint("AZIMUTH_DEBUG_PRODUCER_WAIT_MS",&wait_ms)&&wait_ms<=12)azpv_producer_wait_ms=wait_ms;
-    log_msg("PREVIEW PRODUCER_CONFIG waitMs=%u policy=submitted_retired_private_fence_only",azpv_producer_wait_ms);
+    n=GetEnvironmentVariableA("AZIMUTH_DEBUG_PRODUCER_GPU_WAIT",b,sizeof(b));
+    azpv_gpu_wait=n==1&&b[0]=='1';
+    log_msg("PREVIEW PRODUCER_CONFIG waitMs=%u gpuWait=%d policy=submitted_retired_private_fence_only",azpv_producer_wait_ms,azpv_gpu_wait);
     azpv_enabled=GetModuleHandleW(L"renderdoc.dll")==NULL;
     log_msg("PREVIEW CONFIG readback=%d postfx=%d groups=%u maxBytes=%llu",
         azpv_enabled,azpv_postfx,azrp_capture_groups(azrp_profile),(unsigned long long)AZPV_LIMIT);
@@ -143,7 +146,8 @@ static ID3D12Resource *preview_sr_snapshot(ID3D12GraphicsCommandList *cl,ID3D12R
     hooks_transition(cl,copy,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     return copy;
 }
-static int preview_sr_ready(const AzpvGroup *g,ID3D12GraphicsCommandList *cl,unsigned long long recording,int draw_ready) {
+static int preview_sr_ready(const AzpvGroup *g,ID3D12GraphicsCommandList *cl,unsigned long long recording,int draw_ready,int *deferred) {
+    *deferred=0;
     AzpvBatch *b=g->core_batch;
     if(!g->sr_snapshot||!b){
         log_msg("POSTFX SR_PRODUCER resolve=%llu reason=no_snapshot_or_batch ready=0",g->resolve);return 0;
@@ -158,7 +162,8 @@ static int preview_sr_ready(const AzpvGroup *g,ID3D12GraphicsCommandList *cl,uns
        submitted and on a successfully retired recording. No queue Wait,
        no guessed ordering, no source reuse. A timeout leaves native
        rendering untouched. The batch owns the event until completion. */
-    if(!ready&&draw_ready&&azpv_producer_wait_ms&&b->queue&&azpv_source_waitable(b->life,value)){
+    if(!ready&&draw_ready&&azpv_source_defer(b->life,value,b->recording,recording,b->queue!=0,azpv_gpu_wait))*deferred=1;
+    if(!ready&&!*deferred&&draw_ready&&azpv_producer_wait_ms&&b->queue&&azpv_source_waitable(b->life,value)){
         attempted=1;
         if(!b->ready_event){
             HANDLE event=CreateEventW(NULL,FALSE,FALSE,NULL);
@@ -177,9 +182,9 @@ static int preview_sr_ready(const AzpvGroup *g,ID3D12GraphicsCommandList *cl,uns
         value=b->fence->lpVtbl->GetCompletedValue(b->fence);
         ready=azpv_source_ready(b->life,b->recording,recording,b->list==cl,value);
     }
-    log_msg("POSTFX SR_PRODUCER resolve=%llu producerRecording=%llu consumerRecording=%llu sameList=%d state=%d current=%d queue=%p before=%llu completed=%llu waitAttempted=%d waitResult=%lu waitElapsedMs=%llu ready=%d waitElapsedUs=%lld",
-        g->resolve,b->recording,recording,b->list==cl,b->life.state,b->life.current,(void *)b->queue,(unsigned long long)before,(unsigned long long)value,attempted,(unsigned long)wr,(unsigned long long)(GetTickCount64()-start),ready,wait_us);
-    return ready;
+    log_msg("POSTFX SR_PRODUCER resolve=%llu producerRecording=%llu consumerRecording=%llu sameList=%d state=%d current=%d queue=%p before=%llu completed=%llu waitAttempted=%d waitResult=%lu waitElapsedMs=%llu ready=%d waitElapsedUs=%lld gpuDeferred=%d",
+        g->resolve,b->recording,recording,b->list==cl,b->life.state,b->life.current,(void *)b->queue,(unsigned long long)before,(unsigned long long)value,attempted,(unsigned long)wr,(unsigned long long)(GetTickCount64()-start),ready,wait_us,*deferred);
+    return ready||*deferred;
 }
 /* Only live groups are recycled. Both recordings must be retired and
    complete. Failed or repeated submissions quarantine the slot until
@@ -198,6 +203,7 @@ static void preview_reap_live(unsigned long long retire_before){
             AzpvBatch *b=&azpv_batches[i];
             if(!b->life.state||b->group!=g)continue;
             if(b->ready_event)CloseHandle(b->ready_event);
+            if(b->producer_dependency)ID3D12Fence_Release(b->producer_dependency);
             ID3D12Fence_Release(b->fence);ID3D12GraphicsCommandList_Release(b->list);memset(b,0,sizeof(*b));
         }
         if(p->visible.routed)log_msg("VISIBLE FINAL_GPU_COMPLETE resolve=%llu target=%p liveSlot=%u",p->resolve,(void *)p->visible.target_id,g);
@@ -406,7 +412,8 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
             if(azrp_sr_enabled){
                 g->requested_mask|=256u;
                 int draw_ready=chain&&!(missing&~16u)&&s->trace_recording_id;
-                int producer_ready=preview_sr_ready(g,cl,s->trace_recording_id,draw_ready);
+                int deferred=0;
+                int producer_ready=preview_sr_ready(g,cl,s->trace_recording_id,draw_ready,&deferred);
                 AzpvBatch *batch=draw_ready&&producer_ready?preview_batch(i,cl,s->trace_recording_id):NULL;
                 AzrpBindings bindings;
                 /* Independent preflight runs even when the producer or
@@ -415,6 +422,11 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
                     ID3D12Resource *image=postfx_replay_draw(cl,s,resolve,&bindings,g->visible.enabled?&g->visible.sr_surface:NULL);
                     if(!image){ID3D12DescriptorHeap_Release(bindings.heap);log_msg("POSTFX SR_REPLAY SKIP resolve=%llu reason=draw path=%u",resolve,bindings.path);}
                     else{
+                        if(deferred){
+                            batch->producer_dependency=g->core_batch->fence;
+                            ID3D12Fence_AddRef(batch->producer_dependency);
+                            log_msg("POSTFX SR_DEPENDENCY resolve=%llu producer=%llu consumer=%llu fence=%p submittedProducer=1",resolve,g->core_batch->recording,batch->recording,(void *)batch->producer_dependency);
+                        }
                         if(capture&&!preview_add(batch,image,D3D12_RESOURCE_STATE_RENDER_TARGET,"srpostfx"))
                             log_msg("POSTFX SR_REPLAY SKIP resolve=%llu reason=readback path=%u",resolve,bindings.path);
                         if(g->visible.enabled){if(chain&&!missing&&target)visible_begin(&g->visible,cl,s,target,resolve);else log_msg("VISIBLE SKIP resolve=%llu stage=srpostfx reason=original_state",resolve);}
@@ -493,6 +505,35 @@ static void preview_reset(ID3D12GraphicsCommandList *cl) {
     }
     ReleaseSRWLockExclusive(&azpv_lock);
 }
+/* A recorded deferred read cannot be undone after Close. Always impose
+   its already-enqueued producer signal before forwarding the consumer.
+   Even a same-queue wait is valid (the signal was previously submitted).
+   On the exceptional failure of queue Wait, preserve ordering by a
+   synchronous fence wait, or observe device removal. Never execute an
+   unsynchronized read on a live device. Opt-in experimental path only. */
+static void preview_submit_dependency(ID3D12CommandQueue *q,AzpvBatch *b){
+    ID3D12Fence *f=b->producer_dependency;if(!f)return;
+    UINT64 completed=f->lpVtbl->GetCompletedValue(f);
+    HRESULT hr=S_OK;const char *mode="already_complete";long long start=azvis_qpc();
+    if(completed==UINT64_MAX)mode="device_removed";
+    else if(completed<1){
+        hr=q->lpVtbl->Wait(q,f,1);
+        if(SUCCEEDED(hr))mode="queue_wait";
+        else{
+            mode="cpu_fallback";
+            log_msg("POSTFX SR_DEPENDENCY_WAIT_FAILED resolve=%llu hr=%08lx",b->resolve,(unsigned long)hr);
+            /* NULL event waits synchronously per ID3D12Fence contract.
+               If even event registration fails, poll only while the
+               device remains valid; the native list cannot be rolled back. */
+            if(FAILED(f->lpVtbl->SetEventOnCompletion(f,1,NULL))){
+                while(f->lpVtbl->GetCompletedValue(f)==0&&SUCCEEDED(g_device->lpVtbl->GetDeviceRemovedReason(g_device)))Sleep(1);
+            }
+            completed=f->lpVtbl->GetCompletedValue(f);
+            if(completed==UINT64_MAX||FAILED(g_device->lpVtbl->GetDeviceRemovedReason(g_device)))mode="device_removed";
+        }
+    }
+    log_msg("POSTFX SR_DEPENDENCY_SUBMIT resolve=%llu recording=%llu queue=%p fence=%p mode=%s hr=%08lx completedBeforeOrFallback=%llu qpcStart=%lld qpcEnd=%lld",b->resolve,b->recording,(void *)q,(void *)f,mode,(unsigned long)hr,(unsigned long long)completed,start,azvis_qpc());
+}
 typedef void (STDMETHODCALLTYPE *AzpvExecute)(ID3D12CommandQueue *,UINT,ID3D12CommandList *const *);
 static void preview_execute(ID3D12CommandQueue *q,UINT n,ID3D12CommandList *const *lists,AzpvExecute original) {
     if(!azpv_enabled){original(q,n,lists);return;}
@@ -508,6 +549,7 @@ static void preview_execute(ID3D12CommandQueue *q,UINT n,ID3D12CommandList *cons
         }
     }
     if(!any){ReleaseSRWLockExclusive(&azpv_lock);original(q,n,lists);return;}
+    for(unsigned i=0;i<azpv_batch_count;++i)if(matches[i])preview_submit_dependency(q,&azpv_batches[i]);
     original(q,n,lists);
     for(unsigned i=0;i<azpv_batch_count;++i){
         AzpvBatch *b=&azpv_batches[i];if(matches[i]!=1||b->life.state!=PV_RECORDED)continue;

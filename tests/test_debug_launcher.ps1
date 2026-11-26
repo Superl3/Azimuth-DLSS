@@ -96,6 +96,7 @@ try {
     $autoMeta=Get-Content -LiteralPath (Join-Path $autoContents 'capture.json') -Raw | ConvertFrom-Json
     if(!$autoMeta.auto_test -or !$autoMeta.auto_ready -or !$autoMeta.visible_trial_complete -or $autoMeta.automatic_capture.id -ne 1 -or $autoMeta.automatic_resolve -ne 0 -or $autoMeta.capture_begins -ne 1){throw 'Wrong keyless auto-test metadata.'}
     if($autoMeta.visible_seconds_requested -ne 60 -or $autoMeta.visible_duration_ms_observed -ne 60000){throw 'Wrong requested/observed Visible SR duration metadata.'}
+    if($autoMeta.present_trace_requested -or $autoMeta.producer_gpu_wait_requested -or $autoMeta.visible_hdr_requested -or $autoMeta.hdr_live_requested){throw 'Experimental switches must default off.'}
 
     $launcherAst = [System.Management.Automation.Language.Parser]::ParseFile($launcher, [ref]$null, [ref]$null)
     $completion = $launcherAst.Find({

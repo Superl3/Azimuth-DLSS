@@ -1261,6 +1261,7 @@ static void ensure_hotkey_thread(void) {
 }
 
 /* ---------------------------------------------------------------- swap chain */
+#include "present_trace.inl"
 
 static HRESULT STDMETHODCALLTYPE hook_CreateSwapChainForHwnd(IDXGIFactory2 *f, IUnknown *device, HWND hwnd,
                                                              const DXGI_SWAP_CHAIN_DESC1 *desc,
@@ -1277,6 +1278,7 @@ static HRESULT STDMETHODCALLTYPE hook_CreateSwapChainForHwnd(IDXGIFactory2 *f, I
         AzfgChain snapshot;
         fg_trace_swapchain(*sc,device,&snapshot);
         if(attempt)visible_note_chain(attempt,(uintptr_t)hwnd,(uintptr_t)*sc,&snapshot);
+        azdx_install(*sc);
     }
     return hr;
 }

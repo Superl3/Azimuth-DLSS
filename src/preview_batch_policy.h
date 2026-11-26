@@ -30,6 +30,12 @@ static inline int azpv_source_ready(AzpvBatchLife b,uint64_t producer,uint64_t c
 static inline int azpv_source_waitable(AzpvBatchLife b,uint64_t completed){
     return b.state==PV_SUBMITTED&&!b.current&&completed==0;
 }
+/* Deferred reads are permitted only with a successfully submitted,
+   retired producer and a different, known consumer recording. The
+   caller MUST enqueue the private fence wait before consumer execution. */
+static inline int azpv_source_defer(AzpvBatchLife b,uint64_t completed,uint64_t producer,uint64_t consumer,int submitted_queue,int enabled){
+    return enabled&&submitted_queue&&producer&&consumer&&producer!=consumer&&azpv_source_waitable(b,completed);
+}
 /* A completed core fence alone must not retire a group still waiting
    for its consumer recording. Old groups cannot acquire more work
    once the global resolve has advanced; closed groups have seen final. */
