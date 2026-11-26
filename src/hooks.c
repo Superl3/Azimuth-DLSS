@@ -944,7 +944,7 @@ static void azguide_record(ID3D12GraphicsCommandList *cl,ListState *s,UINT w,UIN
        s->trace_query_unknown||s->trace_topology!=D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST||
        cl->lpVtbl->GetType(cl)!=D3D12_COMMAND_LIST_TYPE_DIRECT||w>3840||h>2160)return;
     AcquireSRWLockExclusive(&azt_lock);
-    int active=azdbg.active&&azdbg.id==1&&azdbg.observed<azrp_capture_groups(azrp_profile)&&!azt_incomplete;
+    int active=azdbg.active&&azdbg.id==1&&azdbg.observed<azpv_capture_group_limit()&&!azt_incomplete;
     uint64_t resolve=azt_frame+1;
     if(active&&!s->trace_recording_id)s->trace_recording_id=++azt_generation;
     uint64_t recording=s->trace_recording_id;
