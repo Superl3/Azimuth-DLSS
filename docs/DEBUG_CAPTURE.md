@@ -641,3 +641,12 @@ navigate game menus or automate throttle/steering. The runner can do
 those separately and record video/PresentMon as before. A supplied
 -PresentMonCsv is copied after game exit if present; the external
 runner is responsible for ensuring the CSV has flushed.
+
+
+If the native chain itself is not observable, an independent fallback
+starts diagnostics after at least eight seconds of stable fresh SR (or
+the configured warmup if longer). With an explicitly opened ReadyFile
+gate, the ordinary warmup suffices. PREVIEW AUTO_READY trigger is
+scene_chain or fresh_sr_fallback; no output safety gate is relaxed.
+Use the external ready file if the game might sit at a rendered menu.
+F11 and F8 polling are both bypassed in AutoTest.

@@ -46,7 +46,7 @@ static UINT64 azpv_bytes;
 static volatile LONG azpv_queue_ready;
 static int azpv_enabled,azpv_postfx,azpv_done;
 static AzPreviewReady azpv_ready;
-static AzAutoScene azpv_auto_scene;
+static AzAutoScene azpv_auto_scene,azpv_auto_sr;
 static int azpv_auto_test;
 static struct {uint64_t resolve;uintptr_t postfx,composite;unsigned stages;} azpv_auto_chain;
 static wchar_t azpv_dir[MAX_PATH];
@@ -175,7 +175,12 @@ void hooks_preview_record(ID3D12GraphicsCommandList *cl,ID3D12Resource *color,ID
     if(!azpv_enabled||GetModuleHandleW(L"renderdoc.dll")||!cl||!g_device||
        cl->lpVtbl->GetType(cl)!=D3D12_COMMAND_LIST_TYPE_DIRECT||!InterlockedCompareExchange(&azpv_queue_ready,0,0))return;
     AcquireSRWLockExclusive(&azt_lock);
-    azdebug_preview_note(&azpv_ready,azt_frame+1,GetTickCount64(),fresh_mv&&!reset);
+    uint64_t now=GetTickCount64();
+    azdebug_preview_note(&azpv_ready,azt_frame+1,now,fresh_mv&&!reset);
+    if(azpv_auto_test&&!azdbg.id){
+        if(fresh_mv&&!reset)azdebug_auto_scene_note(&azpv_auto_sr,azt_frame+1,now);
+        else memset(&azpv_auto_sr,0,sizeof(azpv_auto_sr));
+    }
     int wanted=azdbg.active&&azdbg.id==1&&azdbg.observed<azrp_capture_groups(azrp_profile);
     int live=azvis_window_locked();
     unsigned long long resolve=azt_frame+1;
@@ -264,7 +269,7 @@ static void preview_auto_observe_locked(ID3D12GraphicsCommandList *cl,ListState 
         memset(&azpv_auto_chain,0,sizeof(azpv_auto_chain));azpv_auto_chain.resolve=resolve;
     }
     DWORD hash=p->hash[0];unsigned bit=hash==0x479be24a?1u:hash==0xa7840ad0?2u:4u;
-    if(bit==1&&azpv_auto_chain.stages==0&&input==(uintptr_t)azt_pending.scene&&
+    if(bit==1&&azpv_auto_chain.stages==0&&input==azdbg_scene_identity&&
        azrp_match_render(azrp_profile,t->desc.Width,t->desc.Height)){
         azpv_auto_chain.postfx=(uintptr_t)t->res;azpv_auto_chain.stages=1;
     }else if(bit==2&&azpv_auto_chain.stages==1&&input==azpv_auto_chain.postfx&&

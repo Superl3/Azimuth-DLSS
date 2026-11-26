@@ -1202,6 +1202,7 @@ static HRESULT WINAPI hook_D3D12CreateDevice(IUnknown *adapter, D3D_FEATURE_LEVE
 
 static void poll_f11(void) {
     static SHORT last;
+    if(azpv_auto_test)return;
     SHORT now = GetAsyncKeyState(VK_F11) & 0x8000;
     HWND fg = GetForegroundWindow();
     DWORD pid = 0;

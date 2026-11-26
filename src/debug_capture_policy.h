@@ -60,6 +60,16 @@ static inline int azdebug_auto_scene_due(const AzDebugWindow *w,const AzAutoScen
         now>=s->last_ms&&now-s->last_ms<=500&&now>=s->first_ms&&now-s->first_ms>=warmup_ms&&
         azdebug_preview_ready(r,observed,now);
 }
+/* A broken native chain is itself valuable diagnostic evidence. If it
+   cannot be observed, a longer fresh-SR warmup may start the capture;
+   with an explicit external gameplay gate, the ordinary warmup suffices.
+   Neither trigger authorizes routing or changes any resource-state gate. */
+static inline int azdebug_auto_trigger(const AzDebugWindow *w,const AzAutoScene *chain,const AzAutoScene *sr,const AzPreviewReady *r,
+        uint64_t observed,uint64_t now,unsigned minimum_resolve,unsigned warmup_ms,int gate_required,int gate_open){
+    if(azdebug_auto_scene_due(w,chain,r,observed,now,minimum_resolve,warmup_ms,gate_open))return 1;
+    unsigned fallback=gate_required?warmup_ms:(warmup_ms<8000?8000:warmup_ms);
+    return azdebug_auto_scene_due(w,sr,r,observed,now,minimum_resolve,fallback,gate_open)?2:0;
+}
 /* Opt-in one shot. A window started manually also consumes the opportunity. */
 static inline int azdebug_auto_due(const AzDebugWindow *w,unsigned requested,uint64_t resolve) {
     return requested && requested<=1000000 && !w->active && !w->id && resolve>=requested;

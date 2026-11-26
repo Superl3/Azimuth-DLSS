@@ -54,6 +54,17 @@ int main(void){
     assert(!azdebug_auto_scene_due(&auto_window,&scene,&fresh,22,2200,0,2000,0));
     assert(!azdebug_auto_scene_due(&auto_window,&scene,&fresh,22,2200,23,2000,1));
     assert(!azdebug_auto_scene_due(&auto_window,&scene,&fresh,22,2800,0,2000,1));
+    AzAutoScene no_chain={0};
+    assert(azdebug_auto_trigger(&auto_window,&scene,&scene,&fresh,22,2200,0,2000,0,1)==1);
+    assert(!azdebug_auto_trigger(&auto_window,&no_chain,&scene,&fresh,22,2200,0,2000,0,1));
+    assert(azdebug_auto_trigger(&auto_window,&no_chain,&scene,&fresh,22,2200,0,2000,1,1)==2);
+    assert(!azdebug_auto_trigger(&auto_window,&no_chain,&scene,&fresh,22,2200,0,2000,1,0));
+    AzAutoScene long_sr={0};AzPreviewReady long_fresh={0};
+    for(unsigned i=1;i<=82;++i){
+        azdebug_auto_scene_note(&long_sr,i,100ull*i);
+        azdebug_preview_note(&long_fresh,i,100ull*i,1);
+    }
+    assert(azdebug_auto_trigger(&auto_window,&no_chain,&long_sr,&long_fresh,82,8200,0,2000,0,1)==2);
     assert(azdebug_begin(&auto_window,8,2200,8000));azdebug_end(&auto_window);
     assert(!azdebug_auto_scene_due(&auto_window,&scene,&fresh,22,2200,0,2000,1));
     azdebug_auto_scene_note(&scene,28,2300);assert(scene.count==1&&scene.first_ms==2300);

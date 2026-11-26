@@ -98,11 +98,12 @@ static void debug_trace_poll(void) {
     AcquireSRWLockExclusive(&azt_lock);
     if(azdebug_expired(&azdbg,now))azdbg_finish_locked("timeout");
     if(azpv_auto_test){
-        if(azdebug_auto_scene_due(&azdbg,&azpv_auto_scene,&azpv_ready,azt_frame,now,azdbg_auto_resolve,azdbg_auto_warmup,azdbg_gate_open)){
+        int trigger=azdebug_auto_trigger(&azdbg,&azpv_auto_scene,&azpv_auto_sr,&azpv_ready,azt_frame,now,azdbg_auto_resolve,azdbg_auto_warmup,azdbg_gate_required,azdbg_gate_open);
+        if(trigger){
             started=debug_trace_begin_locked(now);
             if(started){
                 log_msg("DEBUG AUTO_BEGIN id=%u requestedResolve=%u",azdbg.id,azdbg_auto_resolve);
-                log_msg("PREVIEW AUTO_READY resolve=%llu chains=%u stableMs=%llu gateOpen=%d qpc=%lld",azt_frame,azpv_auto_scene.count,(unsigned long long)(now-azpv_auto_scene.first_ms),azdbg_gate_open,azvis_qpc());
+                log_msg("PREVIEW AUTO_READY resolve=%llu chains=%u freshResolves=%u stableMs=%llu gateOpen=%d trigger=%s qpc=%lld",azt_frame,azpv_auto_scene.count,azpv_auto_sr.count,(unsigned long long)(now-(trigger==1?azpv_auto_scene.first_ms:azpv_auto_sr.first_ms)),azdbg_gate_open,trigger==1?"scene_chain":"fresh_sr_fallback",azvis_qpc());
             }
         }
     }else if(azdebug_auto_due(&azdbg,azdbg_auto_resolve,azt_frame)&&(!dlss_sr_preview_mode()||azdebug_preview_ready(&azpv_ready,azt_frame,now))){
