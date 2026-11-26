@@ -3,11 +3,11 @@
    factory's short-lived FG creation snapshot; release behavior unchanged.
    Present/COMMON barriers and submissions are candidates, not Present.
    Actual presents/display require independent ETW/video evidence. */
-#include "visible_lineage_policy.h"
 #define AZVIS_EVENTS 128u
 #define AZVIS_BARRIERS 128u
 static SRWLOCK azvis_trace_lock=SRWLOCK_INIT;
 static AzvisChainIdentity azvis_chains[AZVIS_CHAINS];
+static AzvisBufferSamples azvis_size_mismatch_samples; /* Protected by azt_lock. */
 static volatile LONG64 azvis_create_serial;
 static int azvis_trace_closed;
 static volatile LONG azvis_trace_active;
@@ -255,13 +255,14 @@ static void visible_trace_draw(ID3D12GraphicsCommandList *cl,ListState *s,UINT c
     uintptr_t hud=0;unsigned long long hud_resolve=0;
     uintptr_t sources[AZVIS_EVENTS];unsigned long long resolves[AZVIS_EVENTS];unsigned source_count=0;
     AzvisChainIdentity chains[AZVIS_CHAINS];
-    AcquireSRWLockExclusive(&azvis_trace_lock);
+    AcquireSRWLockShared(&azvis_trace_lock);
     memcpy(chains,azvis_chains,sizeof(chains));
+    int have_final_candidate=!azvis_trace_closed&&azvis_event_count!=0;
     if(!azvis_trace_closed&&azvis_hud_logs<128){hud=azvis_hud_target;hud_resolve=azvis_hud_resolve;}
     if(!azvis_trace_closed&&azvis_edge_logs<256)for(unsigned i=0;i<azvis_event_count;++i)
         if(!azvis_events[i].ambiguous&&azvis_events[i].resource){sources[source_count]=azvis_events[i].resource;resolves[source_count++]=azvis_events[i].resolve;}
-    ReleaseSRWLockExclusive(&azvis_trace_lock);
-    if(!hud&&!source_count)return;
+    ReleaseSRWLockShared(&azvis_trace_lock);
+    if(!hud&&!have_final_candidate)return;
     unsigned hud_logged=0,edge_logged=0;
     AcquireSRWLockExclusive(&azt_lock);
     int hud_window=azdbg.active&&azdbg.observed<=AZPV_CAPTURE_COUNT;
@@ -298,14 +299,19 @@ static void visible_trace_draw(ID3D12GraphicsCommandList *cl,ListState *s,UINT c
        final RTV was 1920x1080. Never restrict diagnostic consumers
        to the final output size; a downscale or format conversion may
        be involved. A bound-only edge is NOT promoted to proven lineage. */
-    AzvisBufferMatch bm;
-    int bb=azvis_match_buffer(chains,(uintptr_t)t->res,&bm);
-    if(lineage_window&&source_count&&t->desc.Dimension==D3D12_RESOURCE_DIMENSION_TEXTURE2D&&
-       (bb||(!s->has_dsv&&!p->depth_enabled&&instances==1&&(count==3||count==6)))){
-        if(bb&&azvis_edge_logs<256){
+    if(lineage_window&&have_final_candidate&&t->desc.Dimension==D3D12_RESOURCE_DIMENSION_TEXTURE2D){
+        AzvisBufferMatch bm;
+        int address_match=azvis_match_buffer(chains,(uintptr_t)t->res,&bm);
+        int bb=address_match&&azvis_snapshot_size_matches(&bm,t->desc.Width,t->desc.Height);
+        if(address_match&&!bb&&bm.w&&bm.h&&azvis_sample_buffer(&azvis_size_mismatch_samples,&bm)){
+            log_msg("VISIBLE BACKBUFFER_SIZE_MISMATCH resolveObserved=%llu list=%p recording=%llu target=%p chain=%p chainAttempt=%llu index=%u size=%llux%u snapshotSize=%ux%u snapshotAddressOnly=1 qpc=%lld",
+                azt_frame,(void *)cl,s->trace_recording_id,(void *)t->res,(void *)bm.chain,(unsigned long long)bm.generation,bm.index,(unsigned long long)t->desc.Width,t->desc.Height,bm.w,bm.h,azvis_qpc());
+        }
+        if(bb&&s->trace_recording_id&&azvis_sample_buffer(&s->trace_backbuffer_draws,&bm)){
             log_msg("VISIBLE BACKBUFFER_DRAW resolveObserved=%llu list=%p recording=%llu target=%p chain=%p chainAttempt=%llu index=%u size=%llux%u pso=%p ps=%08lx-%08lx-%08lx-%08lx snapshotOnly=1 qpc=%lld",
                 azt_frame,(void *)cl,s->trace_recording_id,(void *)t->res,(void *)bm.chain,(unsigned long long)bm.generation,bm.index,(unsigned long long)t->desc.Width,t->desc.Height,(void *)s->pso,(unsigned long)p->hash[0],(unsigned long)p->hash[1],(unsigned long)p->hash[2],(unsigned long)p->hash[3],azvis_qpc());
         }
+        if(!source_count||(!bb&&(s->has_dsv||p->depth_enabled||instances!=1||(count!=3&&count!=6))))goto done;
         AztRoot *r=azt_root_slot(s->trace_graphics_rs,0);
         int matched=0;unsigned scanned=0;
         if(r)for(UINT i=0;i<r->count&&!matched&&scanned<256;++i)for(UINT k=0;k<r->ranges[i].count&&!matched&&scanned<256;++k){
@@ -313,9 +319,9 @@ static void visible_trace_draw(ID3D12GraphicsCommandList *cl,ListState *s,UINT c
             AztDesc *d=azt_bound_srv(s,&r->ranges[i],k);
             if(!d||!d->res)continue;
             for(unsigned j=0;j<source_count;++j)if(sources[j]==(uintptr_t)d->res){
-                log_msg("VISIBLE EDGE resolve=%llu kind=draw list=%p recording=%llu src=%p dst=%p size=%llux%u snapshotMatch=%d chain=%p t=%u ps=%08lx-%08lx-%08lx-%08lx boundOnly=1 qpc=%lld",
-                    resolves[j],(void *)cl,s->trace_recording_id,(void *)d->res,(void *)t->res,(unsigned long long)t->desc.Width,t->desc.Height,bb,(void *)bm.chain,r->ranges[i].reg+k,
-                    (unsigned long)p->hash[0],(unsigned long)p->hash[1],(unsigned long)p->hash[2],(unsigned long)p->hash[3],azvis_qpc());
+                log_msg("VISIBLE EDGE resolve=%llu kind=draw list=%p recording=%llu src=%p dst=%p size=%llux%u snapshotMatch=%d chain=%p t=%u ps=%08lx-%08lx-%08lx-%08lx boundOnly=1 qpc=%lld snapshotAddressMatch=%d",
+                    resolves[j],(void *)cl,s->trace_recording_id,(void *)d->res,(void *)t->res,(unsigned long long)t->desc.Width,t->desc.Height,bb,bb?(void *)bm.chain:NULL,r->ranges[i].reg+k,
+                    (unsigned long)p->hash[0],(unsigned long)p->hash[1],(unsigned long)p->hash[2],(unsigned long)p->hash[3],azvis_qpc(),address_match);
                 edge_logged=1;
                 matched=1;break;
             }

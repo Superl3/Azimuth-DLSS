@@ -111,15 +111,37 @@ function Get-AutomaticCapture([string]$Content, [int]$RequestedResolve) {
         [pscustomobject]@{ id = [int]$id; reason = $end.Groups[1].Value; resolves = [int]$end.Groups[2].Value }
     }
 }
-# Markers are necessary for automatic shutdown, not a verdict about
-# visible rendering. Native fallback/partial RAW evidence is still useful.
-function Get-AutoCompletion([string]$Content, [int]$RequestedResolve) {
-    if(!$Content){return}
-    $capture=Get-AutomaticCapture $Content $RequestedResolve
-    if(!$capture){return}
-    if($Preview -and $Content -notmatch '(?m)^PREVIEW COMPLETE '){return}
-    if($VisibleSR -and $Content -notmatch '(?m)^VISIBLE TRIAL_END '){return}
-    $capture
+# Keep only the completion state and a partial line between polls. Limit
+# each poll so sustained log writes cannot delay the timeout check.
+function Read-AutoCompletion([IO.StreamReader]$Reader, [char[]]$Buffer, [hashtable]$Progress, [int]$RequestedResolve) {
+    $markerPattern = '(?m)^(?:DEBUG AUTO_BEGIN |DEBUG END |PREVIEW COMPLETE |VISIBLE TRIAL_END )[^\r\n]*(?=\r?\n)'
+    for ($i = 0; $i -lt 64; $i++) {
+        $count = $Reader.ReadBlock($Buffer, 0, $Buffer.Length)
+        if (!$count) { break }
+        $text = $Progress.PartialLine + [string]::new($Buffer, 0, $count)
+        $tail = $text.Substring($text.LastIndexOf([char]10) + 1)
+        # Native log lines are limited to 1024 bytes. Keep an oversized
+        # fragment ineligible for a start-of-line match on the next poll.
+        $Progress.PartialLine = if ($tail.Length -le 1024) { $tail } else { '!' }
+        foreach ($marker in [regex]::Matches($text, $markerPattern)) {
+            $line = $marker.Value
+            if (!$Progress.Id -and $line -match "^DEBUG AUTO_BEGIN id=(\d+) requestedResolve=$RequestedResolve$") {
+                $Progress.Id = $Matches[1]
+            } elseif ($Progress.Id -and !$Progress.Capture -and $line -match "^DEBUG END id=$($Progress.Id) reason=(\w+) resolves=(\d+) lastResolve=\d+$") {
+                $Progress.Capture = [pscustomobject]@{ id = [int]$Progress.Id; reason = $Matches[1]; resolves = [int]$Matches[2] }
+            } elseif ($line.StartsWith('PREVIEW COMPLETE ', [StringComparison]::Ordinal)) {
+                $Progress.PreviewComplete = $true
+            } elseif ($line.StartsWith('VISIBLE TRIAL_END ', [StringComparison]::Ordinal)) {
+                $Progress.VisibleComplete = $true
+            }
+        }
+        # Markers allow normal shutdown, including when the completed
+        # capture reports native fallback or only partial RAW evidence.
+        if ($Progress.Capture -and (!$Preview -or $Progress.PreviewComplete) -and (!$VisibleSR -or $Progress.VisibleComplete)) {
+            return $Progress.Capture
+        }
+        if ($count -lt $Buffer.Length) { break }
+    }
 }
 try {
     if (!$CollectOnly) {
@@ -200,7 +222,7 @@ try {
             Write-Host 'Enter real gameplay. Press F8 once while driving. Preview ignores early input before fresh scene readiness and all further F8 inputs after acceptance.'
         }
         if($Preview){
-            if($VisibleSR){Write-Warning 'Visible SR SDR alpha: after capture start, up to $VisibleSeconds seconds of gated native final-target replacement. Native HUD pixels retained; SDR only: explicitly disable HDR in the game. No swapchain references are retained; actual Present needs external ETW or screen evidence.'}
+            if($VisibleSR){Write-Warning "Visible SR SDR alpha: after capture start, up to $VisibleSeconds seconds of gated native final-target replacement. Native HUD pixels retained; SDR only: explicitly disable HDR in the game. No swapchain references are retained; actual Present needs external ETW or screen evidence."}
             else{Write-Host 'Preview captures offscreen SR and selected GPU textures; no visible SR replacement.'}
             if($PreviewJitter){Write-Warning 'Experimental viewport jitter can affect the displayed native fallback scene.'}
         }
@@ -213,15 +235,24 @@ try {
             $timer = [Diagnostics.Stopwatch]::StartNew()
             $finished = $null
             $postRollStart = $null
-            while (!$proc.WaitForExit(250) -and $timer.Elapsed.TotalSeconds -lt $WaitSeconds) {
-                if($null -ne $postRollStart){
-                    if($timer.Elapsed.TotalSeconds-$postRollStart -ge $(if($AutoTest){$PostRollSeconds}else{0})){break}
-                    continue
-                }
-                $item = Get-Item -LiteralPath $log -ErrorAction SilentlyContinue
-                if ($item -and $item.LastWriteTimeUtc -ge $started.AddSeconds(-2) -and $item.LastWriteTimeUtc -ne $previous) {
-                    $live = Get-Content -LiteralPath $log -Raw -ErrorAction SilentlyContinue
-                    $finished = Get-AutoCompletion $live $AutoResolve
+            $reader = $null
+            $buffer = [char[]]::new(65536)
+            $progress = @{ PartialLine = ''; Id = $null; Capture = $null; PreviewComplete = $false; VisibleComplete = $false }
+            try {
+                while (!$proc.WaitForExit(250) -and $timer.Elapsed.TotalSeconds -lt $WaitSeconds) {
+                    if($null -ne $postRollStart){
+                        if($timer.Elapsed.TotalSeconds-$postRollStart -ge $PostRollSeconds){break}
+                        continue
+                    }
+                    if (!$reader) {
+                        $item = Get-Item -LiteralPath $log -ErrorAction SilentlyContinue
+                        if (!$item -or $item.LastWriteTimeUtc -lt $started.AddSeconds(-2) -or $item.LastWriteTimeUtc -eq $previous) { continue }
+                        try {
+                            $stream = [IO.File]::Open($log, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+                            $reader = [IO.StreamReader]::new($stream)
+                        } catch [IO.IOException] { continue }
+                    }
+                    $finished = Read-AutoCompletion $reader $buffer $progress $AutoResolve
                     if ($finished) {
                         $automaticCompletionSeen=$true
                         $postRollStart=$timer.Elapsed.TotalSeconds
@@ -229,6 +260,8 @@ try {
                         if(!$AutoTest -or !$PostRollSeconds){break}
                     }
                 }
+            } finally {
+                if ($reader) { $reader.Dispose() }
             }
             if (!$proc.HasExited) {
                 $autoWaitExpired = !$finished -or ($AutoTest -and $null -ne $postRollStart -and $timer.Elapsed.TotalSeconds-$postRollStart -lt $PostRollSeconds)

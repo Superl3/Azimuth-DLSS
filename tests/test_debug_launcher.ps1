@@ -96,7 +96,46 @@ try {
     $autoMeta=Get-Content -LiteralPath (Join-Path $autoContents 'capture.json') -Raw | ConvertFrom-Json
     if(!$autoMeta.auto_test -or !$autoMeta.auto_ready -or !$autoMeta.visible_trial_complete -or $autoMeta.automatic_capture.id -ne 1 -or $autoMeta.automatic_resolve -ne 0 -or $autoMeta.capture_begins -ne 1){throw 'Wrong keyless auto-test metadata.'}
     if($autoMeta.visible_seconds_requested -ne 60 -or $autoMeta.visible_duration_ms_observed -ne 60000){throw 'Wrong requested/observed Visible SR duration metadata.'}
-    'PASS: automatic launcher packaging, failure evidence, bounded preview RAW, and keyless Visible SR completion fixtures'
+
+    $launcherAst = [System.Management.Automation.Language.Parser]::ParseFile($launcher, [ref]$null, [ref]$null)
+    $completion = $launcherAst.Find({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Read-AutoCompletion'
+    }, $false)
+    . ([scriptblock]::Create($completion.Extent.Text))
+    $Preview = $VisibleSR = $true
+    $progress = @{ PartialLine = ''; Id = $null; Capture = $null; PreviewComplete = $false; VisibleComplete = $false }
+    $buffer = [char[]]::new(16)
+    $liveLog = Join-Path $root 'growing.log'
+    $writer = [IO.StreamWriter]::new($liveLog)
+    try {
+        $writer.WriteLine('DEBUG AUTO_BEGIN id=7 requestedResolve=2010')
+        $writer.WriteLine('DEBUG AUTO_BEGIN id=8 requestedResolve=2000')
+        $writer.WriteLine('DEBUG END id=7 reason=resolve_limit resolves=8 lastResolve=2018')
+        $writer.Write('DEBUG END id=8 reason=resolve_limit resolves=8')
+        $writer.Flush()
+        $liveStream = [IO.File]::Open($liveLog, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+        $reader = [IO.StreamReader]::new($liveStream)
+        try {
+            if ((Read-AutoCompletion $reader $buffer $progress 2000) -or $progress.Capture) { throw 'Accepted unrelated or partial debug marker.' }
+            $pastFirstPoll = $liveStream.Position
+            $writer.WriteLine(' lastResolve=2030')
+            $writer.WriteLine('PREVIEW COMPLETE groups=1 saved=1 failed=0 recordedFiles=1')
+            $writer.Write("VISIBLE TRIAL_END resolve=3000 reason=duration_elapsed`r")
+            $writer.Flush()
+            if ((Read-AutoCompletion $reader $buffer $progress 2000) -or $progress.VisibleComplete) { throw 'Accepted trial end before its newline.' }
+            if ($progress.Capture.id -ne 8 -or !$progress.PreviewComplete -or $liveStream.Position -le $pastFirstPoll) { throw 'Previously read capture state was lost.' }
+            $writer.Write("`n")
+            $writer.Flush()
+            $result = Read-AutoCompletion $reader $buffer $progress 2000
+            if ($result.id -ne 8 -or $result.resolves -ne 8 -or !$progress.VisibleComplete) { throw 'Split completion markers were missed.' }
+        } finally {
+            $reader.Dispose()
+        }
+    } finally {
+        $writer.Dispose()
+    }
+    'PASS: automatic launcher packaging, failure evidence, bounded preview RAW, and incremental Visible SR completion fixtures'
 } finally {
     $resolved = (Resolve-Path -LiteralPath $root).Path
     if ((Split-Path -Parent $resolved).TrimEnd('\') -eq $temp.TrimEnd('\') -and
