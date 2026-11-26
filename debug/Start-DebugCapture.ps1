@@ -16,6 +16,8 @@ param(
     [double]$ExposureScale=1,
     [string]$RenderSetting = '',
     [switch]$InstallProxy,
+    [ValidateSet('Auto','Direct','ReShade')][string]$ProxyMode='Auto',
+    [string]$NRLogPath='',
     [switch]$CollectOnly,
     [switch]$ShaderDisasm,
     [switch]$Preview,
@@ -85,7 +87,29 @@ if (!$GameDir) {
 }
 $game = (Resolve-Path -LiteralPath $GameDir).Path
 $exe = Join-Path $game 'azimuth.exe'
-$proxy = Join-Path $game 'dxgi.dll'
+$frontProxy = Join-Path $game 'dxgi.dll'
+$chainProxy = Join-Path $game 'dxgi-dlaa.dll'
+$chainExists = Test-Path -LiteralPath $chainProxy -PathType Leaf
+$frontExists = Test-Path -LiteralPath $frontProxy -PathType Leaf
+$selectedProxyMode = $ProxyMode
+if($ProxyMode -eq 'Auto'){
+    if($chainExists){
+        if(!$frontExists){throw 'Incomplete ReShade chain: dxgi-dlaa.dll exists but dxgi.dll is absent.'}
+        $selectedProxyMode='ReShade'
+    }elseif(!$CollectOnly -and (Test-Path -LiteralPath (Join-Path $game 'ReShade.ini') -PathType Leaf)){
+        throw 'ReShade configuration exists but dxgi-dlaa.dll is absent. Verify chain; explicit Direct is for a deliberate standalone test.'
+    }else{$selectedProxyMode='Direct'}
+}
+if($selectedProxyMode -eq 'ReShade' -and (!$frontExists -or !$chainExists)){throw 'ReShade mode requires both existing dxgi.dll and dxgi-dlaa.dll.'}
+$proxyName = if($selectedProxyMode -eq 'ReShade'){'dxgi-dlaa.dll'}else{'dxgi.dll'}
+$proxy = Join-Path $game $proxyName
+if(!$CollectOnly -and $selectedProxyMode -eq 'ReShade'){
+    foreach($file in @($frontProxy,$chainProxy)){
+        if((Get-Item -LiteralPath $file).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Refusing reparse-point DLL in ReShade chain.'}
+    }
+}
+if($NRLogPath){$NRLogPath=[IO.Path]::GetFullPath($NRLogPath)}
+Write-Host "Proxy mode: $selectedProxyMode; target: $proxyName"
 $log = Join-Path $game 'azimuth_dlaa.log'
 $artifact = Join-Path $PSScriptRoot 'dxgi.dll'
 $bridge = Join-Path $game 'azimuth_ngx.dll'
@@ -129,6 +153,16 @@ $runPid = $null
 function FileHashOrNull([string]$Path) {
     if (Test-Path -LiteralPath $Path -PathType Leaf) { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash }
     return $null
+}
+$frontInitialHash=FileHashOrNull $frontProxy
+$proxyInitialHash=FileHashOrNull $proxy
+$bridgeInitialHash=FileHashOrNull $bridge
+$nrInitialHash=$null
+$nrPackaged=$false
+if($NRLogPath -and (Test-Path -LiteralPath $NRLogPath -PathType Leaf)){
+    $nrFile=Get-Item -LiteralPath $NRLogPath
+    if(($nrFile.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $nrFile.Length -gt 134217728){throw 'NR log must be a regular file <=128 MiB.'}
+    $nrInitialHash=FileHashOrNull $NRLogPath
 }
 function Get-AutomaticCapture([string]$Content, [int]$RequestedResolve) {
     if (!$RequestedResolve -and !$AutoTest) { return }
@@ -198,11 +232,11 @@ try {
         $artifactHash = FileHashOrNull $artifact
         if ($artifactHash -and $artifactHash -ne $currentHash) {
             if (!$InstallProxy) {
-                $reply = Read-Host 'Temporarily install the debug dxgi.dll? Existing proxy will be backed up and restored after exit. [y/N]'
+                $reply = Read-Host "Temporarily install debug proxy $proxyName? Existing proxy will be backed up and restored after exit. [y/N]"
                 if ($reply -notmatch '^[Yy]$') { throw 'Install declined. No game DLL changed.' }
             }
             if ($currentHash) {
-                $backup = Join-Path $dest ($tag + '-original-dxgi.dll')
+                $backup = Join-Path $dest ($tag + '-original-' + $proxyName)
                 Copy-Item -LiteralPath $proxy -Destination $backup
                 if ((FileHashOrNull $backup) -ne $currentHash) { throw 'Original proxy backup verification failed.' }
             }
@@ -211,7 +245,7 @@ try {
             $installed = $true
             if ((FileHashOrNull $proxy) -ne $installedHash) { throw 'Debug proxy copy verification failed.' }
         }
-        if (!(Test-Path -LiteralPath $proxy -PathType Leaf)) { throw 'Install the latest debug dxgi.dll next to azimuth.exe first.' }
+        if (!(Test-Path -LiteralPath $proxy -PathType Leaf)) { throw "Install the latest debug proxy as $proxyName next to azimuth.exe first." }
         $previous = $null
         if (Test-Path -LiteralPath $log -PathType Leaf) {
             $previous = (Get-Item -LiteralPath $log).LastWriteTimeUtc
@@ -340,6 +374,18 @@ try {
     New-Item -ItemType Directory -Path $stage | Out-Null
     $stageCreated = $true
     Copy-Item -LiteralPath $log -Destination (Join-Path $stage 'azimuth_dlaa.log')
+    if($NRLogPath -and (Test-Path -LiteralPath $NRLogPath -PathType Leaf)){
+        $nrFile=Get-Item -LiteralPath $NRLogPath
+        if(!($nrFile.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $nrFile.Length -le 134217728){
+            $nrHash=FileHashOrNull $NRLogPath
+            if($CollectOnly -or $nrHash -ne $nrInitialHash){
+                Copy-Item -LiteralPath $NRLogPath -Destination (Join-Path $stage 'nr-external.log')
+                if((FileHashOrNull (Join-Path $stage 'nr-external.log')) -ne $nrHash){throw 'NR log changed during copy.'}
+                $nrPackaged=$true
+            }
+        }
+        if(!$nrPackaged){Write-Warning 'NR log unchanged, invalid or over budget; not packaged.'}
+    }
     $shaderFiles = @()
     if($ShaderDisasm){
         $rows = [regex]::Matches($content,'(?m)^DEBUG SHADER_DUMP directory=(azimuth_shader_debug_\d+_\d+) file=([pv]s-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{8}){3}\.asm\.txt) bytes=(\d+)\r?$')
@@ -416,7 +462,10 @@ try {
         post_roll_seconds = $(if($AutoTest){$PostRollSeconds}else{0}); producer_wait_ms = $ProducerWaitMs
         automatic_resolve = $AutoResolve; automatic_capture = $autoCapture
         automatic_wait_expired = $autoWaitExpired
-        files_sha256 = [ordered]@{ 'azimuth.exe' = (FileHashOrNull $exe); 'dxgi.dll' = (FileHashOrNull $proxy); 'azimuth_ngx.dll' = (FileHashOrNull $bridge) }
+        proxy_mode=$selectedProxyMode; proxy_target=$proxyName; front_proxy_original_sha256=$frontInitialHash
+        front_proxy_preserved=$(if($selectedProxyMode -eq 'ReShade'){(FileHashOrNull $frontProxy) -eq $frontInitialHash}else{$null})
+        nr_log_packaged=$nrPackaged; nr_log_scope='whole supplied log, may include prior sessions; correlate timestamps'
+        files_sha256 = [ordered]@{ 'azimuth.exe' = (FileHashOrNull $exe); 'dxgi.dll' = (FileHashOrNull $frontProxy); 'dxgi-dlaa.dll' = (FileHashOrNull $chainProxy); 'azimuth_ngx.dll' = (FileHashOrNull $bridge) }
         selected_shader_disassembly = $shaderFiles
         gpu_raw = $previewFiles; preview_complete = [bool]($content -match '(?m)^PREVIEW COMPLETE '); preview_quality = $(if($Preview){$Quality}else{$null}); preview_jitter_requested = [bool]$PreviewJitter; preview_native_replay_requested = [bool]$PreviewReplay; preview_sr_replay_requested = [bool]$PreviewSRReplay; visible_sr_requested = [bool]$VisibleSR; visible_marker_requested = [bool]$VisibleMarker; presentmon_csv_packaged = $presentMonPackaged
         notice = 'Local evidence. Explicit preview includes selected raw game textures. Optional selected shader assembly. No game binaries or saves. Review privately.'
@@ -464,6 +513,18 @@ finally {
         }elseif($bridgeBackup){
             Copy-Item -LiteralPath $bridgeBackup -Destination $bridge -Force
         }else{Remove-Item -LiteralPath $bridge -Force}
+    }
+    if(!$CollectOnly){
+        $restored=[ordered]@{
+            proxy_mode=$selectedProxyMode;proxy_target=$proxyName
+            front_sha256_before=$frontInitialHash;front_sha256_after=(FileHashOrNull $frontProxy)
+            front_preserved=$(if($selectedProxyMode -eq 'ReShade'){(FileHashOrNull $frontProxy) -eq $frontInitialHash}else{$null})
+            proxy_original_sha256=$proxyInitialHash;proxy_after_sha256=(FileHashOrNull $proxy)
+            bridge_original_sha256=$bridgeInitialHash;bridge_after_sha256=(FileHashOrNull $bridge)
+            game_running=[bool](Get-Process -Name azimuth -ErrorAction SilentlyContinue)
+        }
+        $restored | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $dest ($tag+'-restoration.json')) -Encoding UTF8
+        if($selectedProxyMode -eq 'ReShade' -and !$restored.front_preserved){Write-Warning 'Front ReShade DLL changed externally; never overwrite it automatically.'}
     }
     if ($stageCreated -and (Test-Path -LiteralPath $zip -PathType Leaf)) { Remove-Item -LiteralPath $stage -Recurse -Force }
 }
