@@ -104,6 +104,8 @@ def parse_debug(text, output=None):
                 w.update(complete=True,end_reason=reason,observed_resolves=int(n),last_resolve=int(last))
                 if current is w: current=None
             continue
+        if line.startswith("PREVIEW AUTO_READY ") and current is not None:
+            current["auto_scene_ready"]=dict(re.findall(r"(\w+)=([^\s]+)",line))
         if line.startswith("DEBUG QUEUE_CREATE "): startup["queues"].append(line)
         elif line.startswith("FG SWAPCHAIN "): startup["swapchains"].append(line)
         elif line.startswith("FG BACKBUFFER "): startup["backbuffers"].append(line)

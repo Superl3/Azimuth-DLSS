@@ -613,3 +613,31 @@ rendering gate. Readiness is observational, not a gameplay classifier,
 GPU completion, or proof of actual Present. A title/garage/menu can
 render the same scene chain; the external runner can use the file
 gate to select real gameplay if this matters.
+
+
+Use the full artifact and run the noninteractive preset (game settings
+must already match the intended monitor/render/HDR settings):
+
+    Start-DebugCapture.cmd -GameDir "F:\Games\Azimuth" -InstallProxy -AutoTest -VisibleSR -Output 1920x1080
+    Start-DebugCapture.cmd -GameDir "F:\Games\Azimuth" -InstallProxy -AutoTest -Output 3840x1600
+
+-AutoTest implies Preview, PreviewPostFx, PreviewReplay, PreviewSRReplay,
+PreviewJitter, ShaderDisasm and ExitAfterCapture for a new launch.
+-VisibleSR remains explicit SDR-only. The default label/render label
+are filled without Read-Host. Pass -WaitSeconds 300 if loading is slow.
+No forced termination: on complete DEBUG END + PREVIEW COMPLETE and
+(for VisibleSR) VISIBLE TRIAL_END, keep a two-second native post-roll
+then request normal window close. The total timeout preserves partial
+fresh evidence after normal exit, without treating timeout as success.
+The trial result and display proof are separate from capture completion.
+-ReadyFile optionally waits for a nonexisting path in an existing
+directory. A runner that verifies real gameplay can create this file
+from another process, with no F8 or focus-dependent hotkey.
+For example, pass -ReadyFile "C:\Temp\fh2-unique-ready.flag" and have
+the runner create that file only after entering driving. Use a fresh
+path per launch. -AutoResolve optionally sets a minimum resolve;
+-AutoWarmupMs adjusts the stable scene warmup. The launcher does not
+navigate game menus or automate throttle/steering. The runner can do
+those separately and record video/PresentMon as before. A supplied
+-PresentMonCsv is copied after game exit if present; the external
+runner is responsible for ensuring the CSV has flushed.

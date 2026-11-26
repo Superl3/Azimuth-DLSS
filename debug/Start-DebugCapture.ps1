@@ -13,6 +13,10 @@ param(
     [switch]$PreviewReplay,
     [switch]$PreviewSRReplay,
     [switch]$VisibleSR,
+    [switch]$AutoTest,
+    [ValidateRange(500,15000)][int]$AutoWarmupMs = 2000,
+    [string]$ReadyFile = '',
+    [ValidateRange(0,10)][int]$PostRollSeconds = 2,
     [string]$PresentMonCsv,
     [ValidateSet('quality','balanced','performance')][string]$Quality = 'quality',
     [ValidateRange(0, 1000000)][int]$AutoResolve = 0,
@@ -21,13 +25,32 @@ param(
     [string]$Destination = (Join-Path $PSScriptRoot 'debug-captures')
 )
 $ErrorActionPreference = 'Stop'
+# Explicit automatic test preset: no debug hotkeys, no install prompts.
+# The caller controls actual game/monitor settings and any game menus.
+if($AutoTest){
+    if(!$Output -or $Output -notin @('1920x1080','3840x1600')){throw '-AutoTest requires -Output 1920x1080 or 3840x1600.'}
+    if(!$CollectOnly -and !$InstallProxy){throw '-AutoTest requires explicit -InstallProxy consent for temporary DLL installation.'}
+    $Preview=$true; $PreviewPostFx=$true; $PreviewReplay=$true; $PreviewSRReplay=$true
+    $PreviewJitter=$true; $ShaderDisasm=$true
+    if(!$CollectOnly){$ExitAfterCapture=$true}
+    if(!$Label){$Label='FH2-auto-'+$Output}
+    if(!$RenderSetting){$RenderSetting=$(if($Output -eq '1920x1080'){'1280x720 expected (verify measured size)'}else{'2592x1080 expected (verify measured size)'})}
+    if(!$GameDir -and !(Test-Path -LiteralPath (Join-Path $PSScriptRoot 'azimuth.exe') -PathType Leaf)){throw '-AutoTest requires -GameDir when launched outside the game folder.'}
+}
+if($ReadyFile -and (!$AutoTest -or $CollectOnly)){throw '-ReadyFile requires a new -AutoTest launch.'}
+if($ReadyFile){
+    $ReadyFile=[IO.Path]::GetFullPath($ReadyFile)
+    if($ReadyFile.Length -ge 260 -or (Test-Path -LiteralPath $ReadyFile) -or !(Test-Path -LiteralPath (Split-Path -Parent $ReadyFile) -PathType Container)){
+        throw '-ReadyFile must be a new, absent file in an existing directory (path under 260 characters).'
+    }
+}
 if(($PreviewPostFx -or $PreviewJitter -or $PreviewReplay) -and !$Preview){throw 'Preview options require -Preview.'}
 if($VisibleSR -and (!$PreviewSRReplay -or !$PreviewJitter)){throw '-VisibleSR requires -PreviewSRReplay and -PreviewJitter.'}
-if($VisibleSR -and $ExitAfterCapture){throw '-VisibleSR is a ten-second trial after F8; do not use -ExitAfterCapture.'}
+if($VisibleSR -and $ExitAfterCapture -and !$AutoTest){throw 'For automatic VisibleSR shutdown use -AutoTest; otherwise omit -ExitAfterCapture.'}
 if($PreviewSRReplay -and !$PreviewReplay){throw '-PreviewSRReplay requires -PreviewReplay.'}
 if($PreviewReplay -and !$PreviewPostFx){throw '-PreviewReplay requires -PreviewPostFx.'}
-if ($ExitAfterCapture -and (!$AutoResolve -or $CollectOnly)) {
-    throw '-ExitAfterCapture requires -AutoResolve and a new game launch.'
+if ($ExitAfterCapture -and ((!$AutoResolve -and !$AutoTest) -or $CollectOnly)) {
+    throw '-ExitAfterCapture requires -AutoResolve or -AutoTest and a new game launch.'
 }
 if (!$GameDir) {
     if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'azimuth.exe') -PathType Leaf) { $GameDir = $PSScriptRoot }
@@ -65,12 +88,15 @@ $oldEnv = @{}
 $stageCreated = $false
 $exitCode = $null
 $autoWaitExpired = $false
+$automaticCompletionSeen = $false
+$automaticCloseRequested = $false
+$runPid = $null
 function FileHashOrNull([string]$Path) {
     if (Test-Path -LiteralPath $Path -PathType Leaf) { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash }
     return $null
 }
 function Get-AutomaticCapture([string]$Content, [int]$RequestedResolve) {
-    if (!$RequestedResolve) { return }
+    if (!$RequestedResolve -and !$AutoTest) { return }
     $begin = [regex]::Match($Content, "(?m)^DEBUG AUTO_BEGIN id=(\d+) requestedResolve=$RequestedResolve\r?$")
     if (!$begin.Success) { return }
     $id = $begin.Groups[1].Value
@@ -78,6 +104,16 @@ function Get-AutomaticCapture([string]$Content, [int]$RequestedResolve) {
     if ($end.Success) {
         [pscustomobject]@{ id = [int]$id; reason = $end.Groups[1].Value; resolves = [int]$end.Groups[2].Value }
     }
+}
+# Markers are necessary for automatic shutdown, not a verdict about
+# visible rendering. Native fallback/partial RAW evidence is still useful.
+function Get-AutoCompletion([string]$Content, [int]$RequestedResolve) {
+    if(!$Content){return}
+    $capture=Get-AutomaticCapture $Content $RequestedResolve
+    if(!$capture){return}
+    if($Preview -and $Content -notmatch '(?m)^PREVIEW COMPLETE '){return}
+    if($VisibleSR -and $Content -notmatch '(?m)^VISIBLE TRIAL_END '){return}
+    $capture
 }
 try {
     if (!$CollectOnly) {
@@ -124,7 +160,7 @@ try {
             $previous = (Get-Item -LiteralPath $log).LastWriteTimeUtc
             Copy-Item -LiteralPath $log -Destination (Join-Path $dest ($tag + '-previous.log'))
         }
-        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM','AZIMUTH_DEBUG_AUTO_RESOLVE','AZIMUTH_SR_OUTPUT','AZIMUTH_SR_QUALITY','AZIMUTH_DEBUG_PREVIEW_POSTFX','AZIMUTH_DEBUG_PREVIEW_JITTER','AZIMUTH_DEBUG_POSTFX_REPLAY','AZIMUTH_DEBUG_SR_REPLAY','AZIMUTH_DEBUG_VISIBLE_SR','AZIMUTH_DEBUG_QUEUE_TRACE')) {
+        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM','AZIMUTH_DEBUG_AUTO_RESOLVE','AZIMUTH_DEBUG_AUTO_TEST','AZIMUTH_DEBUG_AUTO_WARMUP_MS','AZIMUTH_DEBUG_AUTO_READY_FILE','AZIMUTH_SR_OUTPUT','AZIMUTH_SR_QUALITY','AZIMUTH_DEBUG_PREVIEW_POSTFX','AZIMUTH_DEBUG_PREVIEW_JITTER','AZIMUTH_DEBUG_POSTFX_REPLAY','AZIMUTH_DEBUG_SR_REPLAY','AZIMUTH_DEBUG_VISIBLE_SR','AZIMUTH_DEBUG_QUEUE_TRACE')) {
             $oldEnv[$key] = [Environment]::GetEnvironmentVariable($key,'Process')
         }
         [Environment]::SetEnvironmentVariable('AZIMUTH_SR_MODE',$(if($Preview){'preview'}else{'debug'}),'Process')
@@ -141,14 +177,21 @@ try {
         [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_RENDERDOC','0','Process')
         [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_SHADER_DISASM',$(if($ShaderDisasm){'1'}else{'0'}),'Process')
         [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_AUTO_RESOLVE',[string]$AutoResolve,'Process')
+        [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_AUTO_TEST',$(if($AutoTest){'1'}else{'0'}),'Process')
+        [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_AUTO_WARMUP_MS',[string]$AutoWarmupMs,'Process')
+        [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_AUTO_READY_FILE',$(if($ReadyFile){$ReadyFile}else{$null}),'Process')
         if($ShaderDisasm){Write-Host 'Selected shader assembly is included in the ZIP; review before sharing privately.'}
-        if ($AutoResolve) {
+        if ($AutoTest) {
+            Write-Host "Automatic test: no F8. Stable native scene + fresh SR for $AutoWarmupMs ms; minimum resolve $AutoResolve."
+            if($ReadyFile){Write-Host "After navigating to gameplay, create this ready file: $ReadyFile"}
+            Write-Host 'The game must reach the correct scene; this launcher does not navigate menus or drive the car.'
+        } elseif ($AutoResolve) {
             Write-Host "Enter real gameplay before resolve $AutoResolve. The trace starts automatically."
         } else {
             Write-Host 'Enter real gameplay. Press F8 once while driving. Preview ignores early input before fresh scene readiness and all further F8 inputs after acceptance.'
         }
         if($Preview){
-            if($VisibleSR){Write-Warning 'Visible SR SDR alpha: after F8, up to ten seconds of gated native final-target replacement. Native HUD pixels retained; SDR only: explicitly disable HDR in the game. No swapchain references are retained; actual Present needs external ETW or screen evidence.'}
+            if($VisibleSR){Write-Warning 'Visible SR SDR alpha: after capture start, up to ten seconds of gated native final-target replacement. Native HUD pixels retained; SDR only: explicitly disable HDR in the game. No swapchain references are retained; actual Present needs external ETW or screen evidence.'}
             else{Write-Host 'Preview captures offscreen SR and selected GPU textures; no visible SR replacement.'}
             if($PreviewJitter){Write-Warning 'Experimental viewport jitter can affect the displayed native fallback scene.'}
         }
@@ -156,27 +199,40 @@ try {
         $started = [DateTime]::UtcNow
         if ($ExitAfterCapture) {
             $proc = Start-Process -FilePath $exe -WorkingDirectory $game -PassThru
+            $runPid=$proc.Id
+            Write-Host "Azimuth PID=$runPid"
             $timer = [Diagnostics.Stopwatch]::StartNew()
             $finished = $null
+            $postRollStart = $null
             while (!$proc.WaitForExit(250) -and $timer.Elapsed.TotalSeconds -lt $WaitSeconds) {
+                if($null -ne $postRollStart){
+                    if($timer.Elapsed.TotalSeconds-$postRollStart -ge $(if($AutoTest){$PostRollSeconds}else{0})){break}
+                    continue
+                }
                 $item = Get-Item -LiteralPath $log -ErrorAction SilentlyContinue
                 if ($item -and $item.LastWriteTimeUtc -ge $started.AddSeconds(-2) -and $item.LastWriteTimeUtc -ne $previous) {
                     $live = Get-Content -LiteralPath $log -Raw -ErrorAction SilentlyContinue
-                    if ($live) { $finished = Get-AutomaticCapture $live $AutoResolve }
-                    if ($Preview -and $live -notmatch '(?m)^PREVIEW COMPLETE '){$finished=$null}
-                    if ($finished) { break }
+                    $finished = Get-AutoCompletion $live $AutoResolve
+                    if ($finished) {
+                        $automaticCompletionSeen=$true
+                        $postRollStart=$timer.Elapsed.TotalSeconds
+                        Write-Host 'Capture completion markers observed; keeping the native post-roll before normal exit.'
+                        if(!$AutoTest -or !$PostRollSeconds){break}
+                    }
                 }
             }
             if (!$proc.HasExited) {
-                $autoWaitExpired = !$finished
+                $autoWaitExpired = !$finished -or ($AutoTest -and $null -ne $postRollStart -and $timer.Elapsed.TotalSeconds-$postRollStart -lt $PostRollSeconds)
+                $automaticCloseRequested=$true
                 $null = $proc.CloseMainWindow()
                 if (!$proc.WaitForExit(15000)) {
-                    throw 'Azimuth did not close normally. Close it and rerun with -CollectOnly to package the log.'
+                    throw 'Azimuth did not close normally. No force kill or DLL restore while running. Close it and rerun with -CollectOnly to package the log.'
                 }
             }
         } else {
             $proc = Start-Process -FilePath $exe -WorkingDirectory $game -PassThru -Wait
         }
+        $runPid=$proc.Id
         $exitCode = $proc.ExitCode
         if (Get-Process -Name azimuth -ErrorAction SilentlyContinue) { throw 'Azimuth child is still running; exit and run with -CollectOnly.' }
         if (!(Test-Path -LiteralPath $log -PathType Leaf)) { throw 'No trace log produced.' }
@@ -185,7 +241,10 @@ try {
     }
     if (!(Test-Path -LiteralPath $log -PathType Leaf)) { throw 'No azimuth_dlaa.log found.' }
     $content = Get-Content -LiteralPath $log -Raw
-    if ($content -notmatch 'DEBUG READY:') { throw 'This log is not from the F8 debug build. Check the installed DLL and launch mode.' }
+    if ($content -notmatch 'DEBUG READY:') {
+        if(!$AutoTest){throw 'This log is not from the debug build. Check the installed DLL and launch mode.'}
+        Write-Warning 'Startup ended before DEBUG READY; preserving the fresh partial log.'
+    }
     $begins = [regex]::Matches($content,'(?m)^DEBUG BEGIN ').Count
     $ends = [regex]::Matches($content,'(?m)^DEBUG END ').Count
     $autoCapture = Get-AutomaticCapture $content $AutoResolve
@@ -226,7 +285,7 @@ try {
     }
     $previewFiles=@()
     if($Preview){
-        if($content -notmatch 'SR PREVIEW:'){throw 'Log is not from preview mode.'}
+        if($content -notmatch 'SR PREVIEW:' -and !$AutoTest){throw 'Log is not from preview mode.'}
         $total=0L
         $rawRows=[regex]::Matches($content,'(?m)^PREVIEW FILE directory=(azimuth_preview_\d+_\d+) file=(f\d+-(?:color|depth|mv|sr|preoverlay|composite|final|replay|srpostfx|visiblehud|visiblefinal|hdrscene|hudprobe|finalprobe)-(\d+)x(\d+)-fmt(\d+)\.raw) bytes=(\d+)\r?$')
         foreach($row in $rawRows){
@@ -252,7 +311,14 @@ try {
     $meta = [ordered]@{
         label = $Label; expected_output = $Output; actual_render_setting_label = $RenderSetting
         utc = [DateTime]::UtcNow.ToString('o'); mode = $(if($Preview){'preview'}else{'debug'}); collect_only = [bool]$CollectOnly
-        process_exit_code = $exitCode; f8_begins = $begins; f8_ends = $ends
+        process_exit_code = $exitCode; process_id = $runPid; f8_begins = $begins; f8_ends = $ends
+        capture_begins = $begins; capture_ends = $ends; auto_test = [bool]$AutoTest
+        auto_warmup_ms = $(if($AutoTest){$AutoWarmupMs}else{$null}); auto_gate_requested = [bool]$ReadyFile
+        auto_gate_open = [bool]($content -match '(?m)^PREVIEW AUTO_GATE_OPEN ')
+        auto_ready = [bool]($content -match '(?m)^PREVIEW AUTO_READY ')
+        visible_trial_complete = [bool]($content -match '(?m)^VISIBLE TRIAL_END ')
+        automatic_completion_seen = $automaticCompletionSeen; automatic_close_requested = $automaticCloseRequested
+        post_roll_seconds = $(if($AutoTest){$PostRollSeconds}else{0})
         automatic_resolve = $AutoResolve; automatic_capture = $autoCapture
         automatic_wait_expired = $autoWaitExpired
         files_sha256 = [ordered]@{ 'azimuth.exe' = (FileHashOrNull $exe); 'dxgi.dll' = (FileHashOrNull $proxy); 'azimuth_ngx.dll' = (FileHashOrNull $bridge) }
@@ -277,10 +343,10 @@ try {
     if (!(Test-Path -LiteralPath $zip -PathType Leaf)) { throw 'Capture ZIP not created.' }
     Write-Host "Local evidence: $zip"
     if($Preview -and ($content -notmatch '(?m)^PREVIEW COMPLETE ' -or !$previewFiles.Count)){throw 'Preview did not collect GPU textures successfully. Review the saved evidence.'}
-    if ($AutoResolve -and ($autoCapture.reason -ne 'resolve_limit' -or $autoWaitExpired -or ($null -ne $exitCode -and $exitCode -ne 0))) {
+    if (($AutoResolve -or $AutoTest) -and ($autoCapture.reason -ne 'resolve_limit' -or $autoWaitExpired -or ($VisibleSR -and $content -notmatch '(?m)^VISIBLE TRIAL_END ') -or ($null -ne $exitCode -and $exitCode -ne 0))) {
         throw 'Automatic capture did not finish successfully. Review the saved evidence.'
     }
-    if ($begins -eq 0) { Write-Warning 'No F8 capture found. Enter actual gameplay and press F8 in the next run.' }
+    if ($begins -eq 0) { Write-Warning 'No capture began. Inspect scene readiness, optional gate, and game startup evidence.' }
     elseif ($begins -ne $ends) { Write-Warning 'One or more capture windows were interrupted.' }
     Write-Host 'Review the ZIP before sharing it. Save RenderDoc .rdc files separately and share privately only.'
 }

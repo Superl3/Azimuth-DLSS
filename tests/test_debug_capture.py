@@ -40,6 +40,18 @@ DEBUG TRUNCATED id=2 section=aux
         self.assertTrue(b["truncation"])
         self.assertEqual(data["renderdoc_observations"][0]["nearest_capture_id"],1)
         self.assertEqual(summarize(text,"3840x2160")["debug_capture"]["capture_count"],2)
+    def test_keyless_auto_scene(self):
+        result=parse_debug("""DEBUG READY: fixture
+PREVIEW AUTO_CONFIG minimumResolve=0 warmupMs=2000 gateRequired=0 keys=disabled
+DEBUG BEGIN id=1 firstResolveAfter=2001 limit=8 timeoutMs=8000
+DEBUG AUTO_BEGIN id=1 requestedResolve=0
+PREVIEW AUTO_READY resolve=2001 chains=120 stableMs=2010 gateOpen=1 qpc=101
+DEBUG END id=1 reason=resolve_limit resolves=8 lastResolve=2010
+""")["captures"][0]
+        self.assertEqual(result["trigger"],"automatic")
+        self.assertEqual(result["requested_resolve"],0)
+        self.assertEqual(result["auto_scene_ready"]["chains"],"120")
+        self.assertTrue(result["complete"])
     def test_visible_identity_only(self):
         text="""VISIBLE SWAPCHAIN_REQUEST attempt=1 hwnd=AB qpc=1
 VISIBLE SWAPCHAIN_RESULT attempt=1 hwnd=AB hr=00000000 chain=AA qpc=2
