@@ -18,5 +18,14 @@ class Guides(unittest.TestCase):
             self.assertEqual(g["stencil_groups"][1]["mean_mv_magnitude_px_default_scale"],2)
             self.assertEqual(g["candidate_cb_rows"]["adaptive_exposure"],[5,6,7,8])
             self.assertFalse(g["engine_semantics_verified"])
+    def test_reject_cross_session_collision(self):
+        with tempfile.TemporaryDirectory() as root:
+            p=pathlib.Path(root)
+            for name in ("a","b"):
+                (p/name).mkdir()
+                (p/name/"f1-depth-1x1-fmt39.raw").write_bytes(struct.pack("<f",1))
+            with self.assertRaisesRegex(ValueError,"duplicate"):
+                analyze(p)
+
 if __name__=="__main__":
     unittest.main()

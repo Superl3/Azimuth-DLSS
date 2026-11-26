@@ -36,7 +36,7 @@ static void visible_init(void){
     azvis_enabled=azrp_enabled&&azrp_sr_enabled&&requested;
     char hud[16]={0};DWORD hn=GetEnvironmentVariableA("AZIMUTH_SR_HUD",hud,sizeof(hud));
     azvis_hud_delta=hn==5&&!strcmp(hud,"delta");
-    if(hn&&strcmp(hud,"native")&&!azvis_hud_delta){azvis_enabled=0;log_msg("VISIBLE HUD_INVALID nativeFallback=1");}
+    if(hn&&!(hn==6&&!strcmp(hud,"native"))&&!azvis_hud_delta){azvis_enabled=0;log_msg("VISIBLE HUD_INVALID nativeFallback=1");}
     if(azvis_hud_delta)log_msg("VISIBLE HUD_CONFIG mode=delta alpha=lower_bound_estimate nativeResolutionUI=0 experimental=1");
     UINT seconds=0;
     if(azt_env_uint("AZIMUTH_DEBUG_VISIBLE_SECONDS",&seconds))azvis_ms=azvis_duration_ms(seconds);

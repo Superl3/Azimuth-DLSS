@@ -25,6 +25,8 @@ def analyze(folder):
         m = NAME.fullmatch(path.name)
         if m:
             frame, name, w, h, fmt = m.groups()
+            if name in groups[int(frame)]:
+                raise ValueError(f"duplicate {name} for resolve {frame}; analyze each session separately")
             groups[int(frame)][name] = (path, int(w), int(h), int(fmt))
     report = []
     for frame, g in sorted(groups.items()):
@@ -52,7 +54,7 @@ def analyze(folder):
             dep = g.get("depth")
             motion = values(mv[0],"<ee",w*h) if mv and mv[1:]==(w,h,34) else None
             depth = values(dep[0],"<f",w*h) if dep and dep[1:3]==(w,h) and dep[3] in (39,40,41) else None
-            counts = collections.defaultdict(lambda: {"pixels":0,"invalid_reprojection":0,"mv_finite":0,"mv_mag_sum_px":0.0,"depth_finite":0,"depth_min":1.0,"depth_max":0.0})
+            counts = collections.defaultdict(lambda: {"pixels":0,"invalid_reprojection":0,"mv_finite":0,"mv_mag_sum_px":0.0,"depth_finite":0,"depth_min":math.inf,"depth_max":-math.inf})
             bad = 0
             for (s,) in values(p,"<f",w*h):
                 m = next(motion) if motion is not None else None

@@ -438,6 +438,7 @@ int dlss_run(ID3D12GraphicsCommandList *cl, ID3D12Resource *color, D3D12_RESOURC
             if(sr_fixed_render.w&&!azsr_equal(sr_fixed_render,f.motion)){
                 static int mismatch_logged;
                 if(!mismatch_logged++){log_msg("SR PROFILE_MISMATCH requested=%ux%u measured=%ux%u native=1",sr_fixed_render.w,sr_fixed_render.h,f.motion.w,f.motion.h);}
+                if(sr_armed){sr_blocked=1;dlss_sr_play_disable("render_dimensions_changed");}
                 return 0;
             }
             w = f.motion.w; h = f.motion.h; ow = sr_output.w; oh = sr_output.h;

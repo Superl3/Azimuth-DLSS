@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <limits.h>
+#include <stdint.h>
 
 #include "game_profile.h"
 #include "common.h"
@@ -248,7 +249,7 @@ static void azguide_build(const GameProfile *profile,const D3D12_GRAPHICS_PIPELI
         if(!b)break;
         d.PS.pShaderBytecode=ID3D10Blob_GetBufferPointer(b);d.PS.BytecodeLength=ID3D10Blob_GetBufferSize(b);
         HRESULT hr=real_CreateGraphicsPipelineState(g_device,&d,&IID_ID3D12PipelineState,(void **)&out[k]);
-        ID3D10Blob_Release(b);if(FAILED(hr)||!out[k])break;
+        ID3D10Blob_Release(b);if(FAILED(hr)||!out[k]){if(out[k])ID3D12PipelineState_Release(out[k]);out[k]=NULL;break;}
     }
     if(out[0]&&out[1]){
         AcquireSRWLockExclusive(&pso_lock);
