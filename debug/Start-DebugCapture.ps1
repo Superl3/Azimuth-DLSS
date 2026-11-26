@@ -18,6 +18,8 @@ param(
     [switch]$InstallProxy,
     [ValidateSet('Auto','Direct','ReShade')][string]$ProxyMode='Auto',
     [string]$NRLogPath='',
+    [string]$RenderConfigPath='',
+    [ValidateRange(0,4320)][int]$RenderHeight=0,
     [switch]$CollectOnly,
     [switch]$ShaderDisasm,
     [switch]$Preview,
@@ -109,6 +111,14 @@ if(!$CollectOnly -and $selectedProxyMode -eq 'ReShade'){
     }
 }
 if($NRLogPath){$NRLogPath=[IO.Path]::GetFullPath($NRLogPath)}
+if([bool]$RenderConfigPath -ne [bool]$RenderHeight){throw '-RenderConfigPath and -RenderHeight must be supplied together.'}
+if($RenderConfigPath){
+    if($CollectOnly -or !$InstallProxy -or $RenderHeight -lt 720){throw 'Render config editing requires new launch, -InstallProxy and height 720..4320.'}
+    $RenderConfigPath=(Resolve-Path -LiteralPath $RenderConfigPath).Path
+    $fi=Get-Item -LiteralPath $RenderConfigPath
+    if($fi.PSIsContainer -or $fi.Length -gt 1048576 -or ($fi.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Render config must be a regular file <=1 MiB.'}
+    if($RenderConfigPath -in @($frontProxy,$chainProxy,$exe,(Join-Path $game 'azimuth_ngx.dll'),(Join-Path $game 'azimuth_sr.ini'),(Join-Path $game 'nvngx_dlss.dll'))){throw 'Render config must be a separate per-game settings file.'}
+}
 Write-Host "Proxy mode: $selectedProxyMode; target: $proxyName"
 $log = Join-Path $game 'azimuth_dlaa.log'
 $artifact = Join-Path $PSScriptRoot 'dxgi.dll'
@@ -159,10 +169,29 @@ $proxyInitialHash=FileHashOrNull $proxy
 $bridgeInitialHash=FileHashOrNull $bridge
 $nrInitialHash=$null
 $nrPackaged=$false
+$configBackup=$null
+$configOriginalHash=$null
+$configInstalledHash=$null
+$configInstalled=$false
+$configOriginalHeight=$null
 if($NRLogPath -and (Test-Path -LiteralPath $NRLogPath -PathType Leaf)){
     $nrFile=Get-Item -LiteralPath $NRLogPath
     if(($nrFile.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $nrFile.Length -gt 134217728){throw 'NR log must be a regular file <=128 MiB.'}
     $nrInitialHash=FileHashOrNull $NRLogPath
+}
+# Only edit a single explicit decimal resolution= entry. Preserve all other
+# UTF-8 bytes (including BOM/CRLF); never guess XML or a binary format.
+function Get-RenderConfigEdit([byte[]]$Bytes,[int]$Height){
+    if($Height -lt 720 -or $Height -gt 4320 -or $Bytes.Length -gt 1048576){throw 'Invalid render height or config size.'}
+    $utf8=[Text.UTF8Encoding]::new($false,$true)
+    $source=$utf8.GetString($Bytes)
+    if($source.Contains([char]0)){throw 'Binary/UTF-16 render config is unsupported.'}
+    $hits=[regex]::Matches($source,'(?mi)^([\uFEFF \t]*resolution[ \t]*=[ \t]*)([0-9]+)([ \t]*(?:[;#][^\r\n]*)?)(?=\r?$)')
+    if($hits.Count -ne 1){throw 'Expected exactly one decimal resolution= line; supply a verified per-game config, not a guessed format.'}
+    $m=$hits[0].Groups[2]
+    $old=[int]$m.Value
+    $next=$source.Substring(0,$m.Index)+$Height.ToString([Globalization.CultureInfo]::InvariantCulture)+$source.Substring($m.Index+$m.Length)
+    [pscustomobject]@{ OriginalHeight=$old; Bytes=$utf8.GetBytes($next) }
 }
 function Get-AutomaticCapture([string]$Content, [int]$RequestedResolve) {
     if (!$RequestedResolve -and !$AutoTest) { return }
@@ -208,6 +237,24 @@ function Read-AutoCompletion([IO.StreamReader]$Reader, [char[]]$Buffer, [hashtab
 }
 try {
     if (!$CollectOnly) {
+        if($RenderConfigPath){
+            $configOriginalHash=FileHashOrNull $RenderConfigPath
+            $edit=Get-RenderConfigEdit ([IO.File]::ReadAllBytes($RenderConfigPath)) $RenderHeight
+            $configOriginalHeight=$edit.OriginalHeight
+            $configBackup=Join-Path $dest ($tag+'-original-render-config.bak')
+            Copy-Item -LiteralPath $RenderConfigPath -Destination $configBackup
+            if((FileHashOrNull $configBackup) -ne $configOriginalHash -or (FileHashOrNull $RenderConfigPath) -ne $configOriginalHash){throw 'Render config changed during backup.'}
+            $temp=Join-Path $dest ($tag+'-requested-render-config.tmp')
+            [IO.File]::WriteAllBytes($temp,[byte[]]$edit.Bytes)
+            $configInstalledHash=FileHashOrNull $temp
+            if($configInstalledHash -ne $configOriginalHash){
+                Copy-Item -LiteralPath $temp -Destination $RenderConfigPath -Force
+                $configInstalled=$true
+                if((FileHashOrNull $RenderConfigPath) -ne $configInstalledHash){throw 'Render config edit verification failed.'}
+            }
+            Remove-Item -LiteralPath $temp
+            Write-Host "Requested Azimuth resolution=$RenderHeight (was $configOriginalHeight); actual GPU size must be measured."
+        }
         if($Preview){
             if(!(Test-Path -LiteralPath $bridgeArtifact -PathType Leaf) -or !(Test-Path -LiteralPath $artifact -PathType Leaf)){throw 'Preview requires the full azimuth-sr-experimental-windows-x64 artifact (matching bridge and proxy).'}
             if(!(Test-Path -LiteralPath (Join-Path $game 'nvngx_dlss.dll') -PathType Leaf)){throw 'Preview requires your existing NVIDIA nvngx_dlss.dll runtime.'}
@@ -443,6 +490,12 @@ try {
         Write-Host "Fence-completed texture files: $($previewFiles.Count)"
         if(!$previewFiles.Count){Write-Warning 'No raw texture files; inspect PREVIEW log lines. Partial evidence will still be packaged.'}
     }
+    $acceptedProfiles=@([regex]::Matches($content,'(?m)^SR PROFILE_ACCEPTED render=(\d+x\d+) output=(\d+x\d+) quality=(\d+) ') | ForEach-Object {
+        [ordered]@{render=$_.Groups[1].Value;output=$_.Groups[2].Value;quality=[int]$_.Groups[3].Value}
+    })
+    $measuredFrames=@([regex]::Matches($content,'(?m)^SR frame: color=(\d+x\d+) depth=(\d+x\d+) mv=(\d+x\d+) resolve=(\d+x\d+) ') | ForEach-Object {
+        "$($_.Groups[1].Value)/$($_.Groups[2].Value)/$($_.Groups[3].Value)/$($_.Groups[4].Value)"
+    } | Sort-Object -Unique)
     $meta = [ordered]@{
         label = $Label; expected_output = $Output; actual_render_setting_label = $RenderSetting
         utc = [DateTime]::UtcNow.ToString('o'); mode = $(if($Preview){'preview'}else{'debug'}); collect_only = [bool]$CollectOnly
@@ -462,6 +515,9 @@ try {
         post_roll_seconds = $(if($AutoTest){$PostRollSeconds}else{0}); producer_wait_ms = $ProducerWaitMs
         automatic_resolve = $AutoResolve; automatic_capture = $autoCapture
         automatic_wait_expired = $autoWaitExpired
+        render_height_requested=$(if($RenderConfigPath){$RenderHeight}else{$null}); render_height_original=$configOriginalHeight
+        render_config_original_sha256=$configOriginalHash; render_config_requested_sha256=$configInstalledHash
+        accepted_sr_profiles=$acceptedProfiles; observed_color_depth_mv_resolve=$measuredFrames
         proxy_mode=$selectedProxyMode; proxy_target=$proxyName; front_proxy_original_sha256=$frontInitialHash
         front_proxy_preserved=$(if($selectedProxyMode -eq 'ReShade'){(FileHashOrNull $frontProxy) -eq $frontInitialHash}else{$null})
         nr_log_packaged=$nrPackaged; nr_log_scope='whole supplied log, may include prior sessions; correlate timestamps'
@@ -514,8 +570,18 @@ finally {
             Copy-Item -LiteralPath $bridgeBackup -Destination $bridge -Force
         }else{Remove-Item -LiteralPath $bridge -Force}
     }
+    if($configInstalled){
+        if((Get-Process -Name azimuth -ErrorAction SilentlyContinue) -or (FileHashOrNull $RenderConfigPath) -ne $configInstalledHash){
+            Write-Warning "Render config not restored (running or changed). Original backup: $configBackup"
+        }else{
+            Copy-Item -LiteralPath $configBackup -Destination $RenderConfigPath -Force
+            if((FileHashOrNull $RenderConfigPath) -ne $configOriginalHash){Write-Warning "Render config restore hash mismatch. Backup: $configBackup"}
+        }
+    }
     if(!$CollectOnly){
         $restored=[ordered]@{
+            render_config_original_sha256=$configOriginalHash
+            render_config_after_sha256=$(if($RenderConfigPath){FileHashOrNull $RenderConfigPath}else{$null})
             proxy_mode=$selectedProxyMode;proxy_target=$proxyName
             front_sha256_before=$frontInitialHash;front_sha256_after=(FileHashOrNull $frontProxy)
             front_preserved=$(if($selectedProxyMode -eq 'ReShade'){(FileHashOrNull $frontProxy) -eq $frontInitialHash}else{$null})

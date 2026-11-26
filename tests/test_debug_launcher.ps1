@@ -115,6 +115,16 @@ try {
     if((Get-FileHash -LiteralPath (Join-Path $game 'dxgi.dll')).Hash -ne $frontHash -or (Get-FileHash -LiteralPath (Join-Path $game 'dxgi-dlaa.dll')).Hash -ne $childHash){throw 'Collect-only mutated the chain.'}
 
     $launcherAst = [System.Management.Automation.Language.Parser]::ParseFile($launcher, [ref]$null, [ref]$null)
+    $editFn=$launcherAst.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-RenderConfigEdit'},$false)
+    . ([scriptblock]::Create($editFn.Extent.Text))
+    $utf8=[Text.UTF8Encoding]::new($false,$true)
+    $nl=[string][char]13+[char]10
+    $original=[string][char]0xFEFF+"resolution=1080 ; preserve"+$nl+"hdr=1"+$nl
+    $edit=Get-RenderConfigEdit ($utf8.GetBytes($original)) 800
+    if($edit.OriginalHeight -ne 1080 -or $utf8.GetString($edit.Bytes) -cne $original.Replace('1080','800')){throw 'Config edit changed unrelated bytes.'}
+    $rejected=$false
+    try{Get-RenderConfigEdit ($utf8.GetBytes("resolution=720"+$nl+"resolution=1080")) 800 | Out-Null}catch{$rejected=$true}
+    if(!$rejected){throw 'Ambiguous config was accepted.'}
     $completion = $launcherAst.Find({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Read-AutoCompletion'
