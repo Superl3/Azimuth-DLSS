@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include "../src/sr_experiment.h"
+#include "../src/lod_policy.h"
 int main(void) {
     assert(azsr_preset("default")==0&&azsr_preset("J")==10&&azsr_preset("k")==11&&azsr_preset("L")==12&&azsr_preset("M")==13);
     assert(azsr_preset("B")==-1&&azsr_preset("Kjunk")==-1);
@@ -54,6 +55,16 @@ int main(void) {
     assert(azsr_guides_valid(guides));guides.mv_scale_y=0;
     assert(!azsr_guides_valid(guides));guides.mv_scale_y=1;guides.pre_exposure=-1;
     assert(!azsr_guides_valid(guides));
+    float lod=0,adjusted=0;
+    assert(azlod_auto(1920,3840,&lod)&&lod> -2.001f&&lod< -1.999f);
+    assert(azlod_auto(2592,3840,&lod)&&lod> -1.568f&&lod< -1.566f);
+    assert(!azlod_auto(3840,3840,&lod)&&!azlod_auto(1000,3840,&lod));
+    assert(azlod_auto(1280,3840,&lod)&&lod== -2.5f);
+    assert(azlod_apply(1,0,0,16,-1.5f,&adjusted)&&adjusted== -1.5f);
+    assert(azlod_apply(1,-3,0,16,-2,&adjusted)&&adjusted== -4);
+    assert(!azlod_apply(0,0,0,16,-1,&adjusted));
+    assert(!azlod_apply(1,0,0,1,-1,&adjusted));
+    assert(!azlod_apply(1,0,0,16,0.5f,&adjusted));
     puts("PASS: SR policy including observed FH2 covering scissor and probe dimensions");
     return 0;
 }

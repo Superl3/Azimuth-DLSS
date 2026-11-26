@@ -48,7 +48,8 @@ static volatile LONG azpv_queue_ready;
 static int azpv_enabled,azpv_postfx,azpv_done;
 static AzPreviewReady azpv_ready;
 static AzAutoScene azpv_auto_scene,azpv_auto_sr;
-static int azpv_auto_test;
+static int azpv_auto_test,azpv_temporal_probe;
+static unsigned azpv_capture_group_limit(void){return azpv_temporal_probe?2u:azrp_capture_groups(azrp_profile);}
 static unsigned azpv_producer_wait_ms;
 static int azpv_gpu_wait;
 /* Reuse only private immutable snapshots after all recording fences retire. */
@@ -66,6 +67,9 @@ static void preview_init(void) {
     azpv_auto_test=n==1&&b[0]=='1';
     n=GetEnvironmentVariableA("AZIMUTH_DEBUG_NR_GUIDES",b,sizeof(b));
     azguide_enabled=!dlss_sr_play_mode()&&n==1&&b[0]=='1';
+    n=GetEnvironmentVariableA("AZIMUTH_DEBUG_NR_TEMPORAL",b,sizeof(b));
+    azpv_temporal_probe=azguide_enabled&&n==1&&b[0]=='1';
+    if(azpv_temporal_probe)log_msg("NR TEMPORAL_PROBE groups=2 coreOnly=1 postfxReadback=0 requireAdjacentAnalysis=1");
     if(azguide_enabled)log_msg("NR GUIDE_PROBE config=stencil_and_selected_cb_rows maxPasses=%u sameRecordingRequired=1",AZGUIDE_MAX);
     postfx_replay_init();
     visible_init();
@@ -80,7 +84,7 @@ static void preview_init(void) {
         if(!azpv_enabled||!azvis_enabled)dlss_sr_play_disable("replay_or_capture_runtime");
     }
     log_msg("PREVIEW CONFIG readback=%d postfx=%d groups=%u maxBytes=%llu",
-        azpv_enabled,azpv_postfx,azrp_capture_groups(azrp_profile),(unsigned long long)AZPV_LIMIT);
+        azpv_enabled,azpv_postfx,azpv_capture_group_limit(),(unsigned long long)AZPV_LIMIT);
 }
 int hooks_sr_accept_profile(unsigned rw,unsigned rh,unsigned ow,unsigned oh){
     if(!azrp_accept_profile(rw,rh,ow,oh))return 0;
@@ -246,7 +250,7 @@ void hooks_preview_record(ID3D12GraphicsCommandList *cl,ID3D12Resource *color,ID
         if(fresh_mv&&!reset)azdebug_auto_scene_note(&azpv_auto_sr,azt_frame+1,now);
         else memset(&azpv_auto_sr,0,sizeof(azpv_auto_sr));
     }
-    int wanted=!dlss_sr_play_mode()&&azdbg.active&&azdbg.id==1&&azdbg.observed<azrp_capture_groups(azrp_profile);
+    int wanted=!dlss_sr_play_mode()&&azdbg.active&&azdbg.id==1&&azdbg.observed<azpv_capture_group_limit();
     int live=azvis_window_locked()&&(!azvis_hdr||azvis_hdr_live||wanted);
     unsigned long long resolve=azt_frame+1;
     ListState *s=state_for(cl);
@@ -258,7 +262,7 @@ void hooks_preview_record(ID3D12GraphicsCommandList *cl,ID3D12Resource *color,ID
     preview_reap_live(resolve);
     for(unsigned i=0;i<AZPV_TOTAL;++i)if(azpv_groups[i].resolve==resolve)goto done;
     unsigned group=AZPV_TOTAL;
-    if(wanted&&azpv_count<azrp_capture_groups(azrp_profile)&&!azpv_done)group=azpv_count++;
+    if(wanted&&azpv_count<azpv_capture_group_limit()&&!azpv_done)group=azpv_count++;
     else if(live)for(unsigned i=AZPV_GROUPS;i<AZPV_TOTAL;++i)if(!azpv_groups[i].resolve){group=i;break;}
     if(dlss_sr_play_mode()&&live)++azpv_play_attempts;
     if(group==AZPV_TOTAL){if(live){if(dlss_sr_play_mode()){++azpv_play_busy;dlss_sr_play_miss();}log_msg("VISIBLE SKIP resolve=%llu stage=producer reason=slot_busy",resolve);}goto done;}
@@ -411,11 +415,11 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
     int routed=0;
     AcquireSRWLockExclusive(&azpv_lock);
     for(unsigned i=0;i<AZPV_TOTAL;++i){
-        AzpvGroup *g=&azpv_groups[i];int capture=i<AZPV_GROUPS;
+        AzpvGroup *g=&azpv_groups[i];int capture=i<AZPV_GROUPS&&!azpv_temporal_probe;
         if(!g->resolve||g->resolve!=resolve||(capture&&azpv_done))continue;
         unsigned bit=hash==0x479be24a?1u:hash==0xa7840ad0?2u:4u;
         if(g->postfx_seen&bit)continue;
-        g->postfx_seen|=bit;g->requested_mask|=bit<<4;
+        g->postfx_seen|=bit;if(capture)g->requested_mask|=bit<<4;
         const char *name=bit==1?"preoverlay":bit==2?"composite":"final";
         uintptr_t expected=bit==1?(uintptr_t)g->scene:bit==2?g->postfx:g->composite;
         int chain=identity&&expected&&found==1&&(uintptr_t)input==expected;
@@ -436,7 +440,7 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
            original target transition (bit 0x10) is not used as a barrier
            guess. All other original-draw/identity gates still apply. */
         if(bit==1&&azrp_enabled){
-            if(!azguide_enabled)g->requested_mask|=128u;
+            if(capture&&!azguide_enabled)g->requested_mask|=128u;
             if(capture&&!azguide_enabled&&chain&&!(missing&~16u)&&s->trace_recording_id){
                 AzpvBatch *batch=preview_batch(i,cl,s->trace_recording_id);
                 ID3D12Resource *image=batch?postfx_replay_draw(cl,s,resolve,NULL,NULL):NULL;
@@ -444,7 +448,7 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
                     log_msg("POSTFX REPLAY SKIP resolve=%llu reason=record_or_readback",resolve);
             }else if(capture&&!azguide_enabled)log_msg("POSTFX REPLAY SKIP resolve=%llu reason=original_draw_gate missing=0x%02x chain=%d",resolve,missing,chain);
             if(azrp_sr_enabled){
-                g->requested_mask|=256u;
+                if(capture)g->requested_mask|=256u;
                 int draw_ready=chain&&!(missing&~16u)&&s->trace_recording_id;
                 int deferred=0;
                 int producer_ready=preview_sr_ready(g,cl,s->trace_recording_id,draw_ready,&deferred);
@@ -487,7 +491,7 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
         }
         if(bit==4)g->closed=1;
         if(g->visible.enabled&&bit==4){
-            g->requested_mask|=1536u;
+            if(capture)g->requested_mask|=1536u;
             if(hash==0x577d52ef&&azvis_hdr&&chain&&!missing&&target){
                 AzpvBatch *batch=preview_batch(i,cl,s->trace_recording_id);
                 int result=batch?visible_hdr_finalize(&g->visible,cl,s,&hdr,target,resolve,copy_match,capture):0;
@@ -698,6 +702,7 @@ static void preview_poll(void) {
         for(unsigned i=0;i<azpv_count;++i){
             AzpvGroup *g=&azpv_groups[i];
             unsigned expected=(azpv_postfx?127u:15u)|(azrp_enabled&&!azguide_enabled?128u:0u)|(azrp_sr_enabled?256u:0u)|(g->visible.enabled?(azvis_hdr&&!azvis_hdr_live?12288u:1536u):0u)|((azrp_profile.wide||azvis_hdr)&&azrp_sr_enabled?2048u:0u)|(g->visible.enabled&&azvis_hdr?16384u:0u)|(azguide_enabled?(32768u|65536u):0u);
+            if(azpv_temporal_probe)expected=15u|32768u|65536u;
             int core=(saved_mask[i]&15u)==15u;
             if(core)++good_groups;else ++failed_groups;
             log_msg("PREVIEW GROUP_RESULT resolve=%llu expected=0x%02x attempted=0x%02x saved=0x%02x postfxSeen=0x%x coreComplete=%d",

@@ -10,6 +10,7 @@
 #define COBJMACROS
 #include "common.h"
 #include "replay_profile.h"
+#include "lod_policy.h"
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
@@ -52,6 +53,8 @@ static AzSRQuality sr_quality = AZSR_QUALITY;
 static AzSRSize sr_output, sr_render, sr_swapchain;
 static int sr_armed, sr_blocked, sr_optimal_checked;
 static int sr_preset,sr_play,sr_auto_render,sr_auto_quality;
+static float sr_lod_offset;
+static int sr_lod_enabled;
 static AzSRStable sr_stable;
 static AzSRGuideOptions sr_guides={0,0,1,1,1,1};
 static int sr_guides_override;
@@ -95,7 +98,7 @@ static int sr_ini_value(const wchar_t *key,const wchar_t *fallback,char *out,uns
     return WideCharToMultiByte(CP_UTF8,0,value,-1,out,(int)cap,NULL,NULL)>0;
 }
 static int sr_play_config(void){
-    char render[32],output[32],quality[32],hdr[8],jitter[8],preset[16],hud[16],di[8],mj[8],mx[32],my[32],pe[32],es[32];
+    char render[32],output[32],quality[32],hdr[8],jitter[8],preset[16],hud[16],di[8],mj[8],mx[32],my[32],pe[32],es[32],lod[32];
     if(!sr_ini_value(L"Render",L"auto",render,sizeof(render))||
        !sr_ini_value(L"Output",L"1920x1080",output,sizeof(output))||
        !sr_ini_value(L"Quality",L"quality",quality,sizeof(quality))||
@@ -108,20 +111,21 @@ static int sr_play_config(void){
        !sr_ini_value(L"MVScaleX",L"1",mx,sizeof(mx))||
        !sr_ini_value(L"MVScaleY",L"1",my,sizeof(my))||
        !sr_ini_value(L"PreExposure",L"1",pe,sizeof(pe))||
-       !sr_ini_value(L"ExposureScale",L"1",es,sizeof(es)))return 0;
+       !sr_ini_value(L"ExposureScale",L"1",es,sizeof(es))||
+       !sr_ini_value(L"LodBias",L"off",lod,sizeof(lod)))return 0;
     AzReplayProfile profile=!strcmp(render,"auto")?azrp_profile_request(render,output):azrp_profile_explicit(render,output);
     if(!profile.ow||(strcmp(hdr,"0")&&strcmp(hdr,"1"))||(strcmp(jitter,"0")&&strcmp(jitter,"1"))||
        (strcmp(quality,"quality")&&strcmp(quality,"balanced")&&strcmp(quality,"performance")&&strcmp(quality,"ultraperformance")&&strcmp(quality,"auto"))||
        azsr_preset(preset)<0||(strcmp(hud,"native")&&strcmp(hud,"delta")))return 0;
     sr_fixed_render=(AzSRSize){profile.rw,profile.rh};
     const char *keys[]={"AZIMUTH_SR_RENDER","AZIMUTH_SR_OUTPUT","AZIMUTH_SR_QUALITY","AZIMUTH_SR_PRESET",
-        "AZIMUTH_SR_HUD","AZIMUTH_SR_DEPTH_INVERTED","AZIMUTH_SR_MV_JITTERED","AZIMUTH_SR_MV_SCALE_X","AZIMUTH_SR_MV_SCALE_Y","AZIMUTH_SR_PRE_EXPOSURE","AZIMUTH_SR_EXPOSURE_SCALE",
+        "AZIMUTH_SR_HUD","AZIMUTH_SR_DEPTH_INVERTED","AZIMUTH_SR_MV_JITTERED","AZIMUTH_SR_MV_SCALE_X","AZIMUTH_SR_MV_SCALE_Y","AZIMUTH_SR_PRE_EXPOSURE","AZIMUTH_SR_EXPOSURE_SCALE","AZIMUTH_SR_LOD_BIAS",
         "AZIMUTH_DEBUG_PREVIEW_JITTER","AZIMUTH_DEBUG_VISIBLE_HDR","AZIMUTH_DEBUG_HDR_LIVE",
         "AZIMUTH_DEBUG_PREVIEW_POSTFX","AZIMUTH_DEBUG_POSTFX_REPLAY","AZIMUTH_DEBUG_SR_REPLAY",
         "AZIMUTH_DEBUG_VISIBLE_SR","AZIMUTH_DEBUG_AUTO_TEST","AZIMUTH_DEBUG_PRODUCER_GPU_WAIT",
         "AZIMUTH_DEBUG_PRODUCER_WAIT_MS","AZIMUTH_DEBUG_VISIBLE_MARKER",
         "AZIMUTH_DEBUG_PRESENT_TRACE","AZIMUTH_DEBUG_RENDERDOC","AZIMUTH_DEBUG_SHADER_DISASM","AZIMUTH_DEBUG_QUEUE_TRACE"};
-    const char *values[]={render,output,quality,preset,hud,di,mj,mx,my,pe,es,jitter,hdr,hdr,"1","1","1","1","1","1","0","0","0","0","0","1"};
+    const char *values[]={render,output,quality,preset,hud,di,mj,mx,my,pe,es,lod,jitter,hdr,hdr,"1","1","1","1","1","1","0","0","0","0","0","1"};
     for(unsigned i=0;i<sizeof(keys)/sizeof(keys[0]);++i)if(!SetEnvironmentVariableA(keys[i],values[i]))return 0;
     (void)SetEnvironmentVariableA("AZIMUTH_DEBUG_AUTO_READY_FILE",NULL);
     log_msg("SR PLAY_CONFIG render=%s output=%s quality=%s hdr=%s jitter=%s preset=%s gpuWait=1 capture=0 profileLatch=1",render,output,quality,hdr,jitter,preset);
@@ -150,6 +154,30 @@ static int sr_read_guides(void){
     sr_guides_override=sr_guides.depth_inverted||sr_guides.mv_jittered||sr_guides.mv_scale_x!=1||
         sr_guides.mv_scale_y!=1||sr_guides.pre_exposure!=1||sr_guides.exposure_scale!=1;
     return azsr_guides_valid(sr_guides);
+}
+static void sr_read_lod(void){
+    char value[64],tail;
+    DWORD n=GetEnvironmentVariableA("AZIMUTH_SR_LOD_BIAS",value,sizeof(value));
+    if(!n)return;
+    if(n>=sizeof(value)){log_msg("LOD CONFIG disabled reason=invalid_value");return;}
+    if(!strcmp(value,"off"))return;
+    if(!sr_preview_mode||sr_blocked){log_msg("LOD CONFIG disabled reason=not_valid_sr_preview");return;}
+    if(!strcmp(value,"auto")){
+        /* Samplers may be created before the first resolve: only an explicit
+           fixed input is usable here. Auto render must not guess a ratio. */
+        if(sr_auto_render||!azsr_same_aspect(sr_fixed_render,sr_output)||!azlod_auto(sr_fixed_render.w,sr_output.w,&sr_lod_offset)){
+            log_msg("LOD CONFIG disabled reason=auto_requires_fixed_render");return;
+        }
+    }else if(sscanf(value,"%f%c",&sr_lod_offset,&tail)!=1||!azlod_offset_valid(sr_lod_offset)){
+        log_msg("LOD CONFIG disabled reason=invalid_offset allowed=-2.5..0");return;
+    }
+    sr_lod_enabled=sr_lod_offset!=0;
+    log_msg("LOD CONFIG enabled=%d offset=%.6f scope=main_exe_dynamic_aniso_wrap staticUntouched=1 restartRequired=1 requestedRender=%ux%u requestedOutput=%ux%u",
+        sr_lod_enabled,(double)sr_lod_offset,sr_fixed_render.w,sr_fixed_render.h,sr_output.w,sr_output.h);
+}
+int dlss_sr_lod_bias(float *bias){
+    if(!bias||!sr_lod_enabled)return 0;
+    *bias=sr_lod_offset;return 1;
 }
 static void sr_read_config(void) {
     char b[64], tail;
@@ -196,6 +224,7 @@ static void sr_read_config(void) {
     if(sr_play&&sr_blocked)dlss_sr_play_disable("invalid_profile_or_preset_or_guides");
     log_msg("NR GUIDE_CONFIG depthInverted=%u mvJittered=%u scaleMultiplier=%.6f,%.6f preExposure=%.6f exposureScale=%.6f autoExposure=1 calibrated=%d engineExposure=unverified",sr_guides.depth_inverted,sr_guides.mv_jittered,(double)sr_guides.mv_scale_x,(double)sr_guides.mv_scale_y,(double)sr_guides.pre_exposure,(double)sr_guides.exposure_scale,sr_guides_override);
     log_msg("SR PRESET requested=%d hintOnly=1",sr_preset);
+    sr_read_lod();
     if(sr_preview_mode){
         n=GetEnvironmentVariableA("AZIMUTH_DEBUG_PREVIEW_JITTER",b,sizeof(b));
         sr_preview_jitter=n==1&&b[0]=='1';
@@ -488,6 +517,7 @@ int dlss_run(ID3D12GraphicsCommandList *cl, ID3D12Resource *color, D3D12_RESOURC
         }
         sr_optimal_checked=1;sr_armed=1;
         log_msg("SR PROFILE_ACCEPTED render=%ux%u output=%ux%u quality=%d autoRender=%d autoQuality=%d restartOnChange=1",w,h,ow,oh,sr_quality,sr_auto_render,sr_auto_quality);
+        hooks_lod_profile_report(w,h,ow,oh);
     }
     if(sr_mode>=AZSR_PROBE){
         uint64_t now=GetTickCount64();

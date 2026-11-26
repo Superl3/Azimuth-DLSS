@@ -7,6 +7,7 @@ param(
     [ValidateSet('default','J','K','L','M')][string]$Preset = 'default',
     [switch]$NoJitter,
     [switch]$NRGuideProbe,
+    [switch]$NRTemporalProbe,
     [ValidateSet('native','delta')][string]$HUD = 'native',
     [ValidateSet(0,1)][int]$DepthInverted=0,
     [ValidateSet(0,1)][int]$MVJittered=0,
@@ -14,8 +15,13 @@ param(
     [double]$MVScaleY=1,
     [double]$PreExposure=1,
     [double]$ExposureScale=1,
+    [string]$LodBias='off',
     [string]$RenderSetting = '',
     [switch]$InstallProxy,
+    [ValidateSet('Auto','Direct','ReShade')][string]$ProxyMode='Auto',
+    [string]$NRLogPath='',
+    [string]$RenderConfigPath='',
+    [ValidateRange(0,4320)][int]$RenderHeight=0,
     [switch]$CollectOnly,
     [switch]$ShaderDisasm,
     [switch]$Preview,
@@ -43,6 +49,10 @@ param(
     [string]$Destination = (Join-Path $PSScriptRoot 'debug-captures')
 )
 $ErrorActionPreference = 'Stop'
+if($LodBias -notin @('off','auto')){
+    $lodNumber=0.0
+    if(![double]::TryParse($LodBias,[Globalization.NumberStyles]::Float,[Globalization.CultureInfo]::InvariantCulture,[ref]$lodNumber) -or [double]::IsNaN($lodNumber) -or $lodNumber -lt -2.5 -or $lodNumber -gt 0){throw 'LodBias must be off, auto or a finite number in -2.5..0.'}
+}
 if($HDRLive -and !$VisibleHDR){throw '-HDRLive requires -VisibleHDR.'}
 if($VisibleHDR){$VisibleSR=$true}
 # Explicit automatic test preset: no debug hotkeys, no install prompts.
@@ -71,6 +81,10 @@ if($PSBoundParameters.ContainsKey('VisibleSeconds') -and !$VisibleSR){throw '-Vi
 if($NoJitter){$PreviewJitter=$false}
 if($VisibleSR -and (!$PreviewSRReplay -or (!$PreviewJitter -and !$NoJitter))){throw '-VisibleSR requires -PreviewSRReplay and either -PreviewJitter or -NoJitter.'}
 if($VisibleSR -and $ExitAfterCapture -and !$AutoTest){throw 'For automatic VisibleSR shutdown use -AutoTest; otherwise omit -ExitAfterCapture.'}
+if($NRTemporalProbe){
+    if(!$VisibleSR -or ($VisibleHDR -and !$HDRLive)){throw '-NRTemporalProbe requires live VisibleSR or VisibleHDR + HDRLive.'}
+    $NRGuideProbe=$true
+}
 if($NRGuideProbe -and !$Preview){throw '-NRGuideProbe requires -Preview or -AutoTest.'}
 if($PreviewSRReplay -and !$PreviewReplay){throw '-PreviewSRReplay requires -PreviewReplay.'}
 if($ProducerGpuWait -and !$PreviewSRReplay){throw '-ProducerGpuWait requires -PreviewSRReplay.'}
@@ -85,7 +99,37 @@ if (!$GameDir) {
 }
 $game = (Resolve-Path -LiteralPath $GameDir).Path
 $exe = Join-Path $game 'azimuth.exe'
-$proxy = Join-Path $game 'dxgi.dll'
+$frontProxy = Join-Path $game 'dxgi.dll'
+$chainProxy = Join-Path $game 'dxgi-dlaa.dll'
+$chainExists = Test-Path -LiteralPath $chainProxy -PathType Leaf
+$frontExists = Test-Path -LiteralPath $frontProxy -PathType Leaf
+$selectedProxyMode = $ProxyMode
+if($ProxyMode -eq 'Auto'){
+    if($chainExists){
+        if(!$frontExists){throw 'Incomplete ReShade chain: dxgi-dlaa.dll exists but dxgi.dll is absent.'}
+        $selectedProxyMode='ReShade'
+    }elseif(!$CollectOnly -and (Test-Path -LiteralPath (Join-Path $game 'ReShade.ini') -PathType Leaf)){
+        throw 'ReShade configuration exists but dxgi-dlaa.dll is absent. Verify chain; explicit Direct is for a deliberate standalone test.'
+    }else{$selectedProxyMode='Direct'}
+}
+if($selectedProxyMode -eq 'ReShade' -and (!$frontExists -or !$chainExists)){throw 'ReShade mode requires both existing dxgi.dll and dxgi-dlaa.dll.'}
+$proxyName = if($selectedProxyMode -eq 'ReShade'){'dxgi-dlaa.dll'}else{'dxgi.dll'}
+$proxy = Join-Path $game $proxyName
+if(!$CollectOnly -and $selectedProxyMode -eq 'ReShade'){
+    foreach($file in @($frontProxy,$chainProxy)){
+        if((Get-Item -LiteralPath $file).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Refusing reparse-point DLL in ReShade chain.'}
+    }
+}
+if($NRLogPath){$NRLogPath=[IO.Path]::GetFullPath($NRLogPath)}
+if([bool]$RenderConfigPath -ne [bool]$RenderHeight){throw '-RenderConfigPath and -RenderHeight must be supplied together.'}
+if($RenderConfigPath){
+    if($CollectOnly -or !$InstallProxy -or $RenderHeight -lt 720){throw 'Render config editing requires new launch, -InstallProxy and height 720..4320.'}
+    $RenderConfigPath=(Resolve-Path -LiteralPath $RenderConfigPath).Path
+    $fi=Get-Item -LiteralPath $RenderConfigPath
+    if($fi.PSIsContainer -or $fi.Length -gt 1048576 -or ($fi.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Render config must be a regular file <=1 MiB.'}
+    if($RenderConfigPath -in @($frontProxy,$chainProxy,$exe,(Join-Path $game 'azimuth_ngx.dll'),(Join-Path $game 'azimuth_sr.ini'),(Join-Path $game 'nvngx_dlss.dll'))){throw 'Render config must be a separate per-game settings file.'}
+}
+Write-Host "Proxy mode: $selectedProxyMode; target: $proxyName"
 $log = Join-Path $game 'azimuth_dlaa.log'
 $artifact = Join-Path $PSScriptRoot 'dxgi.dll'
 $bridge = Join-Path $game 'azimuth_ngx.dll'
@@ -129,6 +173,35 @@ $runPid = $null
 function FileHashOrNull([string]$Path) {
     if (Test-Path -LiteralPath $Path -PathType Leaf) { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash }
     return $null
+}
+$frontInitialHash=FileHashOrNull $frontProxy
+$proxyInitialHash=FileHashOrNull $proxy
+$bridgeInitialHash=FileHashOrNull $bridge
+$nrInitialHash=$null
+$nrPackaged=$false
+$configBackup=$null
+$configOriginalHash=$null
+$configInstalledHash=$null
+$configInstalled=$false
+$configOriginalHeight=$null
+if($NRLogPath -and (Test-Path -LiteralPath $NRLogPath -PathType Leaf)){
+    $nrFile=Get-Item -LiteralPath $NRLogPath
+    if(($nrFile.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $nrFile.Length -gt 134217728){throw 'NR log must be a regular file <=128 MiB.'}
+    $nrInitialHash=FileHashOrNull $NRLogPath
+}
+# Only edit a single explicit decimal resolution= entry. Preserve all other
+# UTF-8 bytes (including BOM/CRLF); never guess XML or a binary format.
+function Get-RenderConfigEdit([byte[]]$Bytes,[int]$Height){
+    if($Height -lt 720 -or $Height -gt 4320 -or $Bytes.Length -gt 1048576){throw 'Invalid render height or config size.'}
+    $utf8=[Text.UTF8Encoding]::new($false,$true)
+    $source=$utf8.GetString($Bytes)
+    if($source.Contains([char]0)){throw 'Binary/UTF-16 render config is unsupported.'}
+    $hits=[regex]::Matches($source,'(?mi)^([\uFEFF \t]*resolution[ \t]*=[ \t]*)([0-9]+)([ \t]*(?:[;#][^\r\n]*)?)(?=\r?$)')
+    if($hits.Count -ne 1){throw 'Expected exactly one decimal resolution= line; supply a verified per-game config, not a guessed format.'}
+    $m=$hits[0].Groups[2]
+    $old=[int]$m.Value
+    $next=$source.Substring(0,$m.Index)+$Height.ToString([Globalization.CultureInfo]::InvariantCulture)+$source.Substring($m.Index+$m.Length)
+    [pscustomobject]@{ OriginalHeight=$old; Bytes=$utf8.GetBytes($next) }
 }
 function Get-AutomaticCapture([string]$Content, [int]$RequestedResolve) {
     if (!$RequestedResolve -and !$AutoTest) { return }
@@ -174,6 +247,24 @@ function Read-AutoCompletion([IO.StreamReader]$Reader, [char[]]$Buffer, [hashtab
 }
 try {
     if (!$CollectOnly) {
+        if($RenderConfigPath){
+            $configOriginalHash=FileHashOrNull $RenderConfigPath
+            $edit=Get-RenderConfigEdit ([IO.File]::ReadAllBytes($RenderConfigPath)) $RenderHeight
+            $configOriginalHeight=$edit.OriginalHeight
+            $configBackup=Join-Path $dest ($tag+'-original-render-config.bak')
+            Copy-Item -LiteralPath $RenderConfigPath -Destination $configBackup
+            if((FileHashOrNull $configBackup) -ne $configOriginalHash -or (FileHashOrNull $RenderConfigPath) -ne $configOriginalHash){throw 'Render config changed during backup.'}
+            $temp=Join-Path $dest ($tag+'-requested-render-config.tmp')
+            [IO.File]::WriteAllBytes($temp,[byte[]]$edit.Bytes)
+            $configInstalledHash=FileHashOrNull $temp
+            if($configInstalledHash -ne $configOriginalHash){
+                Copy-Item -LiteralPath $temp -Destination $RenderConfigPath -Force
+                $configInstalled=$true
+                if((FileHashOrNull $RenderConfigPath) -ne $configInstalledHash){throw 'Render config edit verification failed.'}
+            }
+            Remove-Item -LiteralPath $temp
+            Write-Host "Requested Azimuth resolution=$RenderHeight (was $configOriginalHeight); actual GPU size must be measured."
+        }
         if($Preview){
             if(!(Test-Path -LiteralPath $bridgeArtifact -PathType Leaf) -or !(Test-Path -LiteralPath $artifact -PathType Leaf)){throw 'Preview requires the full azimuth-sr-experimental-windows-x64 artifact (matching bridge and proxy).'}
             if(!(Test-Path -LiteralPath (Join-Path $game 'nvngx_dlss.dll') -PathType Leaf)){throw 'Preview requires your existing NVIDIA nvngx_dlss.dll runtime.'}
@@ -198,11 +289,11 @@ try {
         $artifactHash = FileHashOrNull $artifact
         if ($artifactHash -and $artifactHash -ne $currentHash) {
             if (!$InstallProxy) {
-                $reply = Read-Host 'Temporarily install the debug dxgi.dll? Existing proxy will be backed up and restored after exit. [y/N]'
+                $reply = Read-Host "Temporarily install debug proxy $proxyName? Existing proxy will be backed up and restored after exit. [y/N]"
                 if ($reply -notmatch '^[Yy]$') { throw 'Install declined. No game DLL changed.' }
             }
             if ($currentHash) {
-                $backup = Join-Path $dest ($tag + '-original-dxgi.dll')
+                $backup = Join-Path $dest ($tag + '-original-' + $proxyName)
                 Copy-Item -LiteralPath $proxy -Destination $backup
                 if ((FileHashOrNull $backup) -ne $currentHash) { throw 'Original proxy backup verification failed.' }
             }
@@ -211,13 +302,13 @@ try {
             $installed = $true
             if ((FileHashOrNull $proxy) -ne $installedHash) { throw 'Debug proxy copy verification failed.' }
         }
-        if (!(Test-Path -LiteralPath $proxy -PathType Leaf)) { throw 'Install the latest debug dxgi.dll next to azimuth.exe first.' }
+        if (!(Test-Path -LiteralPath $proxy -PathType Leaf)) { throw "Install the latest debug proxy as $proxyName next to azimuth.exe first." }
         $previous = $null
         if (Test-Path -LiteralPath $log -PathType Leaf) {
             $previous = (Get-Item -LiteralPath $log).LastWriteTimeUtc
             Copy-Item -LiteralPath $log -Destination (Join-Path $dest ($tag + '-previous.log'))
         }
-        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM','AZIMUTH_DEBUG_AUTO_RESOLVE','AZIMUTH_DEBUG_AUTO_TEST','AZIMUTH_DEBUG_PRODUCER_WAIT_MS','AZIMUTH_DEBUG_PRODUCER_GPU_WAIT','AZIMUTH_DEBUG_PRESENT_TRACE','AZIMUTH_DEBUG_AUTO_WARMUP_MS','AZIMUTH_DEBUG_AUTO_READY_FILE','AZIMUTH_SR_OUTPUT','AZIMUTH_SR_RENDER','AZIMUTH_SR_PRESET','AZIMUTH_DEBUG_NR_GUIDES','AZIMUTH_SR_HUD','AZIMUTH_SR_DEPTH_INVERTED','AZIMUTH_SR_MV_JITTERED','AZIMUTH_SR_MV_SCALE_X','AZIMUTH_SR_MV_SCALE_Y','AZIMUTH_SR_PRE_EXPOSURE','AZIMUTH_SR_EXPOSURE_SCALE','AZIMUTH_SR_QUALITY','AZIMUTH_DEBUG_PREVIEW_POSTFX','AZIMUTH_DEBUG_PREVIEW_JITTER','AZIMUTH_DEBUG_POSTFX_REPLAY','AZIMUTH_DEBUG_SR_REPLAY','AZIMUTH_DEBUG_VISIBLE_SR','AZIMUTH_DEBUG_VISIBLE_HDR','AZIMUTH_DEBUG_HDR_LIVE','AZIMUTH_DEBUG_VISIBLE_MARKER','AZIMUTH_DEBUG_VISIBLE_SECONDS','AZIMUTH_DEBUG_QUEUE_TRACE')) {
+        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM','AZIMUTH_DEBUG_AUTO_RESOLVE','AZIMUTH_DEBUG_AUTO_TEST','AZIMUTH_DEBUG_PRODUCER_WAIT_MS','AZIMUTH_DEBUG_PRODUCER_GPU_WAIT','AZIMUTH_DEBUG_PRESENT_TRACE','AZIMUTH_DEBUG_AUTO_WARMUP_MS','AZIMUTH_DEBUG_AUTO_READY_FILE','AZIMUTH_SR_OUTPUT','AZIMUTH_SR_RENDER','AZIMUTH_SR_PRESET','AZIMUTH_DEBUG_NR_GUIDES','AZIMUTH_DEBUG_NR_TEMPORAL','AZIMUTH_SR_HUD','AZIMUTH_SR_DEPTH_INVERTED','AZIMUTH_SR_MV_JITTERED','AZIMUTH_SR_MV_SCALE_X','AZIMUTH_SR_MV_SCALE_Y','AZIMUTH_SR_PRE_EXPOSURE','AZIMUTH_SR_EXPOSURE_SCALE','AZIMUTH_SR_LOD_BIAS','AZIMUTH_SR_QUALITY','AZIMUTH_DEBUG_PREVIEW_POSTFX','AZIMUTH_DEBUG_PREVIEW_JITTER','AZIMUTH_DEBUG_POSTFX_REPLAY','AZIMUTH_DEBUG_SR_REPLAY','AZIMUTH_DEBUG_VISIBLE_SR','AZIMUTH_DEBUG_VISIBLE_HDR','AZIMUTH_DEBUG_HDR_LIVE','AZIMUTH_DEBUG_VISIBLE_MARKER','AZIMUTH_DEBUG_VISIBLE_SECONDS','AZIMUTH_DEBUG_QUEUE_TRACE')) {
             $oldEnv[$key] = [Environment]::GetEnvironmentVariable($key,'Process')
         }
         [Environment]::SetEnvironmentVariable('AZIMUTH_SR_MODE',$(if($Preview){'preview'}else{'debug'}),'Process')
@@ -227,6 +318,7 @@ try {
             [Environment]::SetEnvironmentVariable('AZIMUTH_SR_PRESET',$Preset.ToLowerInvariant(),'Process')
             $culture=[Globalization.CultureInfo]::InvariantCulture
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_NR_GUIDES',$(if($NRGuideProbe){'1'}else{'0'}),'Process')
+            [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_NR_TEMPORAL',$(if($NRTemporalProbe){'1'}else{'0'}),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_SR_HUD',$HUD.ToLowerInvariant(),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_SR_DEPTH_INVERTED',[string]$DepthInverted,'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_SR_MV_JITTERED',[string]$MVJittered,'Process')
@@ -234,6 +326,7 @@ try {
             [Environment]::SetEnvironmentVariable('AZIMUTH_SR_MV_SCALE_Y',$MVScaleY.ToString('R',$culture),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_SR_PRE_EXPOSURE',$PreExposure.ToString('R',$culture),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_SR_EXPOSURE_SCALE',$ExposureScale.ToString('R',$culture),'Process')
+            [Environment]::SetEnvironmentVariable('AZIMUTH_SR_LOD_BIAS',$LodBias.ToLowerInvariant(),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_SR_QUALITY',$Quality,'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_PREVIEW_POSTFX',$(if($PreviewPostFx){'1'}else{'0'}),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_PREVIEW_JITTER',$(if($PreviewJitter){'1'}else{'0'}),'Process')
@@ -340,6 +433,18 @@ try {
     New-Item -ItemType Directory -Path $stage | Out-Null
     $stageCreated = $true
     Copy-Item -LiteralPath $log -Destination (Join-Path $stage 'azimuth_dlaa.log')
+    if($NRLogPath -and (Test-Path -LiteralPath $NRLogPath -PathType Leaf)){
+        $nrFile=Get-Item -LiteralPath $NRLogPath
+        if(!($nrFile.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $nrFile.Length -le 134217728){
+            $nrHash=FileHashOrNull $NRLogPath
+            if($CollectOnly -or $nrHash -ne $nrInitialHash){
+                Copy-Item -LiteralPath $NRLogPath -Destination (Join-Path $stage 'nr-external.log')
+                if((FileHashOrNull (Join-Path $stage 'nr-external.log')) -ne $nrHash){throw 'NR log changed during copy.'}
+                $nrPackaged=$true
+            }
+        }
+        if(!$nrPackaged){Write-Warning 'NR log unchanged, invalid or over budget; not packaged.'}
+    }
     $shaderFiles = @()
     if($ShaderDisasm){
         $rows = [regex]::Matches($content,'(?m)^DEBUG SHADER_DUMP directory=(azimuth_shader_debug_\d+_\d+) file=([pv]s-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{8}){3}\.asm\.txt) bytes=(\d+)\r?$')
@@ -397,6 +502,12 @@ try {
         Write-Host "Fence-completed texture files: $($previewFiles.Count)"
         if(!$previewFiles.Count){Write-Warning 'No raw texture files; inspect PREVIEW log lines. Partial evidence will still be packaged.'}
     }
+    $acceptedProfiles=@([regex]::Matches($content,'(?m)^SR PROFILE_ACCEPTED render=(\d+x\d+) output=(\d+x\d+) quality=(\d+) ') | ForEach-Object {
+        [ordered]@{render=$_.Groups[1].Value;output=$_.Groups[2].Value;quality=[int]$_.Groups[3].Value}
+    })
+    $measuredFrames=@([regex]::Matches($content,'(?m)^SR frame: color=(\d+x\d+) depth=(\d+x\d+) mv=(\d+x\d+) resolve=(\d+x\d+) ') | ForEach-Object {
+        "$($_.Groups[1].Value)/$($_.Groups[2].Value)/$($_.Groups[3].Value)/$($_.Groups[4].Value)"
+    } | Sort-Object -Unique)
     $meta = [ordered]@{
         label = $Label; expected_output = $Output; actual_render_setting_label = $RenderSetting
         utc = [DateTime]::UtcNow.ToString('o'); mode = $(if($Preview){'preview'}else{'debug'}); collect_only = [bool]$CollectOnly
@@ -407,7 +518,7 @@ try {
         auto_ready = [bool]($content -match '(?m)^PREVIEW AUTO_READY ')
         visible_hdr_requested = [bool]$VisibleHDR; hdr_live_requested = [bool]$HDRLive
         sr_render_requested = $RenderSize; sr_preset_requested = $Preset; sr_no_jitter_requested = [bool]$NoJitter
-        nr_guide_probe_requested=[bool]$NRGuideProbe; sr_hud_requested=$HUD; sr_depth_inverted_requested=$DepthInverted; sr_mv_jittered_requested=$MVJittered; sr_mv_scale_requested=@($MVScaleX,$MVScaleY); sr_pre_exposure_requested=$PreExposure; sr_exposure_scale_requested=$ExposureScale
+        nr_guide_probe_requested=[bool]$NRGuideProbe; nr_temporal_probe_requested=[bool]$NRTemporalProbe; sr_lod_bias_requested=$LodBias; sr_hud_requested=$HUD; sr_depth_inverted_requested=$DepthInverted; sr_mv_jittered_requested=$MVJittered; sr_mv_scale_requested=@($MVScaleX,$MVScaleY); sr_pre_exposure_requested=$PreExposure; sr_exposure_scale_requested=$ExposureScale
         present_trace_requested = [bool]$PresentTrace; producer_gpu_wait_requested = [bool]$ProducerGpuWait
         visible_trial_complete = [bool]($content -match '(?m)^VISIBLE TRIAL_END ')
         visible_seconds_requested = $(if($VisibleSR){$VisibleSeconds}else{$null})
@@ -416,7 +527,13 @@ try {
         post_roll_seconds = $(if($AutoTest){$PostRollSeconds}else{0}); producer_wait_ms = $ProducerWaitMs
         automatic_resolve = $AutoResolve; automatic_capture = $autoCapture
         automatic_wait_expired = $autoWaitExpired
-        files_sha256 = [ordered]@{ 'azimuth.exe' = (FileHashOrNull $exe); 'dxgi.dll' = (FileHashOrNull $proxy); 'azimuth_ngx.dll' = (FileHashOrNull $bridge) }
+        render_height_requested=$(if($RenderConfigPath){$RenderHeight}else{$null}); render_height_original=$configOriginalHeight
+        render_config_original_sha256=$configOriginalHash; render_config_requested_sha256=$configInstalledHash
+        accepted_sr_profiles=$acceptedProfiles; observed_color_depth_mv_resolve=$measuredFrames
+        proxy_mode=$selectedProxyMode; proxy_target=$proxyName; front_proxy_original_sha256=$frontInitialHash
+        front_proxy_preserved=$(if($selectedProxyMode -eq 'ReShade'){(FileHashOrNull $frontProxy) -eq $frontInitialHash}else{$null})
+        nr_log_packaged=$nrPackaged; nr_log_scope='whole supplied log, may include prior sessions; correlate timestamps'
+        files_sha256 = [ordered]@{ 'azimuth.exe' = (FileHashOrNull $exe); 'dxgi.dll' = (FileHashOrNull $frontProxy); 'dxgi-dlaa.dll' = (FileHashOrNull $chainProxy); 'azimuth_ngx.dll' = (FileHashOrNull $bridge) }
         selected_shader_disassembly = $shaderFiles
         gpu_raw = $previewFiles; preview_complete = [bool]($content -match '(?m)^PREVIEW COMPLETE '); preview_quality = $(if($Preview){$Quality}else{$null}); preview_jitter_requested = [bool]$PreviewJitter; preview_native_replay_requested = [bool]$PreviewReplay; preview_sr_replay_requested = [bool]$PreviewSRReplay; visible_sr_requested = [bool]$VisibleSR; visible_marker_requested = [bool]$VisibleMarker; presentmon_csv_packaged = $presentMonPackaged
         notice = 'Local evidence. Explicit preview includes selected raw game textures. Optional selected shader assembly. No game binaries or saves. Review privately.'
@@ -464,6 +581,28 @@ finally {
         }elseif($bridgeBackup){
             Copy-Item -LiteralPath $bridgeBackup -Destination $bridge -Force
         }else{Remove-Item -LiteralPath $bridge -Force}
+    }
+    if($configInstalled){
+        if((Get-Process -Name azimuth -ErrorAction SilentlyContinue) -or (FileHashOrNull $RenderConfigPath) -ne $configInstalledHash){
+            Write-Warning "Render config not restored (running or changed). Original backup: $configBackup"
+        }else{
+            Copy-Item -LiteralPath $configBackup -Destination $RenderConfigPath -Force
+            if((FileHashOrNull $RenderConfigPath) -ne $configOriginalHash){Write-Warning "Render config restore hash mismatch. Backup: $configBackup"}
+        }
+    }
+    if(!$CollectOnly){
+        $restored=[ordered]@{
+            render_config_original_sha256=$configOriginalHash
+            render_config_after_sha256=$(if($RenderConfigPath){FileHashOrNull $RenderConfigPath}else{$null})
+            proxy_mode=$selectedProxyMode;proxy_target=$proxyName
+            front_sha256_before=$frontInitialHash;front_sha256_after=(FileHashOrNull $frontProxy)
+            front_preserved=$(if($selectedProxyMode -eq 'ReShade'){(FileHashOrNull $frontProxy) -eq $frontInitialHash}else{$null})
+            proxy_original_sha256=$proxyInitialHash;proxy_after_sha256=(FileHashOrNull $proxy)
+            bridge_original_sha256=$bridgeInitialHash;bridge_after_sha256=(FileHashOrNull $bridge)
+            game_running=[bool](Get-Process -Name azimuth -ErrorAction SilentlyContinue)
+        }
+        $restored | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $dest ($tag+'-restoration.json')) -Encoding UTF8
+        if($selectedProxyMode -eq 'ReShade' -and !$restored.front_preserved){Write-Warning 'Front ReShade DLL changed externally; never overwrite it automatically.'}
     }
     if ($stageCreated -and (Test-Path -LiteralPath $zip -PathType Leaf)) { Remove-Item -LiteralPath $stage -Recurse -Force }
 }

@@ -18,6 +18,7 @@
 #include "replay_binding_policy.h"
 #include "visible_lineage_policy.h"
 #include "visible_tail_policy.h"
+#include "lod_policy.h"
 
 HMODULE proxy_system_dxgi(void);
 
@@ -83,6 +84,57 @@ typedef HRESULT(WINAPI *PFN_Compile)(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_M
 static SRWLOCK pso_lock = SRWLOCK_INIT;
 static ID3D12Device *g_device;
 
+/* Opt-in sampler creation only. A dynamic anisotropic wrap sampler is
+   a candidate for tiled world textures, not proof of its shader/material.
+   A shared descriptor can still affect other passes. Never change static
+   samplers, comparison/clamp samplers or descriptors from third-party DLLs. */
+static void (STDMETHODCALLTYPE *azlod_real_create)(ID3D12Device *,const D3D12_SAMPLER_DESC *,D3D12_CPU_DESCRIPTOR_HANDLE);
+static volatile LONG64 azlod_seen,azlod_main,azlod_changed;
+static void STDMETHODCALLTYPE azlod_create(ID3D12Device *dev,const D3D12_SAMPLER_DESC *desc,D3D12_CPU_DESCRIPTOR_HANDLE dst){
+    float offset=0.0f,adjusted=0.0f;
+    if(dev!=g_device||!desc||!dlss_sr_lod_bias(&offset)){
+        azlod_real_create(dev,desc,dst);return;
+    }
+    InterlockedIncrement64(&azlod_seen);
+    HMODULE caller=NULL;
+    if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+       (LPCWSTR)__builtin_return_address(0),&caller)||caller!=GetModuleHandleW(NULL)){
+        azlod_real_create(dev,desc,dst);return;
+    }
+    InterlockedIncrement64(&azlod_main);
+    int eligible=desc->Filter==D3D12_FILTER_ANISOTROPIC&&desc->MaxAnisotropy>=4&&
+        desc->AddressU==D3D12_TEXTURE_ADDRESS_MODE_WRAP&&desc->AddressV==D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    if(!azlod_apply(eligible,desc->MipLODBias,desc->MinLOD,desc->MaxLOD,offset,&adjusted)){
+        azlod_real_create(dev,desc,dst);return;
+    }
+    D3D12_SAMPLER_DESC copy=*desc;copy.MipLODBias=adjusted;
+    LONG64 count=InterlockedIncrement64(&azlod_changed);
+    if(count<=24||(count%256)==0)log_msg("LOD SAMPLER changed=%lld old=%.6f new=%.6f aniso=%u caller=main_exe candidateOnly=1",
+        (long long)count,(double)desc->MipLODBias,(double)copy.MipLODBias,desc->MaxAnisotropy);
+    azlod_real_create(dev,&copy,dst);
+}
+static void azlod_hook(ID3D12Device *dev){
+    float offset;
+    if(!dlss_sr_lod_bias(&offset))return;
+    void **slot=VT_SLOT(dev,ID3D12DeviceVtbl,CreateSampler);
+    DWORD protect=0,ignored=0;
+    if(!*slot||*slot==(void *)azlod_create||!VirtualProtect(slot,sizeof(void *),PAGE_EXECUTE_READWRITE,&protect)){
+        log_msg("LOD HOOK unavailable");return;
+    }
+    azlod_real_create=(void (STDMETHODCALLTYPE *)(ID3D12Device *,const D3D12_SAMPLER_DESC *,D3D12_CPU_DESCRIPTOR_HANDLE))*slot;
+    InterlockedExchangePointer((PVOID volatile *)slot,(void *)azlod_create);
+    VirtualProtect(slot,sizeof(void *),protect,&ignored);
+    log_msg("LOD HOOK installed dynamicCreateSampler=1");
+}
+void hooks_lod_profile_report(unsigned rw,unsigned rh,unsigned ow,unsigned oh){
+    float offset;
+    if(!dlss_sr_lod_bias(&offset))return;
+    float recommended=0.0f;
+    int hasRecommendation=azlod_auto(rw,ow,&recommended);
+    log_msg("LOD PROFILE render=%ux%u output=%ux%u offset=%.6f recommendedBounded=%.6f recommendationValid=%d hookInstalled=%d observed=%lld mainCaller=%lld changed=%lld",
+        rw,rh,ow,oh,(double)offset,(double)recommended,hasRecommendation,azlod_real_create!=NULL,
+        (long long)InterlockedCompareExchange64(&azlod_seen,0,0),(long long)InterlockedCompareExchange64(&azlod_main,0,0),(long long)InterlockedCompareExchange64(&azlod_changed,0,0));
+}
 /* Game PSOs we recognise, with our full-resolution variant for the motion-vector pass. */
 #define MAX_VARIANTS 32
 static struct {
@@ -892,7 +944,7 @@ static void azguide_record(ID3D12GraphicsCommandList *cl,ListState *s,UINT w,UIN
        s->trace_query_unknown||s->trace_topology!=D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST||
        cl->lpVtbl->GetType(cl)!=D3D12_COMMAND_LIST_TYPE_DIRECT||w>3840||h>2160)return;
     AcquireSRWLockExclusive(&azt_lock);
-    int active=azdbg.active&&azdbg.id==1&&azdbg.observed<azrp_capture_groups(azrp_profile)&&!azt_incomplete;
+    int active=azdbg.active&&azdbg.id==1&&azdbg.observed<azpv_capture_group_limit()&&!azt_incomplete;
     uint64_t resolve=azt_frame+1;
     if(active&&!s->trace_recording_id)s->trace_recording_id=++azt_generation;
     uint64_t recording=s->trace_recording_id;
@@ -1300,6 +1352,7 @@ static HRESULT WINAPI hook_D3D12CreateDevice(IUnknown *adapter, D3D_FEATURE_LEVE
             patch_slot(VT_SLOT(dev, ID3D12DeviceVtbl, CreateDepthStencilView), (void *)hook_CreateDepthStencilView, (void **)&real_CreateDepthStencilView);
             patch_slot(VT_SLOT(dev, ID3D12Device1Vtbl, CreatePipelineLibrary), (void *)hook_CreatePipelineLibrary, (void **)&real_CreatePipelineLibrary);
             dlss_init(dev);
+            azlod_hook(dev);
             fg_trace_init();
             debug_trace_init();
             sr_trace_hook_device(dev);

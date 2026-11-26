@@ -98,7 +98,33 @@ try {
     if($autoMeta.visible_seconds_requested -ne 60 -or $autoMeta.visible_duration_ms_observed -ne 60000){throw 'Wrong requested/observed Visible SR duration metadata.'}
     if($autoMeta.present_trace_requested -or $autoMeta.producer_gpu_wait_requested -or $autoMeta.visible_hdr_requested -or $autoMeta.hdr_live_requested){throw 'Experimental switches must default off.'}
 
+    # Collect-only never changes either DLL; Auto selects the known child.
+    [IO.File]::WriteAllBytes((Join-Path $game 'dxgi.dll'),[byte[]](1,2,3))
+    [IO.File]::WriteAllBytes((Join-Path $game 'dxgi-dlaa.dll'),[byte[]](4,5,6))
+    $frontHash=(Get-FileHash -LiteralPath (Join-Path $game 'dxgi.dll')).Hash
+    $childHash=(Get-FileHash -LiteralPath (Join-Path $game 'dxgi-dlaa.dll')).Hash
+    $nrLog=Join-Path $root 'nexus.log'
+    'fixture NR guide contract' | Set-Content -LiteralPath $nrLog
+    $chainDest=Join-Path $root 'chain'
+    & $launcher @autoOpts -NRLogPath $nrLog -Destination $chainDest
+    $chainZip=@(Get-ChildItem -LiteralPath $chainDest -Filter '*.zip')
+    $chainContents=Join-Path $root 'chain-contents'
+    Expand-Archive -LiteralPath $chainZip[0].FullName -DestinationPath $chainContents
+    $chainMeta=Get-Content -LiteralPath (Join-Path $chainContents 'capture.json') -Raw | ConvertFrom-Json
+    if($chainMeta.proxy_mode -ne 'ReShade' -or $chainMeta.proxy_target -ne 'dxgi-dlaa.dll' -or !$chainMeta.front_proxy_preserved -or !$chainMeta.nr_log_packaged){throw 'Wrong chain evidence metadata.'}
+    if((Get-FileHash -LiteralPath (Join-Path $game 'dxgi.dll')).Hash -ne $frontHash -or (Get-FileHash -LiteralPath (Join-Path $game 'dxgi-dlaa.dll')).Hash -ne $childHash){throw 'Collect-only mutated the chain.'}
+
     $launcherAst = [System.Management.Automation.Language.Parser]::ParseFile($launcher, [ref]$null, [ref]$null)
+    $editFn=$launcherAst.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-RenderConfigEdit'},$false)
+    . ([scriptblock]::Create($editFn.Extent.Text))
+    $utf8=[Text.UTF8Encoding]::new($false,$true)
+    $nl=[string][char]13+[char]10
+    $original=[string][char]0xFEFF+"resolution=1080 ; preserve"+$nl+"hdr=1"+$nl
+    $edit=Get-RenderConfigEdit ($utf8.GetBytes($original)) 800
+    if($edit.OriginalHeight -ne 1080 -or $utf8.GetString($edit.Bytes) -cne $original.Replace('1080','800')){throw 'Config edit changed unrelated bytes.'}
+    $rejected=$false
+    try{Get-RenderConfigEdit ($utf8.GetBytes("resolution=720"+$nl+"resolution=1080")) 800 | Out-Null}catch{$rejected=$true}
+    if(!$rejected){throw 'Ambiguous config was accepted.'}
     $completion = $launcherAst.Find({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Read-AutoCompletion'
