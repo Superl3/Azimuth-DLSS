@@ -10,9 +10,12 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <limits.h>
 
 #include "game_profile.h"
 #include "common.h"
+#include "replay_binding_policy.h"
+#include "visible_tail_policy.h"
 
 HMODULE proxy_system_dxgi(void);
 
@@ -120,12 +123,27 @@ static void(STDMETHODCALLTYPE *real_SetDescriptorHeaps)(ID3D12GraphicsCommandLis
 static void(STDMETHODCALLTYPE *real_SetComputeRootSignature)(ID3D12GraphicsCommandList *, ID3D12RootSignature *);
 static void(STDMETHODCALLTYPE *real_SetGraphicsRootSignature)(ID3D12GraphicsCommandList *, ID3D12RootSignature *);
 static void(STDMETHODCALLTYPE *real_SetGraphicsRootDescriptorTable)(ID3D12GraphicsCommandList *, UINT, D3D12_GPU_DESCRIPTOR_HANDLE);
+static void(STDMETHODCALLTYPE *real_SetComputeRootDescriptorTable)(ID3D12GraphicsCommandList *,UINT,D3D12_GPU_DESCRIPTOR_HANDLE);
+static void(STDMETHODCALLTYPE *real_SetGraphicsRootConstantBufferView)(ID3D12GraphicsCommandList *,UINT,D3D12_GPU_VIRTUAL_ADDRESS);
+static void(STDMETHODCALLTYPE *real_SetGraphicsRoot32BitConstant)(ID3D12GraphicsCommandList *,UINT,UINT,UINT);
+static void(STDMETHODCALLTYPE *real_SetGraphicsRoot32BitConstants)(ID3D12GraphicsCommandList *,UINT,UINT,const void *,UINT);
+static void(STDMETHODCALLTYPE *real_ClearState)(ID3D12GraphicsCommandList *,ID3D12PipelineState *);
+static HRESULT(STDMETHODCALLTYPE *real_CreateDescriptorHeap)(ID3D12Device *,const D3D12_DESCRIPTOR_HEAP_DESC *,REFIID,void **);
+static void(STDMETHODCALLTYPE *real_CreateShaderResourceView)(ID3D12Device *,ID3D12Resource *,const D3D12_SHADER_RESOURCE_VIEW_DESC *,D3D12_CPU_DESCRIPTOR_HANDLE);
+static void(STDMETHODCALLTYPE *real_CreateUnorderedAccessView)(ID3D12Device *,ID3D12Resource *,ID3D12Resource *,const D3D12_UNORDERED_ACCESS_VIEW_DESC *,D3D12_CPU_DESCRIPTOR_HANDLE);
+static void(STDMETHODCALLTYPE *real_CreateConstantBufferView)(ID3D12Device *,const D3D12_CONSTANT_BUFFER_VIEW_DESC *,D3D12_CPU_DESCRIPTOR_HANDLE);
+static void(STDMETHODCALLTYPE *real_CopyDescriptorsSimple)(ID3D12Device *,UINT,D3D12_CPU_DESCRIPTOR_HANDLE,D3D12_CPU_DESCRIPTOR_HANDLE,D3D12_DESCRIPTOR_HEAP_TYPE);
 static void(STDMETHODCALLTYPE *real_CreateRenderTargetView)(ID3D12Device *, ID3D12Resource *, const D3D12_RENDER_TARGET_VIEW_DESC *, D3D12_CPU_DESCRIPTOR_HANDLE);
 static void(STDMETHODCALLTYPE *real_CreateDepthStencilView)(ID3D12Device *, ID3D12Resource *, const D3D12_DEPTH_STENCIL_VIEW_DESC *, D3D12_CPU_DESCRIPTOR_HANDLE);
 static HRESULT(WINAPI *real_CreateDXGIFactory)(REFIID, void **);
 static HRESULT(WINAPI *real_CreateDXGIFactory1)(REFIID, void **);
 static HRESULT(WINAPI *real_CreateDXGIFactory2)(UINT, REFIID, void **);
 static HRESULT(STDMETHODCALLTYPE *real_CreateSwapChainForHwnd)(IDXGIFactory2 *, IUnknown *, HWND, const DXGI_SWAP_CHAIN_DESC1 *, const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *, IDXGIOutput *, IDXGISwapChain1 **);
+
+static int sr_trace_enabled(void);
+static void sr_trace_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *,ID3D12PipelineState *);
+static void(STDMETHODCALLTYPE *real_CopyResource)(ID3D12GraphicsCommandList *,ID3D12Resource *,ID3D12Resource *);
+static void(STDMETHODCALLTYPE *real_CopyTextureRegion)(ID3D12GraphicsCommandList *,const D3D12_TEXTURE_COPY_LOCATION *,UINT,UINT,UINT,const D3D12_TEXTURE_COPY_LOCATION *,const D3D12_BOX *);
 
 /* ---------------------------------------------------------------- shaders */
 
@@ -140,7 +158,8 @@ static ID3DBlob *compile(const char *src, const char *entry, const char *target)
         }
     }
     ID3DBlob *code = NULL, *errors = NULL;
-    HRESULT hr = fn(src, strlen(src), entry, NULL, NULL, entry, target,
+    const D3D_SHADER_MACRO padded[] = {{"AZIMUTH_SR_PADDED", "1"}, {NULL, NULL}};
+    HRESULT hr = fn(src, strlen(src), entry, dlss_sr_mode() == AZSR_PADDED ? padded : NULL, NULL, entry, target,
                     D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
     if (FAILED(hr)) {
         log_msg("compile %s/%s failed 0x%08lx: %s", entry, target, hr,
@@ -164,6 +183,9 @@ static const GameProfile *profile_for_shader(const D3D12_SHADER_BYTECODE *ps, in
 /* ---------------------------------------------------------------- PSO hook */
 
 static int pso_known(ID3D12PipelineState *pso);
+static void debug_shader_dump_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc,int role);
+static void postfx_replay_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc,ID3D12PipelineState *pso);
+static void visible_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc,ID3D12PipelineState *pso);
 
 static void remember_pso(ID3D12PipelineState *pso, ID3D12PipelineState *variant, int role) {
     AcquireSRWLockExclusive(&pso_lock);
@@ -189,8 +211,12 @@ static void consider_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc, ID3D12P
         return;
     }
 
+    sr_trace_pso(desc,pso);
+    postfx_replay_pso(desc,pso);
+    visible_pso(desc,pso);
     int role = ROLE_NONE;
     const GameProfile *profile = profile_for_shader(&desc->PS, &role);
+    if(dlss_sr_debug_mode())debug_shader_dump_pso(desc,profile?role:ROLE_NONE);
     if (!profile || role == ROLE_NONE || pso_known(pso)) {
         return;
     }
@@ -204,6 +230,11 @@ static void consider_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc, ID3D12P
         return;
     }
 
+    if(dlss_sr_trace_only()) {
+        remember_pso(pso,NULL,ROLE_MV);
+        log_msg("%s native velocity pass found (trace-only; no replacement PSO)",profile->name);
+        return;
+    }
     ID3DBlob *ps = compile(profile->mv_ps_hlsl, "main", "ps_5_0");
     if (!ps) {
         log_msg("%s motion-vector replacement shader compilation failed", profile->name);
@@ -322,7 +353,21 @@ typedef struct {
     ID3D12DescriptorHeap *heaps[2];
     ID3D12RootSignature *compute_rs;
     UINT tables_mask;
-    D3D12_GPU_DESCRIPTOR_HANDLE tables[32];
+    D3D12_GPU_DESCRIPTOR_HANDLE tables[AZRB_TABLES];
+    /* Separate tracking so the legacy DLAA restore path is not changed. */
+    ID3D12RootSignature *trace_graphics_rs;
+    uint64_t trace_tables_mask,trace_compute_mask,trace_graphics_cbv_mask;
+    int trace_bindings_uncertain,trace_bindings_known;
+    D3D12_GPU_DESCRIPTOR_HANDLE trace_compute_tables[AZRB_TABLES];
+    D3D12_GPU_VIRTUAL_ADDRESS trace_graphics_cbv[AZRB_TABLES];
+    uint64_t trace_graphics_constant_words[AZRB_TABLES];
+    unsigned long long trace_recording_id,trace_work_seq,trace_watch_resolve;
+    unsigned trace_watch_count;
+    int trace_watch_active;
+    AzvisTail trace_tail;
+    D3D_PRIMITIVE_TOPOLOGY trace_topology;
+    UINT trace_queries;
+    int trace_predicated, trace_query_unknown;
 } ListState;
 
 /* Azimuth creates command lists continually and never tells us when one dies, so this
@@ -421,11 +466,17 @@ static const ViewEntry *view_find(SIZE_T handle) {
     return NULL;
 }
 
+#include "sr_route.inl"
+#include "fg_trace.inl"
+#include "debug_trace.inl"
+#include "sr_route_hooks.inl"
+
 static void STDMETHODCALLTYPE hook_CreateRenderTargetView(ID3D12Device *dev, ID3D12Resource *res,
                                                           const D3D12_RENDER_TARGET_VIEW_DESC *desc,
                                                           D3D12_CPU_DESCRIPTOR_HANDLE h) {
     real_CreateRenderTargetView(dev, res, desc, h);
     view_record(h, res, desc ? desc->Format : DXGI_FORMAT_UNKNOWN);
+    sr_trace_rtv(res,desc,h);
 }
 
 static void STDMETHODCALLTYPE hook_CreateDepthStencilView(ID3D12Device *dev, ID3D12Resource *res,
@@ -454,7 +505,8 @@ static BOOL is_scene_dsv(D3D12_CPU_DESCRIPTOR_HANDLE h) {
 
 static void apply_viewports(ID3D12GraphicsCommandList *cl, ListState *s) {
     float jx, jy;
-    if (s->dsv_scene && s->num_vp && dlss_jitter(&jx, &jy)) {
+    if (s->dsv_scene && s->num_vp &&
+        dlss_sr_jitter_size((UINT)s->vp[0].Width, (UINT)s->vp[0].Height) && dlss_jitter(&jx, &jy)) {
         D3D12_VIEWPORT vp[4];
         memcpy(vp, s->vp, s->num_vp * sizeof(*vp));
         for (UINT i = 0; i < s->num_vp; ++i) {
@@ -473,12 +525,15 @@ static void apply_viewports(ID3D12GraphicsCommandList *cl, ListState *s) {
 
 static HRESULT STDMETHODCALLTYPE hook_Reset(ID3D12GraphicsCommandList *cl, ID3D12CommandAllocator *a,
                                             ID3D12PipelineState *pso) {
+    sr_trace_reset(cl);
     ListState *s = state_for(cl);
     if (s) {
         memset((char *)s + sizeof(s->list), 0, sizeof(*s) - sizeof(s->list));
         s->pso = pso;
     }
-    return real_Reset(cl, a, pso);
+    HRESULT hr=real_Reset(cl,a,pso);
+    if(SUCCEEDED(hr)){if(s)s->trace_bindings_known=1;preview_reset(cl);}
+    return hr;
 }
 
 static void STDMETHODCALLTYPE hook_SetPipelineState(ID3D12GraphicsCommandList *cl, ID3D12PipelineState *pso) {
@@ -542,8 +597,13 @@ static void STDMETHODCALLTYPE hook_RSSetScissorRects(ID3D12GraphicsCommandList *
 static void STDMETHODCALLTYPE hook_SetDescriptorHeaps(ID3D12GraphicsCommandList *cl, UINT n, ID3D12DescriptorHeap *const *h) {
     ListState *s = state_for(cl);
     if (s) {
-        s->num_heaps = n > 2 ? 2 : n;
-        memcpy(s->heaps, h, s->num_heaps * sizeof(*h));
+        UINT tracked_n = n > 2 ? 2 : n;
+        if(n>2||(n&&!h))s->trace_bindings_uncertain=1;
+        if (tracked_n != s->num_heaps || (tracked_n && (!h || memcmp(s->heaps,h,tracked_n*sizeof(*h))))){
+            s->trace_tables_mask = 0;s->trace_compute_mask=0;
+        }
+        s->num_heaps = tracked_n;
+        if (tracked_n && h) memcpy(s->heaps, h, tracked_n * sizeof(*h));
     }
     real_SetDescriptorHeaps(cl, n, h);
 }
@@ -551,15 +611,26 @@ static void STDMETHODCALLTYPE hook_SetDescriptorHeaps(ID3D12GraphicsCommandList 
 static void STDMETHODCALLTYPE hook_SetComputeRootSignature(ID3D12GraphicsCommandList *cl, ID3D12RootSignature *rs) {
     ListState *s = state_for(cl);
     if (s) {
+        if(s->compute_rs!=rs)s->trace_compute_mask=0;
         s->compute_rs = rs;
     }
     real_SetComputeRootSignature(cl, rs);
 }
 
+static void STDMETHODCALLTYPE hook_SetComputeRootDescriptorTable(ID3D12GraphicsCommandList *cl,UINT index,D3D12_GPU_DESCRIPTOR_HANDLE base){
+    ListState *s=state_for(cl);
+    if(s&&index<AZRB_TABLES&&base.ptr){s->trace_compute_tables[index]=base;s->trace_compute_mask|=azrb_bit(index);}
+    else if(s)s->trace_bindings_uncertain=1;
+    real_SetComputeRootDescriptorTable(cl,index,base);
+}
 static void STDMETHODCALLTYPE hook_SetGraphicsRootSignature(ID3D12GraphicsCommandList *cl, ID3D12RootSignature *rs) {
     ListState *s = state_for(cl);
     if (s) {
-        s->tables_mask = 0;
+        if(!azrp_sr_enabled||s->trace_graphics_rs!=rs){
+            s->tables_mask=0;s->trace_tables_mask=0;s->trace_graphics_cbv_mask=0;
+            memset(s->trace_graphics_constant_words,0,sizeof(s->trace_graphics_constant_words));
+        }
+        s->trace_graphics_rs=rs;
     }
     real_SetGraphicsRootSignature(cl, rs);
 }
@@ -567,14 +638,53 @@ static void STDMETHODCALLTYPE hook_SetGraphicsRootSignature(ID3D12GraphicsComman
 static void STDMETHODCALLTYPE hook_SetGraphicsRootDescriptorTable(ID3D12GraphicsCommandList *cl, UINT index,
                                                                   D3D12_GPU_DESCRIPTOR_HANDLE base) {
     ListState *s = state_for(cl);
-    if (s && index < 32) {
-        s->tables[index] = base;
-        s->tables_mask |= 1u << index;
+    if(s&&(index>=AZRB_TABLES||!base.ptr))s->trace_bindings_uncertain=1;
+    if(s&&index<AZRB_TABLES){
+        s->tables[index]=base;
+        if(index<32)s->tables_mask|=1u<<index;
+        if(base.ptr)s->trace_tables_mask|=azrb_bit(index);
+        else s->trace_tables_mask&=~azrb_bit(index);
     }
     real_SetGraphicsRootDescriptorTable(cl, index, base);
 }
+/* Native direct arguments do not depend on a descriptor heap. Track their
+   presence instead of inventing a CPU descriptor for a root CBV. */
+static void STDMETHODCALLTYPE hook_SetGraphicsRootConstantBufferView(ID3D12GraphicsCommandList *cl,UINT index,D3D12_GPU_VIRTUAL_ADDRESS va){
+    ListState *s=state_for(cl);
+    if(s&&index<AZRB_TABLES){
+        s->trace_graphics_cbv[index]=va;
+        if(va&&!(va&255u))s->trace_graphics_cbv_mask|=azrb_bit(index);
+        else s->trace_graphics_cbv_mask&=~azrb_bit(index);
+    }else if(s)s->trace_bindings_uncertain=1;
+    real_SetGraphicsRootConstantBufferView(cl,index,va);
+}
+static void STDMETHODCALLTYPE hook_SetGraphicsRoot32BitConstant(ID3D12GraphicsCommandList *cl,UINT index,UINT value,UINT offset){
+    ListState *s=state_for(cl);uint64_t words=azrb_words(offset,1);
+    if(s&&index<AZRB_TABLES&&words)s->trace_graphics_constant_words[index]|=words;
+    else if(s)s->trace_bindings_uncertain=1;
+    real_SetGraphicsRoot32BitConstant(cl,index,value,offset);
+}
+static void STDMETHODCALLTYPE hook_SetGraphicsRoot32BitConstants(ID3D12GraphicsCommandList *cl,UINT index,UINT count,const void *data,UINT offset){
+    ListState *s=state_for(cl);uint64_t words=azrb_words(offset,count);
+    if(s&&index<AZRB_TABLES&&words&&data)s->trace_graphics_constant_words[index]|=words;
+    else if(s&&count)s->trace_bindings_uncertain=1;
+    real_SetGraphicsRoot32BitConstants(cl,index,count,data,offset);
+}
+static void STDMETHODCALLTYPE hook_ClearState(ID3D12GraphicsCommandList *cl,ID3D12PipelineState *pso){
+    real_ClearState(cl,pso);
+    ListState *s=state_for(cl);
+    if(s){
+        /* ClearState does not close or reset the physical recording.
+           Retain its ID but require a new Reset for replay certainty. */
+        unsigned long long recording=s->trace_recording_id;
+        memset((char *)s+sizeof(s->list),0,sizeof(*s)-sizeof(s->list));
+        s->trace_recording_id=recording;s->pso=pso;
+        s->trace_bindings_uncertain=1;s->trace_query_unknown=1;
+    }
+}
 
 static void STDMETHODCALLTYPE hook_ResourceBarrier(ID3D12GraphicsCommandList *cl, UINT n, const D3D12_RESOURCE_BARRIER *b) {
+    if (sr_trace_enabled()) sr_trace_barriers(cl,state_for(cl),n,b);
     ID3D12Resource *color = scene_color, *depth = scene_depth;
     if (color || depth) {
         for (UINT i = 0; i < n; ++i) {
@@ -589,6 +699,7 @@ static void STDMETHODCALLTYPE hook_ResourceBarrier(ID3D12GraphicsCommandList *cl
         }
     }
     real_ResourceBarrier(cl, n, b);
+    if(azvis_observing()){ListState *s=state_for(cl);visible_work_barriers(cl,s,n,b);visible_trace_barriers(cl,s,n,b);}
 }
 
 void hooks_transition(ID3D12GraphicsCommandList *cl, ID3D12Resource *r, D3D12_RESOURCE_STATES from,
@@ -610,12 +721,16 @@ static void restore_after_dlss(ID3D12GraphicsCommandList *cl, ListState *s) {
     }
     if (s->compute_rs) {
         real_SetComputeRootSignature(cl, s->compute_rs);
+        if(azrp_sr_enabled&&real_SetComputeRootDescriptorTable)for(UINT i=0;i<AZRB_TABLES;++i)
+            if(s->trace_compute_mask&azrb_bit(i))real_SetComputeRootDescriptorTable(cl,i,s->trace_compute_tables[i]);
     }
     for (UINT i = 0; i < 32; ++i) {
         if (s->tables_mask & (1u << i)) {
             real_SetGraphicsRootDescriptorTable(cl, i, s->tables[i]);
         }
     }
+    if(azrp_sr_enabled&&s->trace_graphics_rs)for(UINT i=32;i<AZRB_TABLES;++i)
+        if(s->trace_tables_mask&azrb_bit(i))real_SetGraphicsRootDescriptorTable(cl,i,s->tables[i]);
     real_SetPipelineState(cl, s->pso);
 }
 
@@ -837,14 +952,46 @@ static void count_frame(void) {
     ReleaseSRWLockExclusive(&mv_lock);
 }
 
+/* Capture allocation and viewport separately: the resolve viewport is not
+   necessarily the main geometry viewport. No GPU readback or new GPU work. */
+static void sr_trace_geometry(ListState *s) {
+    static volatile LONG budget;
+    if (!sr_trace_enabled() || !s || !scene_color || !scene_depth ||
+        (dlss_sr_debug_mode() ? !azdbg_sample(0) : InterlockedIncrement(&budget) > 64)) return;
+    D3D12_RESOURCE_DESC c, d;
+    scene_color->lpVtbl->GetDesc(scene_color, &c);
+    scene_depth->lpVtbl->GetDesc(scene_depth, &d);
+    log_msg("SR GEOMETRY color=%ux%u depth=%ux%u cfmt=%d dfmt=%d samples=%u/%u vpCount=%u viewport=%.2f,%.2f,%.2f,%.2f scCount=%u scissor=%ld,%ld,%ld,%ld",
+        (UINT)c.Width, c.Height, (UINT)d.Width, d.Height, (int)c.Format, (int)d.Format,
+        c.SampleDesc.Count, d.SampleDesc.Count, s->num_vp,
+        s->num_vp ? s->vp[0].TopLeftX : 0.0, s->num_vp ? s->vp[0].TopLeftY : 0.0,
+        s->num_vp ? s->vp[0].Width : 0.0, s->num_vp ? s->vp[0].Height : 0.0,
+        s->num_sc, (long)(s->num_sc ? s->sc[0].left : 0),
+        (long)(s->num_sc ? s->sc[0].top : 0), (long)(s->num_sc ? s->sc[0].right : 0),
+        (long)(s->num_sc ? s->sc[0].bottom : 0));
+}
+static void sr_trace_native_velocity(ListState *s) {
+    static volatile LONG budget;
+    if (!sr_trace_enabled() || !s || !s->num_vp ||
+        (dlss_sr_debug_mode() ? !azdbg_sample(1) : InterlockedIncrement(&budget) > 64)) return;
+    const ViewEntry *rt = s->num_rtv ? view_find(s->rtv[0].ptr) : NULL;
+    log_msg("SR NATIVE VELOCITY target=%ux%u format=%d viewport=%.2f,%.2f,%.2f,%.2f",
+        rt ? rt->width : 0, rt ? rt->height : 0, rt ? (int)rt->format : 0,
+        s->vp[0].TopLeftX, s->vp[0].TopLeftY, s->vp[0].Width, s->vp[0].Height);
+}
+
 static void run_dlss(ID3D12GraphicsCommandList *cl, ListState *s) {
+    sr_trace_geometry(s);
     LONG64 seq = mv_seq;
     static LONG stale_resolves;
     static LONG fallback_active;
     int fallback = 0;
 
     count_frame();
-    if (!dlss_enabled() || !scene_color || !scene_depth || !mv_tex) {
+    if (!dlss_enabled() || !scene_color || !scene_depth || !mv_tex || dlss_sr_trace_only() ||
+        (dlss_sr_mode()==AZSR_ROUTE && !sr_trace_route_ready())) {
+        if (dlss_sr_mode()==AZSR_ROUTE) dlss_sr_route_result(0);
+        sr_trace_resolved(cl,scene_color,NULL);
         return;
     }
 
@@ -855,6 +1002,8 @@ static void run_dlss(ID3D12GraphicsCommandList *cl, ListState *s) {
            no fresh MV pass, switch to a history-reset fallback: zero vectors, no
            temporal jitter, and a reset on every frame. */
         if (n < 2) {
+            if (dlss_sr_mode() >= AZSR_PROBE) dlss_end_frame(0);
+            sr_trace_resolved(cl,scene_color,NULL);
             return;
         }
         fallback = 1;
@@ -887,11 +1036,35 @@ static void run_dlss(ID3D12GraphicsCommandList *cl, ListState *s) {
         /* dlss_end_frame(0) below forces reset and keeps jitter disabled. */
     }
 
+    const GameProfile *profile = game_profile_active();
+    AzSRSize resolve = {0,0};
+    int top_left = 0;
+    if (s->num_vp == 1 && s->vp[0].Width > 0 && s->vp[0].Height > 0 &&
+        s->vp[0].Width <= 16384 && s->vp[0].Height <= 16384) {
+        resolve = (AzSRSize){(UINT)s->vp[0].Width,(UINT)s->vp[0].Height};
+        top_left = s->vp[0].TopLeftX == 0 && s->vp[0].TopLeftY == 0 &&
+            s->vp[0].Width == (float)resolve.w && s->vp[0].Height == (float)resolve.h &&
+            s->num_sc == 1 && azsr_scissor_ok(dlss_sr_mode(),resolve,s->sc[0].left,s->sc[0].top,s->sc[0].right,s->sc[0].bottom);
+    }
     int ok = dlss_run(cl, scene_color, (D3D12_RESOURCE_STATES)color_state, scene_depth,
-                     (D3D12_RESOURCE_STATES)depth_state, mv_tex, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                     (D3D12_RESOURCE_STATES)depth_state, mv_tex, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                     resolve,top_left,profile && !strcmp(profile->id,"fh2"),!fallback);
     ReleaseSRWLockShared(&mv_lock);
     InterlockedExchange(&scene_color_state, color_state);
     InterlockedExchange(&scene_depth_state, depth_state);
+    if (s->trace_graphics_rs != saved.trace_graphics_rs) {
+        saved.trace_graphics_rs=NULL; saved.trace_tables_mask=0;
+        saved.trace_bindings_uncertain=1;
+    } else if(!azrp_sr_enabled) saved.trace_tables_mask &= saved.tables_mask;
+    if(azrp_sr_enabled){
+        /* NGX may change direct root arguments. This legacy restoration
+           is not proof of their values; require subsequent native binds
+           before accepting the SR replay. If a root signature changed,
+           an entire recording is uncertain until reset. */
+        saved.trace_graphics_cbv_mask=0;
+        memset(saved.trace_graphics_constant_words,0,sizeof(saved.trace_graphics_constant_words));
+        if(s->compute_rs!=saved.compute_rs||s->trace_bindings_uncertain)saved.trace_bindings_uncertain=1;
+    }
     *s = saved;
     restore_after_dlss(cl, s);
 
@@ -899,6 +1072,7 @@ static void run_dlss(ID3D12GraphicsCommandList *cl, ListState *s) {
        Fallback frames deliberately remain disconnected from history: dlss_end_frame(0)
        keeps reset asserted and suppresses camera jitter until fresh MVs return. */
     dlss_end_frame((!fallback && ok) ? 1 : 0);
+    sr_trace_resolved(cl,scene_color,(!fallback && ok && dlss_sr_mode()==AZSR_ROUTE)?dlss_sr_route_output():NULL);
 }
 
 /* Resolve dispatch is exact-hash-specific inside the active game profile. */
@@ -907,17 +1081,27 @@ static void STDMETHODCALLTYPE hook_DrawInstanced(ID3D12GraphicsCommandList *cl, 
     ListState *s = state_for(cl);
     ID3D12PipelineState *variant = NULL;
     int role = s ? pso_lookup(s->pso, &variant) : ROLE_NONE;
+    visible_count_work(cl,s,"DrawInstanced",NULL,NULL,vc,ic,sv,si);
+    debug_trace_draw(cl,s,vc,role);
     if (role == ROLE_RESOLVE && s) {
+        sr_trace_begin_resolve();
         BOOL scene_ok = note_scene_resources(s);
         real_DrawInstanced(cl, vc, ic, sv, si);
         if (scene_ok) {
             run_dlss(cl, s);
         }
         return;
-    } else if (role == ROLE_MV && variant && s && s->num_vp) {
-        record_mv_pass(cl, s, variant, vc, ic, sv, si);
+    } else if (role == ROLE_MV && s && s->num_vp) {
+        sr_trace_native_velocity(s);
+        if (variant && !dlss_sr_trace_only()) record_mv_pass(cl, s, variant, vc, ic, sv, si);
     }
+    fg_trace_draw(cl,s,vc,ic,role,0);
+    if (sr_trace_draw(cl,s,vc,ic,role,sv==0 && si==0)) return;
     real_DrawInstanced(cl, vc, ic, sv, si);
+    if(role==ROLE_NONE){
+        visible_trace_draw(cl,s,vc,ic,0,sv,0,si);
+        if(vc==3&&ic==1)preview_after_draw(cl,s,sv==0&&si==0);
+    }
 }
 
 static void STDMETHODCALLTYPE hook_DrawIndexedInstanced(ID3D12GraphicsCommandList *cl, UINT index_count,
@@ -926,7 +1110,10 @@ static void STDMETHODCALLTYPE hook_DrawIndexedInstanced(ID3D12GraphicsCommandLis
     ListState *s = state_for(cl);
     ID3D12PipelineState *variant = NULL;
     int role = s ? pso_lookup(s->pso, &variant) : ROLE_NONE;
+    visible_count_work(cl,s,"DrawIndexedInstanced",NULL,NULL,index_count,instance_count,start_index,(UINT)base_vertex);
+    debug_trace_draw(cl,s,index_count,role);
     if (role == ROLE_RESOLVE && s) {
+        sr_trace_begin_resolve();
         const GameProfile *profile = game_profile_active();
         BOOL scene_ok = note_scene_resources(s);
         if (profile && profile->dispatch_indexed_resolve) {
@@ -936,10 +1123,14 @@ static void STDMETHODCALLTYPE hook_DrawIndexedInstanced(ID3D12GraphicsCommandLis
             }
             return;
         }
-    } else if (role == ROLE_MV && variant && s && s->num_vp) {
-        record_mv_pass_indexed(cl, s, variant, index_count, instance_count, start_index, base_vertex, start_instance);
+    } else if (role == ROLE_MV && s && s->num_vp) {
+        sr_trace_native_velocity(s);
+        if (variant && !dlss_sr_trace_only()) record_mv_pass_indexed(cl, s, variant, index_count, instance_count, start_index, base_vertex, start_instance);
     }
+    fg_trace_draw(cl,s,index_count,instance_count,role,1);
+    if (sr_trace_draw(cl,s,index_count,instance_count,role,start_index==0 && base_vertex==0 && start_instance==0)) return;
     real_DrawIndexedInstanced(cl, index_count, instance_count, start_index, base_vertex, start_instance);
+    if(role==ROLE_NONE)visible_trace_draw(cl,s,index_count,instance_count,1,start_index,base_vertex,start_instance);
 }
 
 /* ---------------------------------------------------------------- device hooks */
@@ -957,6 +1148,14 @@ static void hook_command_list(ID3D12GraphicsCommandList *cl) {
     patch_slot(VT_SLOT(cl, ID3D12GraphicsCommandListVtbl, SetComputeRootSignature), (void *)hook_SetComputeRootSignature, (void **)&real_SetComputeRootSignature);
     patch_slot(VT_SLOT(cl, ID3D12GraphicsCommandListVtbl, SetGraphicsRootSignature), (void *)hook_SetGraphicsRootSignature, (void **)&real_SetGraphicsRootSignature);
     patch_slot(VT_SLOT(cl, ID3D12GraphicsCommandListVtbl, SetGraphicsRootDescriptorTable), (void *)hook_SetGraphicsRootDescriptorTable, (void **)&real_SetGraphicsRootDescriptorTable);
+    if(azrp_sr_enabled){
+        patch_slot(VT_SLOT(cl,ID3D12GraphicsCommandListVtbl,SetComputeRootDescriptorTable),(void *)hook_SetComputeRootDescriptorTable,(void **)&real_SetComputeRootDescriptorTable);
+        patch_slot(VT_SLOT(cl,ID3D12GraphicsCommandListVtbl,SetGraphicsRootConstantBufferView),(void *)hook_SetGraphicsRootConstantBufferView,(void **)&real_SetGraphicsRootConstantBufferView);
+        patch_slot(VT_SLOT(cl,ID3D12GraphicsCommandListVtbl,SetGraphicsRoot32BitConstant),(void *)hook_SetGraphicsRoot32BitConstant,(void **)&real_SetGraphicsRoot32BitConstant);
+        patch_slot(VT_SLOT(cl,ID3D12GraphicsCommandListVtbl,SetGraphicsRoot32BitConstants),(void *)hook_SetGraphicsRoot32BitConstants,(void **)&real_SetGraphicsRoot32BitConstants);
+        patch_slot(VT_SLOT(cl,ID3D12GraphicsCommandListVtbl,ClearState),(void *)hook_ClearState,(void **)&real_ClearState);
+    }
+    sr_trace_hook_list(cl);
 }
 
 static HRESULT STDMETHODCALLTYPE hook_CreateCommandList(ID3D12Device *dev, UINT mask, D3D12_COMMAND_LIST_TYPE type,
@@ -967,9 +1166,11 @@ static HRESULT STDMETHODCALLTYPE hook_CreateCommandList(ID3D12Device *dev, UINT 
         ID3D12GraphicsCommandList *cl = NULL;
         if (SUCCEEDED(IUnknown_QueryInterface((IUnknown *)*out, &IID_ID3D12GraphicsCommandList, (void **)&cl))) {
             hook_command_list(cl);
+            sr_trace_reset(cl);
             ListState *s = state_for(cl);
             if (s) {
-                s->pso = pso;
+                if (sr_trace_enabled()) memset((char *)s + sizeof(s->list),0,sizeof(*s)-sizeof(s->list));
+                s->pso = pso;s->trace_bindings_known=1;
             }
             ID3D12GraphicsCommandList_Release(cl);
         }
@@ -989,6 +1190,10 @@ static HRESULT WINAPI hook_D3D12CreateDevice(IUnknown *adapter, D3D_FEATURE_LEVE
             patch_slot(VT_SLOT(dev, ID3D12DeviceVtbl, CreateDepthStencilView), (void *)hook_CreateDepthStencilView, (void **)&real_CreateDepthStencilView);
             patch_slot(VT_SLOT(dev, ID3D12Device1Vtbl, CreatePipelineLibrary), (void *)hook_CreatePipelineLibrary, (void **)&real_CreatePipelineLibrary);
             dlss_init(dev);
+            fg_trace_init();
+            debug_trace_init();
+            sr_trace_hook_device(dev);
+            debug_trace_device_hook(dev);
             log_msg("D3D12 device hooked");
         }
     }
@@ -999,6 +1204,7 @@ static HRESULT WINAPI hook_D3D12CreateDevice(IUnknown *adapter, D3D_FEATURE_LEVE
 
 static void poll_f11(void) {
     static SHORT last;
+    if(azpv_auto_test)return;
     SHORT now = GetAsyncKeyState(VK_F11) & 0x8000;
     HWND fg = GetForegroundWindow();
     DWORD pid = 0;
@@ -1009,18 +1215,30 @@ static void poll_f11(void) {
         last = now;
         return;
     }
-    if (now && !last) {
+    if (now && !last && !dlss_sr_trace_only() && !dlss_sr_preview_mode()) {
         dlss_toggle();
     }
     last = now;
 }
 
+static void poll_f8(void) {
+    static SHORT last;
+    if(!dlss_sr_debug_mode())return;
+    debug_trace_poll();
+    if(azpv_auto_test)return;
+    SHORT now=GetAsyncKeyState(VK_F8)&0x8000;
+    HWND fg=GetForegroundWindow();DWORD pid=0;
+    if(fg)GetWindowThreadProcessId(fg,&pid);
+    if(pid==GetCurrentProcessId() && now && !last)debug_trace_toggle();
+    last=now;
+}
 static volatile LONG hotkey_thread_started;
 
 static DWORD WINAPI hotkey_thread_main(LPVOID unused) {
     (void)unused;
     for (;;) {
         poll_f11();
+        poll_f8();
         Sleep(10);
     }
 }
@@ -1044,10 +1262,17 @@ static HRESULT STDMETHODCALLTYPE hook_CreateSwapChainForHwnd(IDXGIFactory2 *f, I
                                                              const DXGI_SWAP_CHAIN_DESC1 *desc,
                                                              const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *fs,
                                                              IDXGIOutput *out, IDXGISwapChain1 **sc) {
+    uint64_t attempt=visible_create_begin(hwnd,device,desc,fs);
     HRESULT hr = real_CreateSwapChainForHwnd(f, device, hwnd, desc, fs, out, sc);
+    if(attempt)log_msg("VISIBLE SWAPCHAIN_RESULT attempt=%llu hwnd=%p hr=%08lx chain=%p qpc=%lld",
+        (unsigned long long)attempt,(void *)hwnd,(unsigned long)hr,SUCCEEDED(hr)&&sc?(void *)*sc:NULL,azvis_qpc());
     if (SUCCEEDED(hr) && sc && *sc) {
         ensure_hotkey_thread();
         log_msg("swap chain %ux%u format %d hooked", desc->Width, desc->Height, (int)desc->Format);
+        dlss_sr_note_swapchain(desc->Width, desc->Height);
+        AzfgChain snapshot;
+        fg_trace_swapchain(*sc,device,&snapshot);
+        if(attempt)visible_note_chain(attempt,(uintptr_t)hwnd,(uintptr_t)*sc,&snapshot);
     }
     return hr;
 }

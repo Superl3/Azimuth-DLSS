@@ -1,0 +1,144 @@
+name: Experimental SR FG debug and Windows build
+'on':
+  workflow_dispatch:
+  push:
+    branches:
+      - 'experiment/**'
+permissions:
+  contents: read
+concurrency:
+  group: azimuth-debug-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  windows-build:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Zig and verify its release hash
+        timeout-minutes: 6
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $archive = 'zig-x86_64-windows-0.15.2.zip'
+          # SHA-256 from the official Zig 0.15.2 release index.
+          $sha256 = '3a0ed1e8799a2f8ce2a6e6290a9ff22e6906f8227865911fb7ddedc3cc14cb0c'
+          $sources = @(
+            "https://zig.squirl.dev/${archive}?source=azimuth-dlss-ci"
+            "https://ziglang.org/download/0.15.2/$archive"
+          )
+          $zip = Join-Path $env:RUNNER_TEMP 'zig.zip'
+          $verified = $false
+          foreach ($uri in $sources) {
+            curl.exe --fail --silent --show-error --location --connect-timeout 10 --max-time 120 --output $zip $uri
+            if ($LASTEXITCODE -eq 0 -and (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -eq $sha256) {
+              $verified = $true
+              break
+            }
+            Write-Warning "Zig download failed or did not match the pinned hash: $uri"
+          }
+          if (!$verified) { throw 'Could not download a verified Zig archive' }
+          $dir = Join-Path $env:RUNNER_TEMP 'zig'
+          Expand-Archive $zip -DestinationPath $dir
+          $exe = Get-ChildItem $dir -Recurse -Filter zig.exe | Select-Object -First 1
+          if (!$exe) { throw 'zig.exe missing' }
+          $exe.Directory.FullName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Compile and run host policy and metadata tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          zig cc -target x86_64-windows-gnu -std=c11 -Wall -Wextra -Werror tests/test_sr_policy.c -o build/test_sr_policy.exe
+          ./build/test_sr_policy.exe
+          zig cc -target x86_64-windows-gnu -std=c11 -Wall -Wextra -Werror tests/test_route_policy.c -o build/test_route_policy.exe
+          ./build/test_route_policy.exe
+          zig cc -target x86_64-windows-gnu -std=c11 -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable tests/test_trace_metadata.c -o build/test_trace_metadata.exe
+          ./build/test_trace_metadata.exe
+          python tests/test_trace_analyzer.py
+          python tests/test_capture_sr.py
+          zig cc -target x86_64-windows-gnu -std=c11 -Wall -Wextra -Werror tests/test_debug_capture_policy.c -o build/test_debug_capture_policy.exe
+          ./build/test_debug_capture_policy.exe
+          zig cc -target x86_64-windows-gnu -std=c11 -Wall -Wextra -Werror tests/test_preview_batch_policy.c -o build/test_preview_batch_policy.exe
+          ./build/test_preview_batch_policy.exe
+          zig cc -target x86_64-windows-gnu -std=c11 -Wall -Wextra -Werror tests/test_visible_lineage_policy.c -o build/test_visible_lineage_policy.exe
+          ./build/test_visible_lineage_policy.exe
+          python tests/test_visible_trace_lifetime.py
+          zig cc -target x86_64-windows-gnu -std=c11 -Wall -Wextra -Werror tests/test_postfx_dxbc.c -o build/test_postfx_dxbc.exe
+          ./build/test_postfx_dxbc.exe
+          zig cc -target x86_64-windows-gnu -std=c11 -Wall -Wextra -Werror tests/test_replay_profile.c -o build/test_replay_profile.exe
+          ./build/test_replay_profile.exe
+          zig cc -target x86_64-windows-gnu -std=c11 -Wall -Wextra -Werror tests/test_postfx_compiler.c -o build/test_postfx_compiler.exe
+          ./build/test_postfx_compiler.exe
+          zig cc -target x86_64-windows-gnu -std=c11 -Wall -Wextra -Werror tests/test_replay_binding_policy.c -o build/test_replay_binding_policy.exe
+          ./build/test_replay_binding_policy.exe
+          python tests/test_debug_capture.py
+      - name: Test automatic capture packaging
+        shell: pwsh
+        run: ./tests/test_debug_launcher.ps1
+      - name: Build DXGI proxy with original Zig build
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIG=zig ./build.sh
+          test -s build/dxgi.dll
+      - name: Package standalone debug proxy (no NGX SDK needed)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path debug-build/tools -Force | Out-Null
+          Copy-Item build/dxgi.dll,LICENSE,LICENSE-RENDERDOC.txt,docs/DEBUG_CAPTURE.md -Destination debug-build
+          Copy-Item debug/azimuth_debug.ini,debug/Start-DebugCapture.cmd,debug/Start-DebugCapture.ps1 -Destination debug-build
+          Copy-Item tools/capture_sr.py,tools/analyze_sr_trace.py,tools/analyze_fg_trace.py,tools/analyze_debug_trace.py -Destination debug-build/tools
+          Get-FileHash debug-build/dxgi.dll -Algorithm SHA256 | Format-Table -AutoSize | Out-String | Set-Content debug-build/SHA256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: azimuth-debug-windows-x64
+          path: debug-build/
+          if-no-files-found: error
+      - name: Fetch pinned official NVIDIA DLSS SDK headers and x64 libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p third_party/DLSS
+          git -C third_party/DLSS init
+          git -C third_party/DLSS remote add origin https://github.com/NVIDIA/DLSS.git
+          git -C third_party/DLSS config remote.origin.promisor true
+          git -C third_party/DLSS config remote.origin.partialclonefilter blob:none
+          git -C third_party/DLSS sparse-checkout init --cone
+          git -C third_party/DLSS sparse-checkout set include lib/Windows_x86_64/x64
+          git -C third_party/DLSS fetch --depth 1 --filter=blob:none origin 9981c6350dc58c0ce21f024fd65e31e851c31689
+          git -C third_party/DLSS checkout --detach FETCH_HEAD
+          test "$(git -C third_party/DLSS rev-parse HEAD)" = 9981c6350dc58c0ce21f024fd65e31e851c31689
+          test -f third_party/DLSS/include/nvsdk_ngx.h
+          test -f third_party/DLSS/lib/Windows_x86_64/x64/nvsdk_ngx_s.lib
+      - name: Build NGX bridge using Visual Studio x64 tools
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) { throw 'Visual Studio x64 C++ build tools missing' }
+          @"
+          @echo off
+          call "$vs\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          call bridge\build_bridge.bat
+          exit /b %errorlevel%
+          "@ | Set-Content -Encoding ascii build-bridge-ci.cmd
+          cmd /d /c build-bridge-ci.cmd
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Collect experimental build only (no NVIDIA runtime)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path sr-build -Force | Out-Null
+          Copy-Item build/dxgi.dll,build/azimuth_ngx.dll,LICENSE,LICENSE-NVIDIA-DLSS.txt,LICENSE-RENDERDOC.txt,docs/SR_EXPERIMENT.md -Destination sr-build
+          New-Item -ItemType Directory -Path sr-build/tools -Force | Out-Null
+          Copy-Item tools/capture_sr.py,tools/analyze_sr_trace.py,tools/analyze_fg_trace.py,tools/analyze_debug_trace.py -Destination sr-build/tools
+          Copy-Item docs/CAPTURE_FH2.md,docs/FG_INTEGRATION.md,docs/DEBUG_CAPTURE.md -Destination sr-build
+          Copy-Item debug/Start-DebugCapture.cmd,debug/Start-DebugCapture.ps1 -Destination sr-build
+          Get-FileHash sr-build/*.dll -Algorithm SHA256 | Format-Table -AutoSize | Out-String | Set-Content sr-build/SHA256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: azimuth-sr-experimental-windows-x64
+          path: sr-build/
+          if-no-files-found: error

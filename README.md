@@ -1,4 +1,6 @@
-# Azimuth-DLAA
+# Azimuth-DLAA / experimental Azimuth-DLSS
+
+**Experimental SR v0.2:** the upstream DLAA path is the default. New opt-in native trace, offscreen DLSS probe, padded and guarded pure-HDR route modes are development features, not validated game support. See [SR experiment and validation guide](docs/SR_EXPERIMENT.md).
 
 NVIDIA DLAA support for Forza games running through [Azimuth](https://almost-there-games.itch.io/azimuth).
 
@@ -114,3 +116,9 @@ NVIDIA DLSS/NGX SDK components are governed by NVIDIA's own license. See `LICENS
 NVIDIA SDK files are not part of this repository's MIT-licensed source.
 
 Azimuth-DLAA is an unofficial community mod and is not affiliated with NVIDIA, Microsoft, Xbox, Playground Games, Turn 10 Studios, or Almost There Games.
+
+For the experimental FH2 trace and GPU capture procedure, see [docs/CAPTURE_FH2.md](docs/CAPTURE_FH2.md).
+
+Frame generation discovery (no FG backend yet): [FG integration and capture plan](docs/FG_INTEGRATION.md).
+
+**F8 debug capture (SR + FG):** see [Debug capture quick start](docs/DEBUG_CAPTURE.md). The independent debug-only artifact does not need NGX runtime DLLs. The optional RenderDoc API is used only when RenderDoc is already loaded.

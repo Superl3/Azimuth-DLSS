@@ -13,13 +13,15 @@
 
 #include "nvsdk_ngx.h"
 #include "nvsdk_ngx_helpers.h"
+#include "../src/sr_experiment.h"
 
 #define EXPORT extern "C" __declspec(dllexport)
 
 static ID3D12Device *g_device;
 static NVSDK_NGX_Parameter *g_params;     // owned by NGX, not released by us
 static NVSDK_NGX_Handle *g_feature;
-static unsigned g_w, g_h;
+static unsigned g_w, g_h, g_ow, g_oh;
+static int g_quality;
 static bool g_ready;
 static unsigned long long g_calls;
 
@@ -85,19 +87,52 @@ EXPORT int azngx_init(ID3D12Device *device, const wchar_t *dir, int *ngx_result)
     return 1;
 }
 
-// Runs DLAA: colour -> out, all at the same size. Feature creation is recorded into the same
-// command list on first use and whenever the size changes.
-EXPORT int azngx_evaluate(ID3D12GraphicsCommandList *cl, ID3D12Resource *color, ID3D12Resource *depth,
-                           ID3D12Resource *mv, ID3D12Resource *out, unsigned w, unsigned h, float jx, float jy,
-                           float mv_scale_x, float mv_scale_y, int reset, int *ngx_result) {
+static NVSDK_NGX_PerfQuality_Value ngx_quality(int quality) {
+    switch (quality) {
+    case AZSR_QUALITY: return NVSDK_NGX_PerfQuality_Value_MaxQuality;
+    case AZSR_BALANCED: return NVSDK_NGX_PerfQuality_Value_Balanced;
+    case AZSR_PERFORMANCE: return NVSDK_NGX_PerfQuality_Value_MaxPerf;
+    default: return NVSDK_NGX_PerfQuality_Value_DLAA;
+    }
+}
+
+EXPORT int azngx_get_optimal(unsigned ow, unsigned oh, int quality, AzSROptimal *o, int *ngx_result) {
+    if (!g_ready || !o || !ow || !oh || quality < AZSR_QUALITY || quality > AZSR_PERFORMANCE) {
+        *ngx_result = (int)NVSDK_NGX_Result_FAIL_InvalidParameter;
+        return 0;
+    }
+    memset(o, 0, sizeof(*o));
+    NVSDK_NGX_Result r = NGX_DLSS_GET_OPTIMAL_SETTINGS(g_params, ow, oh, ngx_quality(quality),
+        &o->optimal_w, &o->optimal_h, &o->max_w, &o->max_h, &o->min_w, &o->min_h, &o->sharpness);
+    *ngx_result = (int)r;
+    return NVSDK_NGX_SUCCEED(r) ? 1 : 0;
+}
+
+EXPORT int azngx_evaluate_sr(ID3D12GraphicsCommandList *cl, ID3D12Resource *color, ID3D12Resource *depth,
+                              ID3D12Resource *mv, ID3D12Resource *out, unsigned w, unsigned h,
+                              unsigned ow, unsigned oh, int quality, float jx, float jy,
+                              float mv_scale_x, float mv_scale_y, int reset, int *ngx_result) {
     if (!g_ready) {
         *ngx_result = (int)NVSDK_NGX_Result_FAIL_NotInitialized;
+        return 0;
+    }
+    if (!w || !h || !ow || !oh || quality < AZSR_NATIVE || quality > AZSR_PERFORMANCE ||
+        (quality == AZSR_NATIVE ? (w != ow || h != oh) : (w >= ow || h >= oh))) {
+        *ngx_result = (int)NVSDK_NGX_Result_FAIL_InvalidParameter;
         return 0;
     }
     ++g_calls;
     release_retired(false);
 
-    if (!g_feature || w != g_w || h != g_h) {
+    if (!g_feature || w != g_w || h != g_h || ow != g_ow || oh != g_oh || quality != g_quality) {
+        if (quality != AZSR_NATIVE) {
+            AzSROptimal o = {};
+            if (!azngx_get_optimal(ow, oh, quality, &o, ngx_result)) return 0;
+            if (!azsr_in_range(AzSRSize{w,h}, o)) {
+                *ngx_result = (int)NVSDK_NGX_Result_FAIL_InvalidParameter;
+                return 0;
+            }
+        }
         if (g_feature) {
             for (auto &r : g_retired) {
                 if (!r.h) {
@@ -111,10 +146,11 @@ EXPORT int azngx_evaluate(ID3D12GraphicsCommandList *cl, ID3D12Resource *color, 
         NVSDK_NGX_DLSS_Create_Params cp = {};
         cp.Feature.InWidth = w;
         cp.Feature.InHeight = h;
-        cp.Feature.InTargetWidth = w;
-        cp.Feature.InTargetHeight = h;
-        cp.Feature.InPerfQualityValue = NVSDK_NGX_PerfQuality_Value_DLAA;
+        cp.Feature.InTargetWidth = ow;
+        cp.Feature.InTargetHeight = oh;
+        cp.Feature.InPerfQualityValue = ngx_quality(quality);
         cp.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure;
+        if (quality != AZSR_NATIVE) cp.InFeatureCreateFlags |= NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
         NVSDK_NGX_Result r = NGX_D3D12_CREATE_DLSS_EXT(cl, 1, 1, &g_feature, g_params, &cp);
         if (NVSDK_NGX_FAILED(r)) {
             *ngx_result = (int)r;
@@ -123,6 +159,9 @@ EXPORT int azngx_evaluate(ID3D12GraphicsCommandList *cl, ID3D12Resource *color, 
         }
         g_w = w;
         g_h = h;
+        g_ow = ow;
+        g_oh = oh;
+        g_quality = quality;
         reset = 1;
     }
 
@@ -144,6 +183,14 @@ EXPORT int azngx_evaluate(ID3D12GraphicsCommandList *cl, ID3D12Resource *color, 
     NVSDK_NGX_Result r = NGX_D3D12_EVALUATE_DLSS_EXT(cl, g_feature, g_params, &ep);
     *ngx_result = (int)r;
     return NVSDK_NGX_SUCCEED(r) ? 1 : 0;
+}
+
+/* Preserve the original C ABI for the upstream DLAA proxy. */
+EXPORT int azngx_evaluate(ID3D12GraphicsCommandList *cl, ID3D12Resource *color, ID3D12Resource *depth,
+                           ID3D12Resource *mv, ID3D12Resource *out, unsigned w, unsigned h, float jx, float jy,
+                           float mv_scale_x, float mv_scale_y, int reset, int *ngx_result) {
+    return azngx_evaluate_sr(cl, color, depth, mv, out, w, h, w, h, AZSR_NATIVE,
+                            jx, jy, mv_scale_x, mv_scale_y, reset, ngx_result);
 }
 
 EXPORT void azngx_shutdown(void) {
