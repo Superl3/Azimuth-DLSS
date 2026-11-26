@@ -1222,6 +1222,7 @@ static void poll_f8(void) {
     static SHORT last;
     if(!dlss_sr_debug_mode())return;
     debug_trace_poll();
+    if(azpv_auto_test)return;
     SHORT now=GetAsyncKeyState(VK_F8)&0x8000;
     HWND fg=GetForegroundWindow();DWORD pid=0;
     if(fg)GetWindowThreadProcessId(fg,&pid);

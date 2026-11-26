@@ -16,7 +16,10 @@ static AzdbgGeom azdbg_geom[AZDBG_GEOM_MAX];
 static unsigned azdbg_geom_count;
 static int azdbg_renderdoc;
 static unsigned azdbg_limit=8,azdbg_ms=8000,azdbg_rdc_frames=2;
-static unsigned azdbg_auto_resolve;
+static unsigned azdbg_auto_resolve,azdbg_auto_warmup=2000;
+static wchar_t azdbg_gate_path[MAX_PATH];
+static int azdbg_gate_required,azdbg_gate_open;
+static uint64_t azdbg_gate_poll_ms;
 static RENDERDOC_API_1_4_1 *azdbg_rdc_api;
 static uint32_t azdbg_rdc_seen;
 static int azdbg_rdc_pending;
@@ -35,6 +38,13 @@ static void debug_trace_init(void) {
     char b[8];DWORD len=GetEnvironmentVariableA("AZIMUTH_DEBUG_RENDERDOC",b,sizeof(b));
     azdbg_renderdoc=len?len==1&&b[0]=='1':dlss_debug_ini_uint(L"RenderDoc",0)==1;
     if(azt_env_uint("AZIMUTH_DEBUG_AUTO_RESOLVE",&n) && n<=1000000)azdbg_auto_resolve=n;
+    if(azt_env_uint("AZIMUTH_DEBUG_AUTO_WARMUP_MS",&n)&&n>=500&&n<=15000)azdbg_auto_warmup=n;
+    if(azpv_auto_test){
+        DWORD gate=GetEnvironmentVariableW(L"AZIMUTH_DEBUG_AUTO_READY_FILE",azdbg_gate_path,MAX_PATH);
+        azdbg_gate_required=gate!=0;azdbg_gate_open=!azdbg_gate_required;
+        if(gate>=MAX_PATH){azdbg_gate_path[0]=0;log_msg("PREVIEW AUTO_GATE_INVALID reason=path_too_long");}
+        log_msg("PREVIEW AUTO_CONFIG minimumResolve=%u warmupMs=%u gateRequired=%d keys=disabled profile=%ux%u",azdbg_auto_resolve,azdbg_auto_warmup,azdbg_gate_required,azrp_profile.ow,azrp_profile.oh);
+    }
     log_msg("DEBUG CONFIG resolves=%u timeoutMs=%u renderdoc=%d gpuFrames=%u autoResolve=%u",
         azdbg_limit,azdbg_ms,azdbg_renderdoc,azdbg_rdc_frames,azdbg_auto_resolve);
 }
@@ -69,13 +79,33 @@ static int debug_trace_begin_locked(uint64_t now) {
     log_msg("DEBUG DESCRIPTOR_STATS id=%u used=%u capacity=%u incomplete=%d",azdbg.id,azt_desc_used,(unsigned)AZT_DESCS,azt_incomplete);
     return 1;
 }
+/* Optional file signal for an external test runner that knows when
+   it has navigated the game menu. No synthetic hotkey, no file writes,
+   no process lifetime changes from the DLL. Poll outside trace locks. */
+static void debug_auto_gate_poll(uint64_t now){
+    if(!azpv_auto_test||azdbg_gate_open||!azdbg_gate_path[0]||now-azdbg_gate_poll_ms<250)return;
+    azdbg_gate_poll_ms=now;
+    DWORD attr=GetFileAttributesW(azdbg_gate_path);
+    if(attr!=INVALID_FILE_ATTRIBUTES&&!(attr&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))){
+        azdbg_gate_open=1;log_msg("PREVIEW AUTO_GATE_OPEN qpc=%lld",azvis_qpc());
+    }
+}
 static void debug_trace_poll(void) {
     if(!dlss_sr_debug_mode())return;
     const uint64_t now=(uint64_t)GetTickCount64();
     int started=0;
+    debug_auto_gate_poll(now);
     AcquireSRWLockExclusive(&azt_lock);
     if(azdebug_expired(&azdbg,now))azdbg_finish_locked("timeout");
-    if(azdebug_auto_due(&azdbg,azdbg_auto_resolve,azt_frame)&&(!dlss_sr_preview_mode()||azdebug_preview_ready(&azpv_ready,azt_frame,now))){
+    if(azpv_auto_test){
+        if(azdebug_auto_scene_due(&azdbg,&azpv_auto_scene,&azpv_ready,azt_frame,now,azdbg_auto_resolve,azdbg_auto_warmup,azdbg_gate_open)){
+            started=debug_trace_begin_locked(now);
+            if(started){
+                log_msg("DEBUG AUTO_BEGIN id=%u requestedResolve=%u",azdbg.id,azdbg_auto_resolve);
+                log_msg("PREVIEW AUTO_READY resolve=%llu chains=%u stableMs=%llu gateOpen=%d qpc=%lld",azt_frame,azpv_auto_scene.count,(unsigned long long)(now-azpv_auto_scene.first_ms),azdbg_gate_open,azvis_qpc());
+            }
+        }
+    }else if(azdebug_auto_due(&azdbg,azdbg_auto_resolve,azt_frame)&&(!dlss_sr_preview_mode()||azdebug_preview_ready(&azpv_ready,azt_frame,now))){
         started=debug_trace_begin_locked(now);
         if(started)log_msg("DEBUG AUTO_BEGIN id=%u requestedResolve=%u",azdbg.id,azdbg_auto_resolve);
     }

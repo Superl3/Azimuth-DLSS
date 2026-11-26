@@ -39,6 +39,27 @@ static inline int azdebug_preview_ready(const AzPreviewReady *r,uint64_t observe
     return r->streak>=3&&r->last_resolve&&observed<=r->last_resolve&&
         r->last_resolve-observed<=1&&now>=r->last_ms&&now-r->last_ms<=500;
 }
+/* Automatic test readiness is independent of the F8 capture. Only
+   count full observed native postprocess chains with fresh successful
+   SR in the same resolve. Brief gaps are allowed; a stale chain or
+   interrupted scene restarts the warmup. No claim of gameplay detection. */
+typedef struct {uint64_t first_ms,last_ms,last_resolve;unsigned count;} AzAutoScene;
+static inline void azdebug_auto_scene_note(AzAutoScene *s,uint64_t resolve,uint64_t now){
+    if(!resolve||resolve<=s->last_resolve)return;
+    if(!s->count||resolve-s->last_resolve>4||now<s->last_ms||now-s->last_ms>500){
+        s->first_ms=now;s->count=0;
+    }
+    if(s->count<UINT32_MAX)++s->count;
+    s->last_resolve=resolve;s->last_ms=now;
+}
+static inline int azdebug_auto_scene_due(const AzDebugWindow *w,const AzAutoScene *s,const AzPreviewReady *r,
+        uint64_t observed,uint64_t now,unsigned minimum_resolve,unsigned warmup_ms,int gate_open){
+    return gate_open&&!w->id&&!w->active&&observed>=minimum_resolve&&
+        warmup_ms>=500&&warmup_ms<=15000&&s->count>=8&&
+        observed>=s->last_resolve&&observed-s->last_resolve<=4&&
+        now>=s->last_ms&&now-s->last_ms<=500&&now>=s->first_ms&&now-s->first_ms>=warmup_ms&&
+        azdebug_preview_ready(r,observed,now);
+}
 /* Opt-in one shot. A window started manually also consumes the opportunity. */
 static inline int azdebug_auto_due(const AzDebugWindow *w,unsigned requested,uint64_t resolve) {
     return requested && requested<=1000000 && !w->active && !w->id && resolve>=requested;

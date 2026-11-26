@@ -46,6 +46,9 @@ static UINT64 azpv_bytes;
 static volatile LONG azpv_queue_ready;
 static int azpv_enabled,azpv_postfx,azpv_done;
 static AzPreviewReady azpv_ready;
+static AzAutoScene azpv_auto_scene;
+static int azpv_auto_test;
+static struct {uint64_t resolve;uintptr_t postfx,composite;unsigned stages;} azpv_auto_chain;
 static wchar_t azpv_dir[MAX_PATH];
 static char azpv_dirname[80];
 
@@ -53,6 +56,8 @@ static void preview_init(void) {
     if(!dlss_sr_preview_mode())return;
     char b[8];DWORD n=GetEnvironmentVariableA("AZIMUTH_DEBUG_PREVIEW_POSTFX",b,sizeof(b));
     azpv_postfx=n==1&&b[0]=='1';
+    n=GetEnvironmentVariableA("AZIMUTH_DEBUG_AUTO_TEST",b,sizeof(b));
+    azpv_auto_test=n==1&&b[0]=='1';
     postfx_replay_init();
     visible_init();
     azpv_enabled=GetModuleHandleW(L"renderdoc.dll")==NULL;
@@ -228,6 +233,50 @@ static void preview_hdr_copy(ID3D12GraphicsCommandList *cl,const D3D12_TEXTURE_C
     }
     ReleaseSRWLockExclusive(&azpv_lock);
 }
+/* Before the one-shot begins, observe only identities and dimensions.
+   Do not allocate surfaces, record GPU work, or require replay safety
+   gates just to start diagnostics. Full PS/VS identity is mandatory.
+   The three observed native passes plus fresh SR are a scene readiness
+   signal, not proof of gameplay or actual presentation. azt_lock held. */
+static void preview_auto_observe_locked(ID3D12GraphicsCommandList *cl,ListState *s,int start_zero){
+    (void)cl;
+    uint64_t resolve=azt_frame;
+    if(!azpv_auto_test||azdbg.id||!resolve||!azrp_profile.ow||
+       azpv_ready.last_resolve!=resolve||azpv_ready.streak<3||s->num_rtv!=1||
+       s->has_dsv||s->num_vp!=1||s->num_sc!=1||!start_zero)return;
+    AztPso *p=azt_pso_slot(s->pso,0);
+    if(!p||!azfg_known_candidate(p)||p->rs!=s->trace_graphics_rs||
+       p->blend_enabled||p->depth_enabled)return;
+    AztRoot *r=azt_root_slot(s->trace_graphics_rs,0);
+    AztDesc *t=azt_slot(azt_heap_for_cpu(s->rtv[0].ptr,D3D12_DESCRIPTOR_HEAP_TYPE_RTV),s->rtv[0].ptr,0);
+    const ViewEntry *live=view_find(s->rtv[0].ptr);
+    if(!r||!t||!t->res||!live||live->resource!=t->res||
+       t->format!=DXGI_FORMAT_R10G10B10A2_UNORM||
+       s->vp[0].TopLeftX!=0||s->vp[0].TopLeftY!=0||
+       s->vp[0].Width!=(float)t->desc.Width||s->vp[0].Height!=(float)t->desc.Height)return;
+    uintptr_t input=0;unsigned found=0;
+    for(UINT i=0;i<r->count;++i)if(!r->ranges[i].reg&&!r->ranges[i].space&&r->ranges[i].count){
+        AztDesc *x=azt_bound_srv(s,&r->ranges[i],0);
+        if(x&&x->res){input=(uintptr_t)x->res;++found;}
+    }
+    if(found!=1||!input||input==(uintptr_t)t->res)return;
+    if(azpv_auto_chain.resolve!=resolve){
+        memset(&azpv_auto_chain,0,sizeof(azpv_auto_chain));azpv_auto_chain.resolve=resolve;
+    }
+    DWORD hash=p->hash[0];unsigned bit=hash==0x479be24a?1u:hash==0xa7840ad0?2u:4u;
+    if(bit==1&&azpv_auto_chain.stages==0&&input==(uintptr_t)azt_pending.scene&&
+       azrp_match_render(azrp_profile,t->desc.Width,t->desc.Height)){
+        azpv_auto_chain.postfx=(uintptr_t)t->res;azpv_auto_chain.stages=1;
+    }else if(bit==2&&azpv_auto_chain.stages==1&&input==azpv_auto_chain.postfx&&
+       azrp_match_render(azrp_profile,t->desc.Width,t->desc.Height)){
+        azpv_auto_chain.composite=(uintptr_t)t->res;azpv_auto_chain.stages=3;
+    }else if(bit==4&&azpv_auto_chain.stages==3&&input==azpv_auto_chain.composite&&
+       azrp_match_output(azrp_profile,t->desc.Width,t->desc.Height)){
+        azpv_auto_chain.stages=7;
+        azdebug_auto_scene_note(&azpv_auto_scene,resolve,GetTickCount64());
+        if(azpv_auto_scene.count==1)log_msg("PREVIEW AUTO_SCENE resolve=%llu finalPS=%08lx output=%ux%u freshSR=1 nativeChain=1 qpc=%lld", (unsigned long long)resolve,(unsigned long)hash,azrp_profile.ow,azrp_profile.oh,azvis_qpc());
+    }
+}
 /* Opt-in snapshots of exact observed fullscreen passes only. Require
    matching live RTV metadata and a known RT state in this recording. */
 static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int start_zero) {
@@ -239,6 +288,7 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
     UINT nr=s->num_rtv,nv=s->num_vp,ns=s->num_sc;
     /* Failure bits are diagnostic; no weaker resource-state inference. */
     AcquireSRWLockExclusive(&azt_lock);
+    if(azpv_auto_test&&!azdbg.id){preview_auto_observe_locked(cl,s,start_zero);ReleaseSRWLockExclusive(&azt_lock);return;}
     if((azdbg.active&&azdbg.id==1&&azdbg.observed<=AZPV_GROUPS)||azvis_window_locked()){
         AztPso *p=azt_pso_slot(s->pso,0);
         if(p&&azfg_known_candidate(p)){

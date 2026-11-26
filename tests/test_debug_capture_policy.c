@@ -39,6 +39,26 @@ int main(void){
     assert(!azdebug_preview_ready(&ready,13,121)&&!azdebug_preview_ready(&ready,12,621));
     azdebug_preview_note(&ready,13,130,0);assert(!azdebug_preview_ready(&ready,13,131));
     azdebug_preview_note(&ready,15,150,1);assert(ready.streak==1);
+    AzDebugWindow auto_window={0};AzAutoScene scene={0};AzPreviewReady fresh={0};
+    for(unsigned i=1;i<=9;++i){
+        uint64_t now=100ull*i;
+        azdebug_preview_note(&fresh,i,now,1);azdebug_auto_scene_note(&scene,i,now);
+    }
+    assert(scene.count==9);
+    assert(!azdebug_auto_scene_due(&auto_window,&scene,&fresh,9,900,0,2000,1));
+    for(unsigned i=10;i<=22;++i){
+        uint64_t now=100ull*i;
+        azdebug_preview_note(&fresh,i,now,1);azdebug_auto_scene_note(&scene,i,now);
+    }
+    assert(azdebug_auto_scene_due(&auto_window,&scene,&fresh,22,2200,0,2000,1));
+    assert(!azdebug_auto_scene_due(&auto_window,&scene,&fresh,22,2200,0,2000,0));
+    assert(!azdebug_auto_scene_due(&auto_window,&scene,&fresh,22,2200,23,2000,1));
+    assert(!azdebug_auto_scene_due(&auto_window,&scene,&fresh,22,2800,0,2000,1));
+    assert(azdebug_begin(&auto_window,8,2200,8000));azdebug_end(&auto_window);
+    assert(!azdebug_auto_scene_due(&auto_window,&scene,&fresh,22,2200,0,2000,1));
+    azdebug_auto_scene_note(&scene,28,2300);assert(scene.count==1&&scene.first_ms==2300);
+    azdebug_auto_scene_note(&scene,28,2400);assert(scene.count==1&&scene.last_ms==2300);
+    azdebug_auto_scene_note(&scene,29,3000);assert(scene.count==1&&scene.first_ms==3000);
     puts("PASS: manual and automatic capture windows and prioritized postprocess policy");
     return 0;
 }

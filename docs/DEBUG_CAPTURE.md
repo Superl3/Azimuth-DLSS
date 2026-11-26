@@ -594,3 +594,22 @@ backbuffer draws; this is not an exhaustive shader-use proof.
 The wide shader fixture checks real compiler/disassembly at 0.675.
 The original native 1920x1080 MV-magnitude literal remains unchanged:
 it is a native motion-blur scale, not one of the two SV_POSITION loads.
+
+
+### Automatic test readiness (no F8)
+
+AZIMUTH_DEBUG_AUTO_TEST=1 enables automatic one-shot preview capture.
+The DLL observes a recent fresh successful SR resolve and the exact
+native postfx -> composite -> final PS/VS chain at the configured
+render/output sizes before starting. At least eight observed chains
+and a continuous warmup (AZIMUTH_DEBUG_AUTO_WARMUP_MS, default 2000)
+are required. Brief gaps are tolerated, stale observations reset the
+warmup. AZIMUTH_DEBUG_AUTO_RESOLVE is an optional minimum, not a fixed
+trigger. AZIMUTH_DEBUG_AUTO_READY_FILE optionally requires a new
+ordinary file created by an external runner after entering gameplay.
+The DLL only checks existence; no key binding or synthetic hotkey.
+The automatic mode bypasses F8 polling and preserves every existing
+rendering gate. Readiness is observational, not a gameplay classifier,
+GPU completion, or proof of actual Present. A title/garage/menu can
+render the same scene chain; the external runner can use the file
+gate to select real gameplay if this matters.
