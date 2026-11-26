@@ -194,7 +194,7 @@ static void visible_trace_copy(ID3D12GraphicsCommandList *cl,ID3D12Resource *dst
 static void visible_trace_barriers(ID3D12GraphicsCommandList *cl,ListState *s,UINT n,const D3D12_RESOURCE_BARRIER *b){
     if(!azvis_observing()||!s||!s->trace_recording_id||!b)return;
     AcquireSRWLockShared(&azt_lock);
-    int active=azdbg.id==1&&GetTickCount64()-azdbg.started_ms<AZVIS_MS+1000u;
+    int active=azdbg.id==1&&GetTickCount64()-azdbg.started_ms<azvis_ms+1000u;
     ReleaseSRWLockShared(&azt_lock);
     if(!active)return;
     AcquireSRWLockExclusive(&azvis_trace_lock);
@@ -265,7 +265,7 @@ static void visible_trace_draw(ID3D12GraphicsCommandList *cl,ListState *s,UINT c
     unsigned hud_logged=0,edge_logged=0;
     AcquireSRWLockExclusive(&azt_lock);
     int hud_window=azdbg.active&&azdbg.observed<=AZPV_CAPTURE_COUNT;
-    int lineage_window=azdbg.id==1&&GetTickCount64()-azdbg.started_ms<AZVIS_MS+1000u;
+    int lineage_window=azdbg.id==1&&GetTickCount64()-azdbg.started_ms<azvis_ms+1000u;
     if(!hud_window&&!lineage_window)goto done;
     AztDesc *t=azt_slot(azt_heap_for_cpu(s->rtv[0].ptr,D3D12_DESCRIPTOR_HEAP_TYPE_RTV),s->rtv[0].ptr,0);
     AztPso *p=azt_pso_slot(s->pso,0);
@@ -327,7 +327,7 @@ done: ReleaseSRWLockExclusive(&azt_lock);
 static void visible_poll_trial(void){
     if(!azvis_observing())return;
     AcquireSRWLockShared(&azt_lock);
-    int expired=azdbg.id==1&&GetTickCount64()-azdbg.started_ms>=AZVIS_MS+1000u;
+    int expired=azdbg.id==1&&GetTickCount64()-azdbg.started_ms>=azvis_ms+1000u;
     unsigned long long observed=azt_frame;
     ReleaseSRWLockShared(&azt_lock);
     if(!expired)return;

@@ -1,6 +1,10 @@
 #ifndef AZIMUTH_PREVIEW_BATCH_POLICY_H
 #define AZIMUTH_PREVIEW_BATCH_POLICY_H
 #include <stdint.h>
+/* Keep the proven short default. Longer endurance runs are opt-in. */
+static inline unsigned azvis_duration_ms(unsigned seconds){
+    return seconds>=10u&&seconds<=120u?seconds*1000u:10000u;
+}
 enum {PV_RECORDED=1,PV_SUBMITTED,PV_SAVED,PV_FAILED};
 typedef struct {int state,current;} AzpvBatchLife;
 static inline int azpv_can_append(AzpvBatchLife b,uint64_t old_recording,uint64_t recording) {

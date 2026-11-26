@@ -4,7 +4,8 @@
    retained. No guessed alpha, no game heap writes, no Present takeover. */
 #include "visible_merge_shader.h"
 #define AZVIS_PSO_MAX 8
-#define AZVIS_MS 10000u
+#include "preview_batch_policy.h"
+static unsigned azvis_ms=10000u;
 #define AZPV_CAPTURE_COUNT 2u
 static int azvis_enabled,azvis_marker;
 static volatile LONG azvis_chain_changed;
@@ -21,12 +22,14 @@ typedef struct {
     ID3D12DescriptorHeap *rtv,*heap;
 } AzvisFrame;
 static int azvis_window_locked(void){
-    return azvis_enabled&&!InterlockedCompareExchange(&azvis_chain_changed,0,0)&&azdbg.id==1&&GetTickCount64()-azdbg.started_ms<AZVIS_MS;
+    return azvis_enabled&&!InterlockedCompareExchange(&azvis_chain_changed,0,0)&&azdbg.id==1&&GetTickCount64()-azdbg.started_ms<azvis_ms;
 }
 static void visible_init(void){
     char b[8];DWORD n=GetEnvironmentVariableA("AZIMUTH_DEBUG_VISIBLE_SR",b,sizeof(b));
     azvis_enabled=azrp_enabled&&azrp_sr_enabled&&!azrp_profile.wide&&n==1&&b[0]=='1';
-    if(n==1&&b[0]=='1')log_msg("VISIBLE CONFIG enabled=%d durationMs=%u mode=native_hud_region_retention sdr=1 presentVerified=0 swapchainRefs=0",azvis_enabled,AZVIS_MS);
+    UINT seconds=0;
+    if(azt_env_uint("AZIMUTH_DEBUG_VISIBLE_SECONDS",&seconds))azvis_ms=azvis_duration_ms(seconds);
+    if(n==1&&b[0]=='1')log_msg("VISIBLE CONFIG enabled=%d durationMs=%u mode=native_hud_region_retention sdr=1 presentVerified=0 swapchainRefs=0",azvis_enabled,azvis_ms);
     n=GetEnvironmentVariableA("AZIMUTH_DEBUG_VISIBLE_MARKER",b,sizeof(b));
     azvis_marker=azvis_enabled&&n==1&&b[0]=='1';
     if(azvis_marker)log_msg("VISIBLE MARKER enabled=1 rect=32,32,80,80 pattern=white_border_magenta_cyan_black testOnly=1 stage=pre_sdr_lut");

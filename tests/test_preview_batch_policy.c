@@ -3,6 +3,13 @@
 #include "../src/preview_batch_policy.h"
 #include "../src/visible_tail_policy.h"
 int main(void) {
+    assert(azvis_duration_ms(0)==10000u);
+    assert(azvis_duration_ms(9)==10000u);
+    assert(azvis_duration_ms(10)==10000u);
+    assert(azvis_duration_ms(60)==60000u);
+    assert(azvis_duration_ms(120)==120000u);
+    assert(azvis_duration_ms(121)==10000u);
+    assert(azvis_duration_ms(UINT32_MAX)==10000u);
     AzpvBatchLife core={PV_RECORDED,1},post={PV_RECORDED,1};
     assert(azpv_can_append(core,1,1));
     assert(!azpv_can_append(core,1,2));

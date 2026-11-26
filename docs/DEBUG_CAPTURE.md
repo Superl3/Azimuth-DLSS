@@ -416,7 +416,7 @@ success or a visible SR path. The same launcher command applies.
 
     Start-DebugCapture.cmd -Preview -PreviewPostFx -PreviewReplay -PreviewSRReplay -PreviewJitter -VisibleSR -ShaderDisasm -Output 1920x1080
 
-After F8, at most ten seconds of gated output trials; do not use
+After F8, by default at most ten seconds of gated output trials; do not use
 -ExitAfterCapture. Render 1280x720, output 1920x1080, SDR, Quality.
 The a2a200a capture proves native/SR postprocess pixels and the 34 native
 blend draws. Many HUD draws bind depth/stencil, and intermediate passes
@@ -535,7 +535,7 @@ In preview mode F8 before a recent streak of three fresh successful SR
 resolves (without reset) is ignored rather than consuming the one-shot
 capture. This cannot prove gameplay; press F8 while actually driving.
 After the first accepted start, all further F8 presses are ignored
-until process exit. The 8-resolve RAW window and 10-second visible
+until process exit. The 8-resolve RAW window and default 10-second visible
 trial are independent. TRIAL_END logs candidate/routed/submitted counts
 and elapsed/chain-change reason. External PresentMon and screen video
 remain necessary to verify actual display.
@@ -704,3 +704,9 @@ appear in native fallback or post-roll. Its absence does not prove
 that no pixels reached the display if capture/downscaling/cropping
 could hide it. The final shader and all safety gates remain unchanged.
 Compile both marker and unmarked shader variants in CI.
+
+### Opt-in SDR endurance and producer wait comparison
+
+`-AutoTest -VisibleSR -VisibleSeconds 60 -ProducerWaitMs 8 -Output 1920x1080 -WaitSeconds 300` extends the existing guarded trial without enabling the marker. Use the same ReadyFile and automated motion procedure as 6135102. The default remains 10 seconds; valid opt-in range is 10–120 seconds. The RAW capture stays bounded to its existing two groups. `capture.json` reports the requested duration and the DLL's observed configuration separately. The trace still has its existing 1-second drain window. Swapchain changes still disable routing, and native fallback remains unchanged.
+
+Repeat with `-ProducerWaitMs 0` as a controlled comparison. `POSTFX SR_PRODUCER waitElapsedUs` measures the actual `WaitForSingleObject` call using QPC (-1 means not measured), while legacy `waitElapsedMs` remains for prior analyzers. Do not interpret a lower wait cost as a success if routing collapses. This change does not alter resource/fence readiness, HDR, or FG execution. Collect real display evidence and working PresentMon/ETW separately.

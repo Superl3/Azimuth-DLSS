@@ -71,6 +71,7 @@ try {
     # the mere presence of PREVIEW COMPLETE is not enough.
     @('SR PREVIEW: fixture','DEBUG READY: fixture',
       'PREVIEW AUTO_CONFIG minimumResolve=0 warmupMs=2000 gateRequired=0 keys=disabled profile=1920x1080',
+      'VISIBLE CONFIG enabled=1 durationMs=60000 mode=native_hud_region_retention sdr=1 presentVerified=0 swapchainRefs=0',
       'VISIBLE TRIAL_BEGIN firstResolveAfter=2001 qpc=100 retainedSwapchainRefs=0',
       'DEBUG BEGIN id=1 firstResolveAfter=2001 limit=8 timeoutMs=8000',
       'DEBUG AUTO_BEGIN id=1 requestedResolve=0',
@@ -78,7 +79,7 @@ try {
       "PREVIEW FILE directory=azimuth_preview_123_456 file=$rawName bytes=16",
       'DEBUG END id=1 reason=resolve_limit resolves=8 lastResolve=2010',
       'PREVIEW COMPLETE groups=1 saved=1 failed=0 recordedFiles=1') | Set-Content -LiteralPath $log
-    $autoOpts=@{GameDir=$game;Output='1920x1080';AutoTest=$true;VisibleSR=$true;CollectOnly=$true}
+    $autoOpts=@{GameDir=$game;Output='1920x1080';AutoTest=$true;VisibleSR=$true;VisibleSeconds=60;CollectOnly=$true}
     $incomplete=Join-Path $root 'auto-incomplete'
     $failedAsExpected=$false
     try{& $launcher @autoOpts -Destination $incomplete}catch{
@@ -94,6 +95,7 @@ try {
     Expand-Archive -LiteralPath $autoZip[0].FullName -DestinationPath $autoContents
     $autoMeta=Get-Content -LiteralPath (Join-Path $autoContents 'capture.json') -Raw | ConvertFrom-Json
     if(!$autoMeta.auto_test -or !$autoMeta.auto_ready -or !$autoMeta.visible_trial_complete -or $autoMeta.automatic_capture.id -ne 1 -or $autoMeta.automatic_resolve -ne 0 -or $autoMeta.capture_begins -ne 1){throw 'Wrong keyless auto-test metadata.'}
+    if($autoMeta.visible_seconds_requested -ne 60 -or $autoMeta.visible_duration_ms_observed -ne 60000){throw 'Wrong requested/observed Visible SR duration metadata.'}
     'PASS: automatic launcher packaging, failure evidence, bounded preview RAW, and keyless Visible SR completion fixtures'
 } finally {
     $resolved = (Resolve-Path -LiteralPath $root).Path

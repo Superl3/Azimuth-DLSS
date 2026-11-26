@@ -153,6 +153,7 @@ static int preview_sr_ready(const AzpvGroup *g,ID3D12GraphicsCommandList *cl,uns
     value=before;
     int ready=azpv_source_ready(b->life,b->recording,recording,b->list==cl,value);
     DWORD wr=WAIT_FAILED;uint64_t start=GetTickCount64();int attempted=0;
+    long long wait_us=-1; /* No OS wait, or high-resolution clock unavailable. */
     /* CPU-side bounded alpha wait on the private producer signal ALREADY
        submitted and on a successfully retired recording. No queue Wait,
        no guessed ordering, no source reuse. A timeout leaves native
@@ -166,12 +167,18 @@ static int preview_sr_ready(const AzpvGroup *g,ID3D12GraphicsCommandList *cl,uns
                 if(SUCCEEDED(hr))b->ready_event=event;else CloseHandle(event);
             }
         }
-        if(b->ready_event)wr=WaitForSingleObject(b->ready_event,azpv_producer_wait_ms);
+        if(b->ready_event){
+            LARGE_INTEGER freq,t0,t1;
+            int clock_ok=QueryPerformanceFrequency(&freq)&&freq.QuadPart>0&&QueryPerformanceCounter(&t0);
+            wr=WaitForSingleObject(b->ready_event,azpv_producer_wait_ms);
+            if(clock_ok&&QueryPerformanceCounter(&t1)&&t1.QuadPart>=t0.QuadPart)
+                wait_us=(long long)((double)(t1.QuadPart-t0.QuadPart)*1000000.0/(double)freq.QuadPart);
+        }
         value=b->fence->lpVtbl->GetCompletedValue(b->fence);
         ready=azpv_source_ready(b->life,b->recording,recording,b->list==cl,value);
     }
-    log_msg("POSTFX SR_PRODUCER resolve=%llu producerRecording=%llu consumerRecording=%llu sameList=%d state=%d current=%d queue=%p before=%llu completed=%llu waitAttempted=%d waitResult=%lu waitElapsedMs=%llu ready=%d",
-        g->resolve,b->recording,recording,b->list==cl,b->life.state,b->life.current,(void *)b->queue,(unsigned long long)before,(unsigned long long)value,attempted,(unsigned long)wr,(unsigned long long)(GetTickCount64()-start),ready);
+    log_msg("POSTFX SR_PRODUCER resolve=%llu producerRecording=%llu consumerRecording=%llu sameList=%d state=%d current=%d queue=%p before=%llu completed=%llu waitAttempted=%d waitResult=%lu waitElapsedMs=%llu ready=%d waitElapsedUs=%lld",
+        g->resolve,b->recording,recording,b->list==cl,b->life.state,b->life.current,(void *)b->queue,(unsigned long long)before,(unsigned long long)value,attempted,(unsigned long)wr,(unsigned long long)(GetTickCount64()-start),ready,wait_us);
     return ready;
 }
 /* Only live groups are recycled. Both recordings must be retired and
