@@ -139,8 +139,8 @@ static int visible_hdr_finalize(AzvisFrame *v,ID3D12GraphicsCommandList *cl,List
         if(s->trace_tables_mask&azrb_bit(i))real_SetGraphicsRootDescriptorTable(cl,i,s->tables[i]);
         if(s->trace_compute_mask&azrb_bit(i))real_SetComputeRootDescriptorTable(cl,i,s->trace_compute_tables[i]);
     }
-    log_msg("VISIBLE HDR_REPLAY resolve=%llu mode=%s size=%ux%u scene=%p composite=%p nativeFinalShader=1 nativeCurve=1 nativeLevels=1 outputMath=BT2020_PQ outputColorSpace=unknown presentVerified=0",
-        resolve,mode==1?"live":"probe",azrp_profile.ow,azrp_profile.oh,(void *)v->hdr_scene,(void *)v->merged);
+    log_msg("VISIBLE HDR_REPLAY resolve=%llu mode=%s size=%ux%u scene=%p composite=%p nativeFinalShader=1 nativeCurve=1 nativeLevels=1 outputMath=BT2020_PQ outputColorSpace=unknown presentVerified=0 hudPolicy=%s",
+        resolve,mode==1?"live":"probe",azrp_profile.ow,azrp_profile.oh,(void *)v->hdr_scene,(void *)v->merged,azvis_hud_delta?"delta_lower_bound":"native_region");
     if(mode==2){log_msg("VISIBLE PROBE_FINAL_RECORDED resolve=%llu list=%p recording=%llu target=%p qpc=%lld nativePreserved=1 presentVerified=0 hdr=1",
         resolve,(void *)cl,v->recording,(void *)v->probe_final,azvis_qpc());return 2;}
     v->routed=1;v->target_id=(uintptr_t)target;

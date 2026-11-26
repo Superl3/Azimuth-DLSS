@@ -8,6 +8,17 @@ typedef enum AzSRMode {
 typedef enum AzSRQuality {
     AZSR_NATIVE = 0, AZSR_QUALITY = 1, AZSR_BALANCED = 2, AZSR_PERFORMANCE = 3, AZSR_ULTRA_PERFORMANCE = 4
 } AzSRQuality;
+typedef struct AzSRGuideOptions {
+    unsigned depth_inverted,mv_jittered;
+    float mv_scale_x,mv_scale_y,pre_exposure,exposure_scale;
+} AzSRGuideOptions;
+static inline int azsr_guides_valid(AzSRGuideOptions g){
+    return g.depth_inverted<=1&&g.mv_jittered<=1&&
+        g.mv_scale_x>=-4.0f&&g.mv_scale_x<=4.0f&&g.mv_scale_x!=0&&
+        g.mv_scale_y>=-4.0f&&g.mv_scale_y<=4.0f&&g.mv_scale_y!=0&&
+        g.pre_exposure>=0.001f&&g.pre_exposure<=1000.0f&&
+        g.exposure_scale>=0.001f&&g.exposure_scale<=1000.0f;
+}
 typedef struct AzSRSize { unsigned w, h; } AzSRSize;
 typedef struct AzSROptimal {
     unsigned optimal_w, optimal_h, max_w, max_h, min_w, min_h;

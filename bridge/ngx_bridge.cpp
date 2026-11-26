@@ -25,6 +25,11 @@ static int g_quality;
 static bool g_ready;
 static unsigned long long g_calls;
 static int g_preset;
+static AzSRGuideOptions g_guides={0,0,1,1,1,1};
+EXPORT int azngx_set_sr_guides(const AzSRGuideOptions *g){
+    if(g_feature||!g||!azsr_guides_valid(*g))return 0;
+    g_guides=*g;return 1;
+}
 EXPORT int azngx_set_sr_preset(int preset){
     if(g_feature||(preset!=0&&(preset<10||preset>13)))return 0;
     g_preset=preset;return 1;
@@ -156,7 +161,11 @@ EXPORT int azngx_evaluate_sr(ID3D12GraphicsCommandList *cl, ID3D12Resource *colo
         cp.Feature.InTargetHeight = oh;
         cp.Feature.InPerfQualityValue = ngx_quality(quality);
         cp.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure;
-        if (quality != AZSR_NATIVE) cp.InFeatureCreateFlags |= NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
+        if (quality != AZSR_NATIVE) {
+            cp.InFeatureCreateFlags |= NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
+            if(g_guides.depth_inverted)cp.InFeatureCreateFlags|=NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
+            if(g_guides.mv_jittered)cp.InFeatureCreateFlags|=NVSDK_NGX_DLSS_Feature_Flags_MVJittered;
+        }
         if(quality!=AZSR_NATIVE&&g_preset){
             const char *key=quality==AZSR_QUALITY?NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality:
                 quality==AZSR_BALANCED?NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced:
@@ -190,8 +199,8 @@ EXPORT int azngx_evaluate_sr(ID3D12GraphicsCommandList *cl, ID3D12Resource *colo
     ep.InMVScaleY = mv_scale_y;
     ep.InRenderSubrectDimensions.Width = w;
     ep.InRenderSubrectDimensions.Height = h;
-    ep.InPreExposure = 1.0f;
-    ep.InExposureScale = 1.0f;
+    ep.InPreExposure = quality==AZSR_NATIVE?1.0f:g_guides.pre_exposure;
+    ep.InExposureScale = quality==AZSR_NATIVE?1.0f:g_guides.exposure_scale;
     NVSDK_NGX_Result r = NGX_D3D12_EVALUATE_DLSS_EXT(cl, g_feature, g_params, &ep);
     *ngx_result = (int)r;
     return NVSDK_NGX_SUCCEED(r) ? 1 : 0;

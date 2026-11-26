@@ -6,6 +6,13 @@ param(
     [string]$RenderSize = '',
     [ValidateSet('default','J','K','L','M')][string]$Preset = 'default',
     [switch]$NoJitter,
+    [ValidateSet('native','delta')][string]$HUD = 'native',
+    [ValidateSet(0,1)][int]$DepthInverted=0,
+    [ValidateSet(0,1)][int]$MVJittered=0,
+    [double]$MVScaleX=1,
+    [double]$MVScaleY=1,
+    [double]$PreExposure=1,
+    [double]$ExposureScale=1,
     [string]$RenderSetting = '',
     [switch]$InstallProxy,
     [switch]$CollectOnly,
@@ -28,7 +35,7 @@ param(
     [string]$ReadyFile = '',
     [ValidateRange(0,10)][int]$PostRollSeconds = 2,
     [string]$PresentMonCsv,
-    [ValidateSet('quality','balanced','performance')][string]$Quality = 'quality',
+    [ValidateSet('quality','balanced','performance','ultraperformance','auto')][string]$Quality = 'quality',
     [ValidateRange(0, 1000000)][int]$AutoResolve = 0,
     [switch]$ExitAfterCapture,
     [ValidateRange(10, 1800)][int]$WaitSeconds = 180,
@@ -88,7 +95,10 @@ if ($Label -notmatch '^[A-Za-z0-9_-]{1,48}$') { throw 'Label must contain 1-48 l
 if (!$Output) { $Output = Read-Host 'Expected display resolution, e.g. 3840x1600 (or unknown)' }
 if ($Output -ne 'unknown' -and $Output -notmatch '^[1-9]\d*x[1-9]\d*$') { throw 'Output must be WxH or unknown.' }
 if($Preview -and $Output -eq 'unknown'){throw 'Preview requires an explicit higher output resolution.'}
-if($RenderSize){
+if($RenderSize -eq 'auto'){
+    if(!$PreviewReplay -or $Output -notmatch '^([1-9]\d{2,3})x([1-9]\d{2,3})$'){throw '-RenderSize auto requires preview replay and explicit output WxH.'}
+    if([int]$Matches[1] -gt 3840 -or [int]$Matches[2] -gt 2160 -or [int]$Matches[1] -lt 320 -or [int]$Matches[2] -lt 200){throw 'Unsupported automatic output size.'}
+}elseif($RenderSize){
     if(!$PreviewReplay -or $RenderSize -notmatch '^([1-9]\d{2,3})x([1-9]\d{2,3})$'){throw '-RenderSize requires preview replay and explicit WxH.'}
     $rw=[int]$Matches[1];$rh=[int]$Matches[2]
     if($Output -notmatch '^([1-9]\d{2,3})x([1-9]\d{2,3})$'){throw 'Explicit profile requires output WxH.'}
@@ -205,7 +215,7 @@ try {
             $previous = (Get-Item -LiteralPath $log).LastWriteTimeUtc
             Copy-Item -LiteralPath $log -Destination (Join-Path $dest ($tag + '-previous.log'))
         }
-        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM','AZIMUTH_DEBUG_AUTO_RESOLVE','AZIMUTH_DEBUG_AUTO_TEST','AZIMUTH_DEBUG_PRODUCER_WAIT_MS','AZIMUTH_DEBUG_PRODUCER_GPU_WAIT','AZIMUTH_DEBUG_PRESENT_TRACE','AZIMUTH_DEBUG_AUTO_WARMUP_MS','AZIMUTH_DEBUG_AUTO_READY_FILE','AZIMUTH_SR_OUTPUT','AZIMUTH_SR_RENDER','AZIMUTH_SR_PRESET','AZIMUTH_SR_QUALITY','AZIMUTH_DEBUG_PREVIEW_POSTFX','AZIMUTH_DEBUG_PREVIEW_JITTER','AZIMUTH_DEBUG_POSTFX_REPLAY','AZIMUTH_DEBUG_SR_REPLAY','AZIMUTH_DEBUG_VISIBLE_SR','AZIMUTH_DEBUG_VISIBLE_HDR','AZIMUTH_DEBUG_HDR_LIVE','AZIMUTH_DEBUG_VISIBLE_MARKER','AZIMUTH_DEBUG_VISIBLE_SECONDS','AZIMUTH_DEBUG_QUEUE_TRACE')) {
+        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM','AZIMUTH_DEBUG_AUTO_RESOLVE','AZIMUTH_DEBUG_AUTO_TEST','AZIMUTH_DEBUG_PRODUCER_WAIT_MS','AZIMUTH_DEBUG_PRODUCER_GPU_WAIT','AZIMUTH_DEBUG_PRESENT_TRACE','AZIMUTH_DEBUG_AUTO_WARMUP_MS','AZIMUTH_DEBUG_AUTO_READY_FILE','AZIMUTH_SR_OUTPUT','AZIMUTH_SR_RENDER','AZIMUTH_SR_PRESET','AZIMUTH_SR_HUD','AZIMUTH_SR_DEPTH_INVERTED','AZIMUTH_SR_MV_JITTERED','AZIMUTH_SR_MV_SCALE_X','AZIMUTH_SR_MV_SCALE_Y','AZIMUTH_SR_PRE_EXPOSURE','AZIMUTH_SR_EXPOSURE_SCALE','AZIMUTH_SR_QUALITY','AZIMUTH_DEBUG_PREVIEW_POSTFX','AZIMUTH_DEBUG_PREVIEW_JITTER','AZIMUTH_DEBUG_POSTFX_REPLAY','AZIMUTH_DEBUG_SR_REPLAY','AZIMUTH_DEBUG_VISIBLE_SR','AZIMUTH_DEBUG_VISIBLE_HDR','AZIMUTH_DEBUG_HDR_LIVE','AZIMUTH_DEBUG_VISIBLE_MARKER','AZIMUTH_DEBUG_VISIBLE_SECONDS','AZIMUTH_DEBUG_QUEUE_TRACE')) {
             $oldEnv[$key] = [Environment]::GetEnvironmentVariable($key,'Process')
         }
         [Environment]::SetEnvironmentVariable('AZIMUTH_SR_MODE',$(if($Preview){'preview'}else{'debug'}),'Process')
@@ -213,6 +223,14 @@ try {
             [Environment]::SetEnvironmentVariable('AZIMUTH_SR_OUTPUT',$Output,'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_SR_RENDER',$(if($RenderSize){$RenderSize}else{$null}),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_SR_PRESET',$Preset.ToLowerInvariant(),'Process')
+            $culture=[Globalization.CultureInfo]::InvariantCulture
+            [Environment]::SetEnvironmentVariable('AZIMUTH_SR_HUD',$HUD.ToLowerInvariant(),'Process')
+            [Environment]::SetEnvironmentVariable('AZIMUTH_SR_DEPTH_INVERTED',[string]$DepthInverted,'Process')
+            [Environment]::SetEnvironmentVariable('AZIMUTH_SR_MV_JITTERED',[string]$MVJittered,'Process')
+            [Environment]::SetEnvironmentVariable('AZIMUTH_SR_MV_SCALE_X',$MVScaleX.ToString('R',$culture),'Process')
+            [Environment]::SetEnvironmentVariable('AZIMUTH_SR_MV_SCALE_Y',$MVScaleY.ToString('R',$culture),'Process')
+            [Environment]::SetEnvironmentVariable('AZIMUTH_SR_PRE_EXPOSURE',$PreExposure.ToString('R',$culture),'Process')
+            [Environment]::SetEnvironmentVariable('AZIMUTH_SR_EXPOSURE_SCALE',$ExposureScale.ToString('R',$culture),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_SR_QUALITY',$Quality,'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_PREVIEW_POSTFX',$(if($PreviewPostFx){'1'}else{'0'}),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_PREVIEW_JITTER',$(if($PreviewJitter){'1'}else{'0'}),'Process')
@@ -386,6 +404,7 @@ try {
         auto_ready = [bool]($content -match '(?m)^PREVIEW AUTO_READY ')
         visible_hdr_requested = [bool]$VisibleHDR; hdr_live_requested = [bool]$HDRLive
         sr_render_requested = $RenderSize; sr_preset_requested = $Preset; sr_no_jitter_requested = [bool]$NoJitter
+        sr_hud_requested=$HUD; sr_depth_inverted_requested=$DepthInverted; sr_mv_jittered_requested=$MVJittered; sr_mv_scale_requested=@($MVScaleX,$MVScaleY); sr_pre_exposure_requested=$PreExposure; sr_exposure_scale_requested=$ExposureScale
         present_trace_requested = [bool]$PresentTrace; producer_gpu_wait_requested = [bool]$ProducerGpuWait
         visible_trial_complete = [bool]($content -match '(?m)^VISIBLE TRIAL_END ')
         visible_seconds_requested = $(if($VisibleSR){$VisibleSeconds}else{$null})

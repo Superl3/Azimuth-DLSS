@@ -49,6 +49,11 @@ int main(void) {
     AzSROptimal perf={1920,800,3840,1600,1920,800,0};
     assert(azsr_quality_distance((AzSRSize){1728,720},perf)<0);
     assert(azsr_quality_distance((AzSRSize){1920,800},perf)==0);
+    AzSRGuideOptions guides={0,0,1,1,1,1};
+    assert(azsr_guides_valid(guides));guides.mv_scale_x=-1;
+    assert(azsr_guides_valid(guides));guides.mv_scale_y=0;
+    assert(!azsr_guides_valid(guides));guides.mv_scale_y=1;guides.pre_exposure=-1;
+    assert(!azsr_guides_valid(guides));
     puts("PASS: SR policy including observed FH2 covering scissor and probe dimensions");
     return 0;
 }
