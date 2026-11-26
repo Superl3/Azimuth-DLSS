@@ -8,6 +8,7 @@
 #include "preview_batch_policy.h"
 #include "visible_sr.inl"
 #include "visible_trace.inl"
+#include "present_copy_trace.inl"
 #include "hdr_contract.inl"
 #include "hdr_replay.inl"
 #include "preview_capture.inl"
@@ -30,6 +31,7 @@ static void debug_trace_init(void) {
     if(!dlss_sr_debug_mode())return;
     debug_shader_dump_init();
     preview_init();
+    azpc_init();
     UINT n=dlss_debug_ini_uint(L"Resolves",8);
     if(n>=1 && n<=64)azdbg_limit=n;
     n=dlss_debug_ini_uint(L"TimeoutMs",8000);
@@ -72,6 +74,7 @@ static void debug_rdc_trigger(uint64_t now) {
 }
 static int debug_trace_begin_locked(uint64_t now) {
     if(!azdebug_begin(&azdbg,azdbg_limit,now,azdbg_ms))return 0;
+    azpc_first=azt_frame;
     if(azvis_enabled&&azdbg.id==1){InterlockedExchange(&azvis_trace_active,1);log_msg("VISIBLE TRIAL_BEGIN firstResolveAfter=%llu qpc=%lld retainedSwapchainRefs=0",azt_frame,azvis_qpc());}
     azt_budget=4000;azt_resolve_logs=64;azt_copy_logs=0;
     azdbg_geometry=64;azdbg_velocity=64;azdbg_aux=2048;azdbg_aux_warned=0;
@@ -115,6 +118,7 @@ static void debug_trace_poll(void) {
     /* RenderDoc API is only called on the existing hotkey thread. */
     if(started)debug_rdc_trigger(now);
     preview_poll();
+    azpc_poll();
     if(azdbg_rdc_pending && azdbg_rdc_api){
         uint32_t count=azdbg_rdc_api->GetNumCaptures();
         if(count>azdbg_rdc_seen && !azdbg_rdc_api->IsFrameCapturing()){
@@ -233,12 +237,14 @@ static void STDMETHODCALLTYPE dbg_execute(ID3D12CommandQueue *q,UINT n,ID3D12Com
     ReleaseSRWLockExclusive(&azt_lock);
     visible_work_submit(q,n,lists);
     preview_execute(q,n,lists,dbg_real_execute);
+    azpc_submit(q,n,lists);
     visible_trace_submit(q,n,lists);
 }
 static HRESULT STDMETHODCALLTYPE dbg_signal(ID3D12CommandQueue *q,ID3D12Fence *f,UINT64 value) {
     HRESULT hr=dbg_real_signal(q,f,value);
     AcquireSRWLockExclusive(&azt_lock);
     if(azdbg_aux_locked())log_msg("DEBUG SIGNAL id=%u queue=%p fence=%p value=%llu hr=%08lx",azdbg.id,(void *)q,(void *)f,(unsigned long long)value,(unsigned long)hr);
+    if(azpc_active_locked())log_msg("LINEAGE QUEUE_SIGNAL queue=%p fence=%p value=%llu hr=%08lx qpc=%lld",(void *)q,(void *)f,(unsigned long long)value,(unsigned long)hr,azvis_qpc());
     ReleaseSRWLockExclusive(&azt_lock);
     return hr;
 }
@@ -246,6 +252,7 @@ static HRESULT STDMETHODCALLTYPE dbg_wait(ID3D12CommandQueue *q,ID3D12Fence *f,U
     HRESULT hr=dbg_real_wait(q,f,value);
     AcquireSRWLockExclusive(&azt_lock);
     if(azdbg_aux_locked())log_msg("DEBUG WAIT id=%u queue=%p fence=%p value=%llu hr=%08lx",azdbg.id,(void *)q,(void *)f,(unsigned long long)value,(unsigned long)hr);
+    if(azpc_active_locked())log_msg("LINEAGE QUEUE_WAIT queue=%p fence=%p value=%llu hr=%08lx qpc=%lld",(void *)q,(void *)f,(unsigned long long)value,(unsigned long)hr,azvis_qpc());
     ReleaseSRWLockExclusive(&azt_lock);
     return hr;
 }
@@ -284,5 +291,6 @@ static HRESULT STDMETHODCALLTYPE dbg_create_compute(ID3D12Device *dev,const D3D1
     return hr;
 }
 static void debug_trace_device_hook(ID3D12Device *dev) {
+    azpc_hook_device(dev);
     if(dlss_sr_debug_mode())patch_slot(VT_SLOT(dev,ID3D12DeviceVtbl,CreateComputePipelineState),(void *)dbg_create_compute,(void **)&dbg_real_create_compute);
 }

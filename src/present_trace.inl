@@ -82,6 +82,20 @@ static HRESULT STDMETHODCALLTYPE azdx_present1(IDXGISwapChain1 *sc,UINT sync,UIN
     unsigned long long id=azdx_begin(sc,"Present1",sync,flags);
     HRESULT hr=original(sc,sync,flags,params);azdx_end(id,hr);return hr;
 }
+static void azdx_live_buffers(IDXGISwapChain1 *sc,const char *reason){
+    if(!azpc_enabled)return;
+    DXGI_SWAP_CHAIN_DESC1 d={0};
+    if(FAILED(sc->lpVtbl->GetDesc1(sc,&d))||d.BufferCount>16)return;
+    log_msg("LINEAGE LIVE_CHAIN chain=%p reason=%s size=%ux%u fmt=%u buffers=%u qpc=%lld",(void *)sc,reason,d.Width,d.Height,(unsigned)d.Format,d.BufferCount,azvis_qpc());
+    for(UINT i=0;i<d.BufferCount;++i){
+        ID3D12Resource *r=NULL;
+        if(SUCCEEDED(sc->lpVtbl->GetBuffer(sc,i,&IID_ID3D12Resource,(void **)&r))&&r){
+            D3D12_RESOURCE_DESC rd;r->lpVtbl->GetDesc(r,&rd);
+            log_msg("LINEAGE LIVE_BUFFER chain=%p index=%u resource=%p size=%llux%u fmt=%u qpc=%lld noRetainedRefs=1",(void *)sc,i,(void *)r,(unsigned long long)rd.Width,rd.Height,(unsigned)rd.Format,azvis_qpc());
+            ID3D12Resource_Release(r);
+        }
+    }
+}
 static void azdx_resize_guard(const char *method,void *sc,UINT count,UINT w,UINT h,DXGI_FORMAT fmt){
     if(azvis_observing())InterlockedExchange(&azvis_chain_changed,1);
     log_msg("DXGI RESIZE_BEGIN method=%s chain=%p size=%ux%u buffers=%u fmt=%u trialDisabled=%d qpc=%lld",
@@ -94,6 +108,7 @@ static HRESULT STDMETHODCALLTYPE azdx_resize(IDXGISwapChain1 *sc,UINT count,UINT
     azdx_resize_guard("ResizeBuffers",(void *)sc,count,w,h,fmt);
     HRESULT hr=original(sc,count,w,h,fmt,flags);
     log_msg("DXGI RESIZE_END method=ResizeBuffers chain=%p hr=%08lx qpc=%lld",(void *)sc,(unsigned long)hr,azvis_qpc());
+    if(SUCCEEDED(hr))azdx_live_buffers(sc,"resize");
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE azdx_resize1(IDXGISwapChain3 *sc,UINT count,UINT w,UINT h,DXGI_FORMAT fmt,UINT flags,const UINT *masks,IUnknown *const *queues){
@@ -103,6 +118,7 @@ static HRESULT STDMETHODCALLTYPE azdx_resize1(IDXGISwapChain3 *sc,UINT count,UIN
     azdx_resize_guard("ResizeBuffers1",(void *)sc,count,w,h,fmt);
     HRESULT hr=original(sc,count,w,h,fmt,flags,masks,queues);
     log_msg("DXGI RESIZE_END method=ResizeBuffers1 chain=%p hr=%08lx qpc=%lld",(void *)sc,(unsigned long)hr,azvis_qpc());
+    if(SUCCEEDED(hr))azdx_live_buffers((IDXGISwapChain1 *)sc,"resize1");
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE azdx_color(IDXGISwapChain3 *sc,DXGI_COLOR_SPACE_TYPE color){
@@ -132,6 +148,7 @@ static void azdx_install(IDXGISwapChain1 *sc){
         color=azdx_patch(VT_SLOT(s3,IDXGISwapChain3Vtbl,SetColorSpace1),(void *)azdx_color);
         s3->lpVtbl->Release(s3);
     }
+    azdx_live_buffers(sc,"creation");
     log_msg("DXGI TRACE_INSTALL chain=%p chain3=%p present=%d present1=%d resize=%d present3=%d present13=%d resize3=%d resize1=%d color=%d noRetainedRefs=1 qpc=%lld",
         (void *)sc,(void *)id3,p,p1,r,p3,p13,r3,r1,color,azvis_qpc());
 }

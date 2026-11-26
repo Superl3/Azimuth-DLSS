@@ -534,7 +534,7 @@ static HRESULT STDMETHODCALLTYPE hook_Reset(ID3D12GraphicsCommandList *cl, ID3D1
         s->pso = pso;
     }
     HRESULT hr=real_Reset(cl,a,pso);
-    if(SUCCEEDED(hr)){if(s)s->trace_bindings_known=1;preview_reset(cl);}
+    if(SUCCEEDED(hr)){if(s)s->trace_bindings_known=1;preview_reset(cl);azpc_reset(cl);}
     return hr;
 }
 
