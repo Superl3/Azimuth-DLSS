@@ -7,7 +7,7 @@
 #include "preview_batch_policy.h"
 static unsigned azvis_ms=10000u;
 #define AZPV_CAPTURE_COUNT 2u
-static int azvis_enabled,azvis_marker,azvis_hdr,azvis_hdr_live;
+static int azvis_enabled,azvis_marker,azvis_hdr,azvis_hdr_live,azvis_fg_probe;
 static volatile LONG azvis_chain_changed;
 static SRWLOCK azvis_pso_lock=SRWLOCK_INIT;
 static struct {ID3D12PipelineState *original,*merge,*scene;} azvis_psos[AZVIS_PSO_MAX];
@@ -18,7 +18,7 @@ typedef struct {
     unsigned long long recording,composite_work;
     uintptr_t target_id;
     AzrpSurface sr_surface;
-    ID3D12Resource *layers,*merged,*probe_final,*hdr_scene;
+    ID3D12Resource *layers,*merged,*probe_final,*hdr_scene,*fg_hudless;
     ID3D12DescriptorHeap *rtv,*heap;
 } AzvisFrame;
 static int azvis_window_locked(void){
@@ -35,6 +35,9 @@ static void visible_init(void){
     UINT seconds=0;
     if(azt_env_uint("AZIMUTH_DEBUG_VISIBLE_SECONDS",&seconds))azvis_ms=azvis_duration_ms(seconds);
     if(requested)log_msg("VISIBLE CONFIG enabled=%d durationMs=%u mode=native_hud_region_retention sdr=%d hdr=%d hdrLive=%d presentVerified=0 swapchainRefs=0",azvis_enabled,azvis_ms,!azvis_hdr,azvis_hdr,azvis_hdr_live);
+    n=GetEnvironmentVariableA("AZIMUTH_DEBUG_FG_HUDLESS",b,sizeof(b));
+    azvis_fg_probe=azvis_enabled&&n==1&&b[0]=='1';
+    if(azvis_fg_probe)log_msg("FG HUDLESS_CONFIG selectedGroupsOnly=1 finalNativeShader=1 generatedFrames=0");
     n=GetEnvironmentVariableA("AZIMUTH_DEBUG_VISIBLE_MARKER",b,sizeof(b));
     azvis_marker=azvis_enabled&&n==1&&b[0]=='1';
     if(azvis_marker)log_msg("VISIBLE MARKER enabled=1 rect=32,32,80,80 pattern=white_border_magenta_cyan_black testOnly=1 stage=pre_native_final");
@@ -44,6 +47,7 @@ static void visible_release(AzvisFrame *v){
     if(v->rtv)ID3D12DescriptorHeap_Release(v->rtv);
     if(v->probe_final)ID3D12Resource_Release(v->probe_final);
     if(v->hdr_scene)ID3D12Resource_Release(v->hdr_scene);
+    if(v->fg_hudless)ID3D12Resource_Release(v->fg_hudless);
     if(v->merged)ID3D12Resource_Release(v->merged);
     if(v->layers)ID3D12Resource_Release(v->layers);
     if(v->sr_surface.srv)ID3D12DescriptorHeap_Release(v->sr_surface.srv);
@@ -199,8 +203,9 @@ static int azvis_table_span(const AzrpRootEvidence *e,UINT root,UINT *span){
     if(!n||n>AZRB_HEAP_LIMIT)return 0;
     *span=(UINT)n;return 1;
 }
-static int azvis_final_bindings(ListState *s,ID3D12Resource *native,AzvisFrame *v,AzrpBindings *a,AzrpBindings *b,unsigned long long resolve){
-    memset(a,0,sizeof(*a));memset(b,0,sizeof(*b));
+static int azvis_final_bindings(ListState *s,ID3D12Resource *native,AzvisFrame *v,AzrpBindings *a,AzrpBindings *b,AzrpBindings *f,unsigned long long resolve){
+    memset(a,0,sizeof(*a));memset(b,0,sizeof(*b));memset(f,0,sizeof(*f));
+    unsigned passes=v->fg_hudless?3u:2u;
     AzrpRootEvidence e;memset(&e,0,sizeof(e));UINT size=(UINT)sizeof(e);
     if(!s->trace_graphics_rs||FAILED(s->trace_graphics_rs->lpVtbl->GetPrivateData(s->trace_graphics_rs,&azrp_layout_key,&size,&e))||
        size!=sizeof(e)||e.overflow||e.rows>AZRP_SCHEMA_ROWS||e.parameters>AZRB_TABLES||(e.flags&0xc00u)){
@@ -220,7 +225,7 @@ static int azvis_final_bindings(ListState *s,ID3D12Resource *native,AzvisFrame *
     int span0=t0ok&&azvis_table_span(&e,t0.root,&n0);
     int span1=t1ok&&(t0ok&&t0.root==t1.root?span0:azvis_table_span(&e,t1.root,&n1));
     int bounds=span0&&span1&&t0.offset<n0&&t1.offset<(t0.root==t1.root?n0:n1)&&
-        !(t0.root==t1.root&&t0.offset==t1.offset)&&n0+n1<=AZRB_HEAP_LIMIT/2;
+        !(t0.root==t1.root&&t0.offset==t1.offset)&&n0+n1<=AZRB_HEAP_LIMIT/passes;
     if(verbose||!t0ok||!t1ok||!s0ok||!bounds)
         log_msg("VISIBLE FINAL_LAYOUT resolve=%llu t0=%d t1=%d s0=%d span0=%d span1=%d bounds=%d root0=%u root1=%u samplerRoot=%u samplerMode=%u entries0=%u entries1=%u",resolve,t0ok,t1ok,s0ok,span0,span1,bounds,t0.root,t1.root,s0.root,s0.mode,n0,n1);
     if(!t0ok||!t1ok||!s0ok||!bounds){
@@ -257,13 +262,13 @@ static int azvis_final_bindings(ListState *s,ID3D12Resource *native,AzvisFrame *
         reason="native_curve_shadow";goto done;
     }
     UINT total=n0+n1,base1=t0.root==t1.root?0:n0;
-    D3D12_DESCRIPTOR_HEAP_DESC hd={0};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;hd.NumDescriptors=2*total;hd.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    D3D12_DESCRIPTOR_HEAP_DESC hd={0};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;hd.NumDescriptors=passes*total;hd.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if(FAILED(real_CreateDescriptorHeap(g_device,&hd,&IID_ID3D12DescriptorHeap,(void **)&v->heap))||!v->heap){reason="final_heap_allocation";goto done;}
     D3D12_CPU_DESCRIPTOR_HANDLE cpu;D3D12_GPU_DESCRIPTOR_HANDLE gpu;
     v->heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(v->heap,&cpu);
     v->heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(v->heap,&gpu);
-    for(unsigned pass=0;pass<2;++pass){
-        AzrpBindings *o=pass?b:a;UINT base=pass*total;
+    for(unsigned pass=0;pass<passes;++pass){
+        AzrpBindings *o=pass==2?f:pass?b:a;UINT base=pass*total;
         o->heap=v->heap;o->num_heaps=s->num_heaps;
         for(UINT i=0;i<s->num_heaps;++i)o->heaps[i]=(int)i==hi?v->heap:s->heaps[i];
         o->mask=azrb_bit(t0.root)|azrb_bit(t1.root);
@@ -276,10 +281,10 @@ static int azvis_final_bindings(ListState *s,ID3D12Resource *native,AzvisFrame *
         view.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         if(pass){view.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;view.Texture2D.MipLevels=1;}
         else{view.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2DARRAY;view.Texture2DArray.MipLevels=1;view.Texture2DArray.ArraySize=3;}
-        real_CreateShaderResourceView(g_device,pass?v->merged:v->layers,&view,dst0);
+        real_CreateShaderResourceView(g_device,pass==2?v->sr_surface.image:pass?v->merged:v->layers,&view,dst0);
         real_CopyDescriptorsSimple(g_device,1,dst1,azrp_shadow_handle(curve->shadow),D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     }
-    log_msg("VISIBLE FINAL_BINDINGS resolve=%llu root=%p t0Root=%u t0Offset=%u t1Root=%u t1Offset=%u curve=%p s0Mode=%u graphicsRestore=%d computeRestore=%d entries=%u",resolve,(void *)s->trace_graphics_rs,t0.root,t0.offset,t1.root,t1.offset,(void *)curve->res,s0.mode,graphics,compute,2*total);
+    log_msg("VISIBLE FINAL_BINDINGS resolve=%llu root=%p t0Root=%u t0Offset=%u t1Root=%u t1Offset=%u curve=%p s0Mode=%u graphicsRestore=%d computeRestore=%d entries=%u",resolve,(void *)s->trace_graphics_rs,t0.root,t0.offset,t1.root,t1.offset,(void *)curve->res,s0.mode,graphics,compute,passes*total);
     ok=1;
 done:
     ReleaseSRWLockExclusive(&azt_lock);
@@ -288,6 +293,19 @@ done:
 }
 static void azvis_set_tables(ID3D12GraphicsCommandList *cl,const AzrpBindings *b){
     for(UINT i=0;i<AZRB_TABLES;++i)if(b->mask&azrb_bit(i))real_SetGraphicsRootDescriptorTable(cl,i,b->tables[i]);
+}
+/* A separate display-domain HUD-less color candidate, never a generated
+   frame. Exact final shader with SR postfx as t0 (and t2 for HDR).
+   Keep the game curve, sampler and Levels, no native HUD pixels. */
+static void azvis_fg_draw(AzvisFrame *v,ID3D12GraphicsCommandList *cl,ListState *s,const AzrpBindings *f,D3D12_CPU_DESCRIPTOR_HANDLE rtv,unsigned long long resolve){
+    if(!v->fg_hudless)return;
+    hooks_transition(cl,v->sr_surface.image,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    azvis_set_tables(cl,f);real_SetPipelineState(cl,s->pso);
+    real_OMSetRenderTargets(cl,1,&rtv,FALSE,NULL);
+    real_DrawInstanced(cl,3,1,0,0);
+    hooks_transition(cl,v->sr_surface.image,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
+    log_msg("FG HUDLESS_RECORDED resolve=%llu list=%p recording=%llu output=%p size=%ux%u hdr=%d t0t2Same=%d nativeFinalShader=1 nativeHudRegions=0 signalVerified=0",
+        resolve,(void *)cl,v->recording,(void *)v->fg_hudless,azrp_profile.ow,azrp_profile.oh,azvis_hdr,azvis_hdr);
 }
 static int visible_finalize(AzvisFrame *v,ID3D12GraphicsCommandList *cl,ListState *s,ID3D12Resource *native,ID3D12Resource *target,unsigned long long resolve,int allow_probe){
     AcquireSRWLockShared(&azt_lock);
@@ -318,7 +336,8 @@ static int visible_finalize(AzvisFrame *v,ID3D12GraphicsCommandList *cl,ListStat
     if(!merge){log_msg("VISIBLE SKIP resolve=%llu stage=final reason=no_exact_sdr_pso",resolve);return 0;}
     v->merged=azvis_new_texture(1,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,D3D12_RESOURCE_STATE_RENDER_TARGET);
     if(probe){v->probe_final=azvis_new_texture(1,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,D3D12_RESOURCE_STATE_RENDER_TARGET);if(!v->probe_final)return 0;}
-    D3D12_DESCRIPTOR_HEAP_DESC hd={0};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=probe?2u:1u;
+    if(azvis_fg_probe&&allow_probe)v->fg_hudless=azvis_new_texture(1,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,D3D12_RESOURCE_STATE_RENDER_TARGET);
+    D3D12_DESCRIPTOR_HEAP_DESC hd={0};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=(probe?2u:1u)+(v->fg_hudless?1u:0u);
     if(!v->merged||!real_CreateDescriptorHeap||FAILED(real_CreateDescriptorHeap(g_device,&hd,&IID_ID3D12DescriptorHeap,(void **)&v->rtv))||!v->rtv){
         log_msg("VISIBLE SKIP resolve=%llu stage=final reason=merge_allocation",resolve);return 0;
     }
@@ -326,8 +345,10 @@ static int visible_finalize(AzvisFrame *v,ID3D12GraphicsCommandList *cl,ListStat
     real_CreateRenderTargetView(g_device,v->merged,NULL,rtv);
     D3D12_CPU_DESCRIPTOR_HANDLE probe_rtv=rtv;
     if(probe){probe_rtv.ptr+=ID3D12Device_GetDescriptorHandleIncrementSize(g_device,D3D12_DESCRIPTOR_HEAP_TYPE_RTV);real_CreateRenderTargetView(g_device,v->probe_final,NULL,probe_rtv);}
-    AzrpBindings a,b;
-    if(!azvis_final_bindings(s,native,v,&a,&b,resolve))return 0;
+    D3D12_CPU_DESCRIPTOR_HANDLE fg_rtv={rtv.ptr+(SIZE_T)(probe?2u:1u)*ID3D12Device_GetDescriptorHandleIncrementSize(g_device,D3D12_DESCRIPTOR_HEAP_TYPE_RTV)};
+    if(v->fg_hudless)real_CreateRenderTargetView(g_device,v->fg_hudless,NULL,fg_rtv);
+    AzrpBindings a,b,f;
+    if(!azvis_final_bindings(s,native,v,&a,&b,&f,resolve))return 0;
     /* All gates and allocations passed BEFORE touching the native target.
        The existing 1080p viewport/scissor and native fullscreen VS are
        unchanged. Merge in the pre-SDR domain, then run the actual original
@@ -342,7 +363,8 @@ static int visible_finalize(AzvisFrame *v,ID3D12GraphicsCommandList *cl,ListStat
     if(probe)real_OMSetRenderTargets(cl,1,&probe_rtv,FALSE,NULL);
     else real_OMSetRenderTargets(cl,s->num_rtv,s->rtv,s->rtv_single,NULL);
     real_DrawInstanced(cl,3,1,0,0);
-    if(probe)real_OMSetRenderTargets(cl,s->num_rtv,s->rtv,s->rtv_single,NULL);
+    if(v->fg_hudless)azvis_fg_draw(v,cl,s,&f,fg_rtv,resolve);
+    if(probe||v->fg_hudless)real_OMSetRenderTargets(cl,s->num_rtv,s->rtv,s->rtv_single,NULL);
     real_SetDescriptorHeaps(cl,s->num_heaps,s->heaps);
     for(UINT i=0;i<AZRB_TABLES;++i){
         if(s->trace_tables_mask&azrb_bit(i))real_SetGraphicsRootDescriptorTable(cl,i,s->tables[i]);

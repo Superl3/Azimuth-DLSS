@@ -3,8 +3,9 @@
    SAME SR scene outside conservative native HUD regions. No Present hook.
    Offscreen by default; native target replacement requires explicit opt-in. */
 #include "hdr_replay_policy.h"
-static int azhdr_final_bindings(ListState *s,const AzHdrContract *h,AzvisFrame *v,AzrpBindings *a,AzrpBindings *b,unsigned long long resolve){
-    memset(a,0,sizeof(*a));memset(b,0,sizeof(*b));
+static int azhdr_final_bindings(ListState *s,const AzHdrContract *h,AzvisFrame *v,AzrpBindings *a,AzrpBindings *b,AzrpBindings *f,unsigned long long resolve){
+    memset(a,0,sizeof(*a));memset(b,0,sizeof(*b));memset(f,0,sizeof(*f));
+    unsigned passes=v->fg_hudless?3u:2u;
     AzrpRootEvidence e;memset(&e,0,sizeof(e));UINT bytes=(UINT)sizeof(e);
     if(!s->trace_graphics_rs||FAILED(s->trace_graphics_rs->lpVtbl->GetPrivateData(s->trace_graphics_rs,&azrp_layout_key,&bytes,&e))||
        bytes!=sizeof(e)||e.overflow||e.rows>AZRP_SCHEMA_ROWS||e.parameters>AZRB_TABLES||(e.flags&0xc00u))return 0;
@@ -18,7 +19,7 @@ static int azhdr_final_bindings(ListState *s,const AzHdrContract *h,AzvisFrame *
         UINT r=req[i].root;roots[i]=r;offsets[i]=req[i].offset;
         if(r>=AZRB_TABLES)return 0;
         if(!(mask&azrb_bit(r))){
-            if(!azvis_table_span(&e,r,&span[r])||span[r]>AZRB_HEAP_LIMIT/2-total)return 0;
+            if(!azvis_table_span(&e,r,&span[r])||span[r]>AZRB_HEAP_LIMIT/passes-total)return 0;
             base[r]=total;total+=span[r];mask|=azrb_bit(r);
         }
         if(req[i].offset>=span[r])return 0;
@@ -53,13 +54,13 @@ static int azhdr_final_bindings(ListState *s,const AzHdrContract *h,AzvisFrame *
     }
     if(req[3].mode==AZRB_DIRECT&&!(s->trace_graphics_cbv_mask&azrb_bit(req[3].root))){reason="direct_cb0";goto done;}
     if(req[3].mode==AZRB_CONSTANT&&(s->trace_graphics_constant_words[req[3].root]&7)!=7){reason="constant_cb0";goto done;}
-    D3D12_DESCRIPTOR_HEAP_DESC hd={0};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;hd.NumDescriptors=2*total;hd.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    D3D12_DESCRIPTOR_HEAP_DESC hd={0};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;hd.NumDescriptors=passes*total;hd.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if(FAILED(real_CreateDescriptorHeap(g_device,&hd,&IID_ID3D12DescriptorHeap,(void **)&v->heap))||!v->heap){reason="heap_allocation";goto done;}
     D3D12_CPU_DESCRIPTOR_HANDLE cpu;D3D12_GPU_DESCRIPTOR_HANDLE gpu;
     v->heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(v->heap,&cpu);
     v->heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(v->heap,&gpu);
-    for(unsigned pass=0;pass<2;++pass){
-        AzrpBindings *o=pass?b:a;unsigned start=pass*total;
+    for(unsigned pass=0;pass<passes;++pass){
+        AzrpBindings *o=pass==2?f:pass?b:a;unsigned start=pass*total;
         o->heap=v->heap;o->num_heaps=s->num_heaps;o->mask=mask;
         for(UINT i=0;i<s->num_heaps;++i)o->heaps[i]=(int)i==hi?v->heap:s->heaps[i];
         for(unsigned r=0;r<AZRB_TABLES;++r)if(mask&azrb_bit(r))o->tables[r].ptr=gpu.ptr+(UINT64)(start+base[r])*azrp_shadow_inc;
@@ -71,12 +72,12 @@ static int azhdr_final_bindings(ListState *s,const AzHdrContract *h,AzvisFrame *
                 view.Format=DXGI_FORMAT_R10G10B10A2_UNORM;view.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
                 if(pass){view.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;view.Texture2D.MipLevels=1;}
                 else{view.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2DARRAY;view.Texture2DArray.MipLevels=1;view.Texture2DArray.ArraySize=3;}
-                real_CreateShaderResourceView(g_device,pass?(i==0?v->merged:v->hdr_scene):v->layers,&view,dst);
+                real_CreateShaderResourceView(g_device,pass==2?v->sr_surface.image:pass?(i==0?v->merged:v->hdr_scene):v->layers,&view,dst);
             }else real_CopyDescriptorsSimple(g_device,1,dst,azrp_shadow_handle(d[i]->shadow),D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         }
     }
     log_msg("VISIBLE HDR_BINDINGS resolve=%llu t0Root=%u t1Root=%u t2Root=%u cb0Mode=%u entries=%u nativeCurve=1 nativeLevels=1 graphicsRestore=%d computeRestore=%d",
-        resolve,req[0].root,req[1].root,req[2].root,req[3].mode,2*total,graphics,compute);
+        resolve,req[0].root,req[1].root,req[2].root,req[3].mode,passes*total,graphics,compute);
     ok=1;
 done:
     ReleaseSRWLockExclusive(&azt_lock);
@@ -106,16 +107,19 @@ static int visible_hdr_finalize(AzvisFrame *v,ID3D12GraphicsCommandList *cl,List
     v->hdr_scene=azvis_new_texture(1,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,D3D12_RESOURCE_STATE_RENDER_TARGET);
     if(mode==2)v->probe_final=azvis_new_texture(1,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,D3D12_RESOURCE_STATE_RENDER_TARGET);
     if(!v->merged||!v->hdr_scene||(mode==2&&!v->probe_final))return 0;
-    D3D12_DESCRIPTOR_HEAP_DESC hd={0};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=mode==2?3u:2u;
+    if(azvis_fg_probe&&capture)v->fg_hudless=azvis_new_texture(1,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,D3D12_RESOURCE_STATE_RENDER_TARGET);
+    D3D12_DESCRIPTOR_HEAP_DESC hd={0};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=(mode==2?3u:2u)+(v->fg_hudless?1u:0u);
     if(!real_CreateDescriptorHeap||FAILED(real_CreateDescriptorHeap(g_device,&hd,&IID_ID3D12DescriptorHeap,(void **)&v->rtv))||!v->rtv)return 0;
-    D3D12_CPU_DESCRIPTOR_HANDLE rtv[3];v->rtv->lpVtbl->GetCPUDescriptorHandleForHeapStart(v->rtv,&rtv[0]);
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv[4];v->rtv->lpVtbl->GetCPUDescriptorHandleForHeapStart(v->rtv,&rtv[0]);
     UINT inc=ID3D12Device_GetDescriptorHandleIncrementSize(g_device,D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-    rtv[1].ptr=rtv[0].ptr+inc;rtv[2].ptr=rtv[1].ptr+inc;
+    rtv[1].ptr=rtv[0].ptr+inc;rtv[2].ptr=rtv[1].ptr+inc;rtv[3].ptr=rtv[2].ptr+inc;
     real_CreateRenderTargetView(g_device,v->merged,NULL,rtv[0]);
     real_CreateRenderTargetView(g_device,v->hdr_scene,NULL,rtv[1]);
     if(mode==2)real_CreateRenderTargetView(g_device,v->probe_final,NULL,rtv[2]);
-    AzrpBindings a,b;
-    if(!azhdr_final_bindings(s,h,v,&a,&b,resolve))return 0;
+    D3D12_CPU_DESCRIPTOR_HANDLE fg_rtv=rtv[mode==2?3u:2u];
+    if(v->fg_hudless)real_CreateRenderTargetView(g_device,v->fg_hudless,NULL,fg_rtv);
+    AzrpBindings a,b,f;
+    if(!azhdr_final_bindings(s,h,v,&a,&b,&f,resolve))return 0;
     /* Native final draw already ran. Snapshot the exact current inputs,
        not an earlier possibly stale composite. Only t0/t2 transition;
        t1 and CB0 remain in the native state. */
@@ -133,6 +137,7 @@ static int visible_hdr_finalize(AzvisFrame *v,ID3D12GraphicsCommandList *cl,List
     if(mode==2)real_OMSetRenderTargets(cl,1,&rtv[2],FALSE,NULL);
     else real_OMSetRenderTargets(cl,s->num_rtv,s->rtv,s->rtv_single,NULL);
     real_DrawInstanced(cl,3,1,0,0);
+    if(v->fg_hudless)azvis_fg_draw(v,cl,s,&f,fg_rtv,resolve);
     real_OMSetRenderTargets(cl,s->num_rtv,s->rtv,s->rtv_single,NULL);
     real_SetDescriptorHeaps(cl,s->num_heaps,s->heaps);
     for(UINT i=0;i<AZRB_TABLES;++i){
