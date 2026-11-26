@@ -13,6 +13,8 @@ param(
     [switch]$PreviewReplay,
     [switch]$PreviewSRReplay,
     [switch]$VisibleSR,
+    [switch]$VisibleHDR,
+    [switch]$HDRLive,
     [switch]$VisibleMarker,
     [ValidateRange(10,120)][int]$VisibleSeconds = 10,
     [switch]$AutoTest,
@@ -28,6 +30,8 @@ param(
     [string]$Destination = (Join-Path $PSScriptRoot 'debug-captures')
 )
 $ErrorActionPreference = 'Stop'
+if($HDRLive -and !$VisibleHDR){throw '-HDRLive requires -VisibleHDR.'}
+if($VisibleHDR){$VisibleSR=$true}
 # Explicit automatic test preset: no debug hotkeys, no install prompts.
 # The caller controls actual game/monitor settings and any game menus.
 if($AutoTest){
@@ -77,7 +81,7 @@ if (!$Output) { $Output = Read-Host 'Expected display resolution, e.g. 3840x1600
 if ($Output -ne 'unknown' -and $Output -notmatch '^[1-9]\d*x[1-9]\d*$') { throw 'Output must be WxH or unknown.' }
 if($Preview -and $Output -eq 'unknown'){throw 'Preview requires an explicit higher output resolution.'}
 if($PreviewReplay -and $Output -notin @('1920x1080','3840x1600')){throw 'Postprocess replay supports 1280x720 -> 1920x1080 or 2592x1080 -> 3840x1600.'}
-if($VisibleSR -and $Output -ne '1920x1080'){throw 'VisibleSR remains SDR 1920x1080 only; use offscreen PreviewSRReplay for 3840x1600 PQ diagnostics.'}
+if($VisibleSR -and !$VisibleHDR -and $Output -ne '1920x1080'){throw 'SDR VisibleSR remains 1920x1080 only; use -VisibleHDR for the measured wide HDR profile.'}
 if (!$RenderSetting) { $RenderSetting = Read-Host 'Actual Azimuth render setting (native/low/etc.; this is a label only)' }
 $dest = [IO.Path]::GetFullPath($Destination)
 New-Item -ItemType Directory -Path $dest -Force | Out-Null
@@ -188,7 +192,7 @@ try {
             $previous = (Get-Item -LiteralPath $log).LastWriteTimeUtc
             Copy-Item -LiteralPath $log -Destination (Join-Path $dest ($tag + '-previous.log'))
         }
-        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM','AZIMUTH_DEBUG_AUTO_RESOLVE','AZIMUTH_DEBUG_AUTO_TEST','AZIMUTH_DEBUG_PRODUCER_WAIT_MS','AZIMUTH_DEBUG_AUTO_WARMUP_MS','AZIMUTH_DEBUG_AUTO_READY_FILE','AZIMUTH_SR_OUTPUT','AZIMUTH_SR_QUALITY','AZIMUTH_DEBUG_PREVIEW_POSTFX','AZIMUTH_DEBUG_PREVIEW_JITTER','AZIMUTH_DEBUG_POSTFX_REPLAY','AZIMUTH_DEBUG_SR_REPLAY','AZIMUTH_DEBUG_VISIBLE_SR','AZIMUTH_DEBUG_VISIBLE_MARKER','AZIMUTH_DEBUG_VISIBLE_SECONDS','AZIMUTH_DEBUG_QUEUE_TRACE')) {
+        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM','AZIMUTH_DEBUG_AUTO_RESOLVE','AZIMUTH_DEBUG_AUTO_TEST','AZIMUTH_DEBUG_PRODUCER_WAIT_MS','AZIMUTH_DEBUG_AUTO_WARMUP_MS','AZIMUTH_DEBUG_AUTO_READY_FILE','AZIMUTH_SR_OUTPUT','AZIMUTH_SR_QUALITY','AZIMUTH_DEBUG_PREVIEW_POSTFX','AZIMUTH_DEBUG_PREVIEW_JITTER','AZIMUTH_DEBUG_POSTFX_REPLAY','AZIMUTH_DEBUG_SR_REPLAY','AZIMUTH_DEBUG_VISIBLE_SR','AZIMUTH_DEBUG_VISIBLE_HDR','AZIMUTH_DEBUG_HDR_LIVE','AZIMUTH_DEBUG_VISIBLE_MARKER','AZIMUTH_DEBUG_VISIBLE_SECONDS','AZIMUTH_DEBUG_QUEUE_TRACE')) {
             $oldEnv[$key] = [Environment]::GetEnvironmentVariable($key,'Process')
         }
         [Environment]::SetEnvironmentVariable('AZIMUTH_SR_MODE',$(if($Preview){'preview'}else{'debug'}),'Process')
@@ -200,6 +204,8 @@ try {
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_POSTFX_REPLAY',$(if($PreviewReplay){'1'}else{'0'}),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_SR_REPLAY',$(if($PreviewSRReplay){'1'}else{'0'}),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_VISIBLE_SR',$(if($VisibleSR){'1'}else{'0'}),'Process')
+            [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_VISIBLE_HDR',$(if($VisibleHDR){'1'}else{'0'}),'Process')
+            [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_HDR_LIVE',$(if($HDRLive){'1'}else{'0'}),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_VISIBLE_MARKER',$(if($VisibleMarker){'1'}else{'0'}),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_VISIBLE_SECONDS',[string]$VisibleSeconds,'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_QUEUE_TRACE','1','Process')
@@ -222,7 +228,8 @@ try {
             Write-Host 'Enter real gameplay. Press F8 once while driving. Preview ignores early input before fresh scene readiness and all further F8 inputs after acceptance.'
         }
         if($Preview){
-            if($VisibleSR){Write-Warning "Visible SR SDR alpha: after capture start, up to $VisibleSeconds seconds of gated native final-target replacement. Native HUD pixels retained; SDR only: explicitly disable HDR in the game. No swapchain references are retained; actual Present needs external ETW or screen evidence."}
+            if($VisibleHDR){Write-Warning "HDR SR alpha: exact native PQ shader replay; live=$([bool]$HDRLive); enable game HDR, verify output signal externally. Default is private probe only."}
+            elseif($VisibleSR){Write-Warning "Visible SR SDR alpha: after capture start, up to $VisibleSeconds seconds of gated native final-target replacement. Native HUD pixels retained; SDR only: explicitly disable HDR in the game. No swapchain references are retained; actual Present needs external ETW or screen evidence."}
             else{Write-Host 'Preview captures offscreen SR and selected GPU textures; no visible SR replacement.'}
             if($PreviewJitter){Write-Warning 'Experimental viewport jitter can affect the displayed native fallback scene.'}
         }
@@ -329,9 +336,9 @@ try {
     if($Preview){
         if($content -notmatch 'SR PREVIEW:' -and !$AutoTest){throw 'Log is not from preview mode.'}
         $total=0L
-        $rawRows=[regex]::Matches($content,'(?m)^PREVIEW FILE directory=(azimuth_preview_\d+_\d+) file=(f\d+-(?:color|depth|mv|sr|preoverlay|composite|final|replay|srpostfx|visiblehud|visiblefinal|hdrscene|hudprobe|finalprobe)-(\d+)x(\d+)-fmt(\d+)\.raw) bytes=(\d+)\r?$')
+        $rawRows=[regex]::Matches($content,'(?m)^PREVIEW FILE directory=(azimuth_preview_\d+_\d+) file=(f\d+-(?:color|depth|mv|sr|preoverlay|composite|final|replay|srpostfx|visiblehud|visiblefinal|hdrscene|hudprobe|finalprobe|hdrsrscene)-(\d+)x(\d+)-fmt(\d+)\.raw) bytes=(\d+)\r?$')
         foreach($row in $rawRows){
-            if($previewFiles.Count -ge 22){break}
+            if($previewFiles.Count -ge $(if($VisibleHDR){28}else{22})){break}
             $folder=Join-Path $game $row.Groups[1].Value
             $name=$row.Groups[2].Value
             if($previewFiles -contains $name){continue}
@@ -358,6 +365,7 @@ try {
         auto_warmup_ms = $(if($AutoTest){$AutoWarmupMs}else{$null}); auto_gate_requested = [bool]$ReadyFile
         auto_gate_open = [bool]($content -match '(?m)^PREVIEW AUTO_GATE_OPEN ')
         auto_ready = [bool]($content -match '(?m)^PREVIEW AUTO_READY ')
+        visible_hdr_requested = [bool]$VisibleHDR; hdr_live_requested = [bool]$HDRLive
         visible_trial_complete = [bool]($content -match '(?m)^VISIBLE TRIAL_END ')
         visible_seconds_requested = $(if($VisibleSR){$VisibleSeconds}else{$null})
         visible_duration_ms_observed = $(if($content -match '(?m)^VISIBLE CONFIG enabled=1 durationMs=(\d+) '){[int]$Matches[1]}else{$null})

@@ -7,10 +7,10 @@
 #include "preview_batch_policy.h"
 static unsigned azvis_ms=10000u;
 #define AZPV_CAPTURE_COUNT 2u
-static int azvis_enabled,azvis_marker;
+static int azvis_enabled,azvis_marker,azvis_hdr,azvis_hdr_live;
 static volatile LONG azvis_chain_changed;
 static SRWLOCK azvis_pso_lock=SRWLOCK_INIT;
-static struct {ID3D12PipelineState *original,*merge;} azvis_psos[AZVIS_PSO_MAX];
+static struct {ID3D12PipelineState *original,*merge,*scene;} azvis_psos[AZVIS_PSO_MAX];
 static unsigned azvis_pso_count;
 typedef struct {
     int enabled,pre_ready,composite_ready,routed;
@@ -18,7 +18,7 @@ typedef struct {
     unsigned long long recording,composite_work;
     uintptr_t target_id;
     AzrpSurface sr_surface;
-    ID3D12Resource *layers,*merged,*probe_final;
+    ID3D12Resource *layers,*merged,*probe_final,*hdr_scene;
     ID3D12DescriptorHeap *rtv,*heap;
 } AzvisFrame;
 static int azvis_window_locked(void){
@@ -26,18 +26,24 @@ static int azvis_window_locked(void){
 }
 static void visible_init(void){
     char b[8];DWORD n=GetEnvironmentVariableA("AZIMUTH_DEBUG_VISIBLE_SR",b,sizeof(b));
-    azvis_enabled=azrp_enabled&&azrp_sr_enabled&&!azrp_profile.wide&&n==1&&b[0]=='1';
+    int requested=n==1&&b[0]=='1';
+    n=GetEnvironmentVariableA("AZIMUTH_DEBUG_VISIBLE_HDR",b,sizeof(b));
+    azvis_hdr=requested&&n==1&&b[0]=='1';
+    n=GetEnvironmentVariableA("AZIMUTH_DEBUG_HDR_LIVE",b,sizeof(b));
+    azvis_hdr_live=azvis_hdr&&n==1&&b[0]=='1';
+    azvis_enabled=azrp_enabled&&azrp_sr_enabled&&(!azrp_profile.wide||azvis_hdr)&&requested;
     UINT seconds=0;
     if(azt_env_uint("AZIMUTH_DEBUG_VISIBLE_SECONDS",&seconds))azvis_ms=azvis_duration_ms(seconds);
-    if(n==1&&b[0]=='1')log_msg("VISIBLE CONFIG enabled=%d durationMs=%u mode=native_hud_region_retention sdr=1 presentVerified=0 swapchainRefs=0",azvis_enabled,azvis_ms);
+    if(requested)log_msg("VISIBLE CONFIG enabled=%d durationMs=%u mode=native_hud_region_retention sdr=%d hdr=%d hdrLive=%d presentVerified=0 swapchainRefs=0",azvis_enabled,azvis_ms,!azvis_hdr,azvis_hdr,azvis_hdr_live);
     n=GetEnvironmentVariableA("AZIMUTH_DEBUG_VISIBLE_MARKER",b,sizeof(b));
     azvis_marker=azvis_enabled&&n==1&&b[0]=='1';
-    if(azvis_marker)log_msg("VISIBLE MARKER enabled=1 rect=32,32,80,80 pattern=white_border_magenta_cyan_black testOnly=1 stage=pre_sdr_lut");
+    if(azvis_marker)log_msg("VISIBLE MARKER enabled=1 rect=32,32,80,80 pattern=white_border_magenta_cyan_black testOnly=1 stage=pre_native_final");
 }
 static void visible_release(AzvisFrame *v){
     if(v->heap)ID3D12DescriptorHeap_Release(v->heap);
     if(v->rtv)ID3D12DescriptorHeap_Release(v->rtv);
     if(v->probe_final)ID3D12Resource_Release(v->probe_final);
+    if(v->hdr_scene)ID3D12Resource_Release(v->hdr_scene);
     if(v->merged)ID3D12Resource_Release(v->merged);
     if(v->layers)ID3D12Resource_Release(v->layers);
     if(v->sr_surface.srv)ID3D12DescriptorHeap_Release(v->sr_surface.srv);
@@ -48,8 +54,11 @@ static void visible_release(AzvisFrame *v){
 static int azvis_final_pair(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *d){
     static const DWORD ps[]={0xa93721c4,0x5975a343,0x749f00dc,0xe74366c0};
     static const DWORD vs[]={0x79d0ca68,0x15da8827,0x24fc6096,0x35dd7508};
-    return d&&d->PS.pShaderBytecode&&d->VS.pShaderBytecode&&d->PS.BytecodeLength>=20&&d->VS.BytecodeLength>=20&&
-        !memcmp((const BYTE *)d->PS.pShaderBytecode+4,ps,16)&&!memcmp((const BYTE *)d->VS.pShaderBytecode+4,vs,16);
+    static const DWORD hdr[]={0x577d52ef,0x933f3888,0x157f3b5e,0xe0935945};
+    if(!d||!d->PS.pShaderBytecode||!d->VS.pShaderBytecode||d->PS.BytecodeLength<20||d->VS.BytecodeLength<20||
+       memcmp((const BYTE *)d->VS.pShaderBytecode+4,vs,16))return 0;
+    const BYTE *hash=(const BYTE *)d->PS.pShaderBytecode+4;
+    return !memcmp(hash,ps,16)?1:!memcmp(hash,hdr,16)?2:0;
 }
 static void visible_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *d,ID3D12PipelineState *pso){
     if(!azvis_enabled||!pso||!d)return;
@@ -66,7 +75,8 @@ static void visible_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *d,ID3D12Pipeli
             (int)ds->BackFace.StencilFailOp,(int)ds->BackFace.StencilDepthFailOp,(int)ds->BackFace.StencilPassOp,(int)ds->BackFace.StencilFunc,
             (int)d->DSVFormat,d->SampleDesc.Count,d->InputLayout.NumElements);
     }
-    if(!azvis_final_pair(d))return;
+    int pair=azvis_final_pair(d);
+    if(pair!=(azvis_hdr?2:1))return;
     const D3D12_RENDER_TARGET_BLEND_DESC *b=&d->BlendState.RenderTarget[0];
     if(!d->pRootSignature||d->NumRenderTargets!=1||d->RTVFormats[0]!=DXGI_FORMAT_R10G10B10A2_UNORM||
        d->DSVFormat!=DXGI_FORMAT_UNKNOWN||d->DepthStencilState.DepthEnable||d->DepthStencilState.StencilEnable||
@@ -80,25 +90,32 @@ static void visible_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *d,ID3D12Pipeli
     AcquireSRWLockExclusive(&azvis_pso_lock);
     for(unsigned i=0;i<azvis_pso_count;++i)if(azvis_psos[i].original==pso)goto done;
     if(azvis_pso_count>=AZVIS_PSO_MAX)goto done;
-    char marked[sizeof(azvis_merge_hlsl)+64];
-    const char *source=azvis_merge_hlsl;
-    if(azvis_marker){
-        int n=snprintf(marked,sizeof(marked),"#define AZVIS_MARKER 1\n%s",azvis_merge_hlsl);
-        if(n<0||(size_t)n>=sizeof(marked))goto done;
-        source=marked;
+    ID3D12PipelineState *variants[2]={NULL,NULL};
+    for(unsigned pass=0;pass<(pair==2?2u:1u);++pass){
+        char marked[sizeof(azvis_merge_hlsl)+256];
+        int n=snprintf(marked,sizeof(marked),"#define AZVIS_MARKER %d\n#define AZVIS_SCENE %u\n#define AZVIS_RW %u\n#define AZVIS_RH %u\n#define AZVIS_OW %u\n#define AZVIS_OH %u\n%s",
+            azvis_marker,pass,azrp_profile.rw,azrp_profile.rh,azrp_profile.ow,azrp_profile.oh,azvis_merge_hlsl);
+        if(n<0||(size_t)n>=sizeof(marked))break;
+        ID3DBlob *shader=compile(marked,"main","ps_5_0");
+        if(!shader){log_msg("VISIBLE PSO SKIP reason=merge_compile pass=%u",pass);break;}
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC desc=*d;
+        desc.PS.pShaderBytecode=ID3D10Blob_GetBufferPointer(shader);desc.PS.BytecodeLength=ID3D10Blob_GetBufferSize(shader);
+        desc.CachedPSO.pCachedBlob=NULL;desc.CachedPSO.CachedBlobSizeInBytes=0;
+        HRESULT hr=real_CreateGraphicsPipelineState(g_device,&desc,&IID_ID3D12PipelineState,(void **)&variants[pass]);
+        ID3D10Blob_Release(shader);
+        if(FAILED(hr)||!variants[pass]){
+            if(variants[pass]){ID3D12PipelineState_Release(variants[pass]);variants[pass]=NULL;}
+            log_msg("VISIBLE PSO SKIP reason=merge_pso pass=%u hr=%08lx",pass,(unsigned long)hr);break;
+        }
     }
-    ID3DBlob *shader=compile(source,"main","ps_5_0");
-    if(!shader){log_msg("VISIBLE PSO SKIP reason=merge_compile");goto done;}
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC desc=*d;
-    desc.PS.pShaderBytecode=ID3D10Blob_GetBufferPointer(shader);desc.PS.BytecodeLength=ID3D10Blob_GetBufferSize(shader);
-    desc.CachedPSO.pCachedBlob=NULL;desc.CachedPSO.CachedBlobSizeInBytes=0;
-    ID3D12PipelineState *merge=NULL;
-    HRESULT hr=real_CreateGraphicsPipelineState(g_device,&desc,&IID_ID3D12PipelineState,(void **)&merge);
-    ID3D10Blob_Release(shader);
-    if(FAILED(hr)||!merge){log_msg("VISIBLE PSO SKIP reason=merge_pso hr=%08lx",(unsigned long)hr);goto done;}
+    if(!variants[0]||(pair==2&&!variants[1])){
+        if(variants[0])ID3D12PipelineState_Release(variants[0]);
+        if(variants[1])ID3D12PipelineState_Release(variants[1]);
+        goto done;
+    }
     ID3D12PipelineState_AddRef(pso);unsigned i=azvis_pso_count++;
-    azvis_psos[i].original=pso;azvis_psos[i].merge=merge;
-    log_msg("VISIBLE PSO READY original=%p merge=%p native_final_lut=1",(void *)pso,(void *)merge);
+    azvis_psos[i].original=pso;azvis_psos[i].merge=variants[0];azvis_psos[i].scene=variants[1];
+    log_msg("VISIBLE PSO READY original=%p merge=%p native_final_lut=1 hdr=%d sceneMerge=%p",(void *)pso,(void *)variants[0],pair==2,(void *)variants[1]);
 done: ReleaseSRWLockExclusive(&azvis_pso_lock);
 }
 static int azvis_texture(ID3D12Resource *r,UINT w,UINT h){
@@ -110,39 +127,44 @@ static int azvis_texture(ID3D12Resource *r,UINT w,UINT h){
 }
 static ID3D12Resource *azvis_new_texture(UINT layers,D3D12_RESOURCE_FLAGS flags,D3D12_RESOURCE_STATES state){
     D3D12_HEAP_PROPERTIES hp={0};hp.Type=D3D12_HEAP_TYPE_DEFAULT;hp.CreationNodeMask=hp.VisibleNodeMask=1;
-    D3D12_RESOURCE_DESC d={0};d.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;d.Width=1920;d.Height=1080;
+    D3D12_RESOURCE_DESC d={0};d.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;d.Width=azrp_profile.ow;d.Height=azrp_profile.oh;
     d.DepthOrArraySize=(UINT16)layers;d.MipLevels=1;d.Format=DXGI_FORMAT_R10G10B10A2_UNORM;
     d.SampleDesc.Count=1;d.Flags=flags;
     ID3D12Resource *r=NULL;
     if(FAILED(ID3D12Device_CreateCommittedResource(g_device,&hp,D3D12_HEAP_FLAG_NONE,&d,state,NULL,&IID_ID3D12Resource,(void **)&r)))return NULL;
     return r;
 }
-static void azvis_copy_layer(ID3D12GraphicsCommandList *cl,ID3D12Resource *dst,UINT layer,ID3D12Resource *src){
+static void azvis_copy_layer_state(ID3D12GraphicsCommandList *cl,ID3D12Resource *dst,UINT layer,ID3D12Resource *src,D3D12_RESOURCE_STATES state){
     D3D12_TEXTURE_COPY_LOCATION a={0},b={0};
     a.pResource=dst;a.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;a.SubresourceIndex=layer;
     b.pResource=src;b.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;b.SubresourceIndex=0;
-    hooks_transition(cl,src,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_COPY_SOURCE);
+    hooks_transition(cl,src,state,D3D12_RESOURCE_STATE_COPY_SOURCE);
     real_CopyTextureRegion(cl,&a,0,0,0,&b,NULL);
-    hooks_transition(cl,src,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
+    hooks_transition(cl,src,D3D12_RESOURCE_STATE_COPY_SOURCE,state);
+}
+static void azvis_copy_layer(ID3D12GraphicsCommandList *cl,ID3D12Resource *dst,UINT layer,ID3D12Resource *src){
+    azvis_copy_layer_state(cl,dst,layer,src,D3D12_RESOURCE_STATE_RENDER_TARGET);
 }
 static void visible_begin(AzvisFrame *v,ID3D12GraphicsCommandList *cl,ListState *s,ID3D12Resource *native,unsigned long long resolve){
-    if(!v->enabled||!real_CopyTextureRegion||!azvis_texture(native,1280,720)||!azvis_texture(v->sr_surface.image,1920,1080)){
+    if(!v->enabled||!real_CopyTextureRegion||!azvis_texture(native,azrp_profile.rw,azrp_profile.rh)||!azvis_texture(v->sr_surface.image,azrp_profile.ow,azrp_profile.oh)){
         log_msg("VISIBLE SKIP resolve=%llu stage=srpostfx reason=native_or_sr_surface",resolve);return;
     }
     v->layers=azvis_new_texture(3,D3D12_RESOURCE_FLAG_NONE,D3D12_RESOURCE_STATE_COPY_DEST);
     if(!v->layers){log_msg("VISIBLE SKIP resolve=%llu stage=srpostfx reason=layer_allocation",resolve);return;}
     v->list=cl;v->recording=s->trace_recording_id;
     azvis_copy_layer(cl,v->layers,0,v->sr_surface.image);
-    azvis_copy_layer(cl,v->layers,1,native);
+    if(!azvis_hdr)azvis_copy_layer(cl,v->layers,1,native);
     v->pre_ready=1;
     log_msg("VISIBLE SRPOSTFX_READY resolve=%llu list=%p recording=%llu scene=%p native=%p",resolve,(void *)cl,v->recording,(void *)v->sr_surface.image,(void *)native);
 }
 static void visible_composite(AzvisFrame *v,ID3D12GraphicsCommandList *cl,ListState *s,ID3D12Resource *native,unsigned long long resolve){
-    if(!v->enabled||!v->pre_ready||v->list!=cl||v->recording!=s->trace_recording_id||!azvis_texture(native,1280,720)){
+    if(!v->enabled||!v->pre_ready||v->list!=cl||v->recording!=s->trace_recording_id||!azvis_texture(native,azrp_profile.rw,azrp_profile.rh)){
         log_msg("VISIBLE SKIP resolve=%llu stage=composite reason=recording_or_native_surface expectedList=%p actualList=%p expectedRecording=%llu actualRecording=%llu pre=%d native=%p",resolve,(void *)v->list,(void *)cl,v->recording,s->trace_recording_id,v->pre_ready,(void *)native);return;
     }
-    azvis_copy_layer(cl,v->layers,2,native);
-    hooks_transition(cl,v->layers,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    if(!azvis_hdr){
+        azvis_copy_layer(cl,v->layers,2,native);
+        hooks_transition(cl,v->layers,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    } /* HDR snapshots the current t0/t2 at the final draw instead. */
     v->composite_ready=1;v->composite_work=s->trace_work_seq;
     log_msg("VISIBLE HUD_INPUT_READY resolve=%llu list=%p recording=%llu native=%p",resolve,(void *)cl,v->recording,(void *)native);
 }

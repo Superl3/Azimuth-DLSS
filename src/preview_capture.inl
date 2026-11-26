@@ -3,7 +3,7 @@
    is not a recording identity. Readback never guesses queue/state. */
 #include "preview_batch_policy.h"
 #define AZPV_GROUPS AZPV_CAPTURE_COUNT
-#define AZPV_SHOTS 14
+#define AZPV_SHOTS 15
 #define AZPV_LIVE 4
 #define AZPV_TOTAL (AZPV_GROUPS+AZPV_LIVE)
 #define AZPV_BATCHES (AZPV_TOTAL * 4)
@@ -35,7 +35,7 @@ typedef struct {
     AzpvBatch *core_batch;
     uintptr_t postfx,composite,hdr_copy,hdr_copy_list;
     unsigned long long hdr_copy_recording;
-    int hdr_copy_full;
+    int hdr_copy_full,hdr_copy_ambiguous;
     unsigned postfx_seen,requested_mask,closed;
     AzvisFrame visible;
 } AzpvGroup;
@@ -219,7 +219,7 @@ void hooks_preview_record(ID3D12GraphicsCommandList *cl,ID3D12Resource *color,ID
         else memset(&azpv_auto_sr,0,sizeof(azpv_auto_sr));
     }
     int wanted=azdbg.active&&azdbg.id==1&&azdbg.observed<azrp_capture_groups(azrp_profile);
-    int live=azvis_window_locked();
+    int live=azvis_window_locked()&&(!azvis_hdr||azvis_hdr_live||wanted);
     unsigned long long resolve=azt_frame+1;
     ListState *s=state_for(cl);
     if(s&&!s->trace_recording_id)s->trace_recording_id=++azt_generation;
@@ -254,16 +254,17 @@ done: ReleaseSRWLockExclusive(&azpv_lock);
    A full-region same-recording copy before composite is a candidate,
    not proof that no later write touched the destination. */
 static void preview_hdr_copy(ID3D12GraphicsCommandList *cl,const D3D12_TEXTURE_COPY_LOCATION *dst,UINT x,UINT y,UINT z,const D3D12_TEXTURE_COPY_LOCATION *src,const D3D12_BOX *box){
-    if(!azpv_enabled||!azrp_profile.wide||!azrp_sr_enabled||!dst||!src||!dst->pResource||!src->pResource)return;
+    if(!azpv_enabled||(!azrp_profile.wide&&!azvis_hdr)||!azrp_sr_enabled||!dst||!src||!dst->pResource||!src->pResource)return;
     AcquireSRWLockShared(&azt_lock);unsigned long long resolve=azt_frame;
     ListState *s=state_for(cl);unsigned long long recording=s?s->trace_recording_id:0;
-    int active=azdbg.active&&azdbg.id==1;
+    int active=(azdbg.active&&azdbg.id==1)||(azvis_hdr&&azvis_window_locked());
     ReleaseSRWLockShared(&azt_lock);
     if(!active||!recording)return;
     AcquireSRWLockExclusive(&azpv_lock);
-    for(unsigned i=0;i<azpv_count;++i){
+    for(unsigned i=0;i<AZPV_TOTAL;++i){
         AzpvGroup *g=&azpv_groups[i];
-        if(g->resolve!=resolve||g->postfx!=(uintptr_t)src->pResource||g->postfx_seen!=1u)continue;
+        if(!g->resolve||g->resolve!=resolve||g->postfx!=(uintptr_t)src->pResource||g->postfx_seen!=1u)continue;
+        if(g->hdr_copy){g->hdr_copy_ambiguous=1;g->hdr_copy_full=0;continue;}
         D3D12_RESOURCE_DESC a,b;src->pResource->lpVtbl->GetDesc(src->pResource,&a);dst->pResource->lpVtbl->GetDesc(dst->pResource,&b);
         int full=!x&&!y&&!z&&dst->Type==D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX&&src->Type==D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX&&
             !dst->SubresourceIndex&&!src->SubresourceIndex&&(!box||(!box->left&&!box->top&&!box->front&&box->right==a.Width&&box->bottom==a.Height&&box->back==1))&&
@@ -362,7 +363,7 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
                 }
             if(found!=1)missing|=64u;
             if(!missing){target=t->res;ID3D12Resource_AddRef(target);}
-            if(hash==0x577d52ef&&azrp_profile.wide&&azrp_sr_enabled)hdr=azhdr_inspect(cl,s,resolve,identity);
+            if(hash==0x577d52ef&&(azrp_profile.wide||azvis_hdr)&&azrp_sr_enabled)hdr=azhdr_inspect(cl,s,resolve,identity);
         }
     }
     ReleaseSRWLockExclusive(&azt_lock);
@@ -429,10 +430,10 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
             azvis_tail_begin(&s->trace_tail,s->trace_work_seq,(uintptr_t)target);
             log_msg("VISIBLE WORK_WATCH resolve=%llu list=%p recording=%llu work=%llu composite=%p privateComposite=%d",resolve,(void *)cl,s->trace_recording_id,s->trace_work_seq,(void *)target,g->visible.composite_ready);
         }
-        if(capture&&hash==0x577d52ef&&azrp_profile.wide&&azrp_sr_enabled){
+        int copy_match=g->hdr_copy_full&&!g->hdr_copy_ambiguous&&hdr.scene&&g->hdr_copy==hdr.scene&&g->hdr_copy_list==(uintptr_t)cl&&g->hdr_copy_recording==s->trace_recording_id;
+        if(capture&&hash==0x577d52ef&&(azrp_profile.wide||azvis_hdr)&&azrp_sr_enabled){
             g->requested_mask|=2048u;
-            int copy_match=g->hdr_copy_full&&hdr.scene&&g->hdr_copy==hdr.scene&&g->hdr_copy_list==(uintptr_t)cl&&g->hdr_copy_recording==s->trace_recording_id;
-            log_msg("POSTFX HDR_FINAL_GATE resolve=%llu t0Chain=%d t2CopyMatch=%d inputBindings=%d t2ReadState=%d outputColorSpace=unknown routeAllowed=0 reason=unverified_pq_output_and_scene_lineage",resolve,chain,copy_match,hdr.inputs_ok,hdr.scene_readable);
+            log_msg("POSTFX HDR_FINAL_GATE resolve=%llu t0Chain=%d t2CopyMatch=%d inputBindings=%d t2ReadState=%d outputColorSpace=unknown nativeDrawPreserved=1 routeDecision=separate",resolve,chain,copy_match,hdr.inputs_ok,hdr.scene_readable);
             if(chain&&!missing&&copy_match&&hdr.scene_ref){
                 AzpvBatch *batch=preview_batch(i,cl,s->trace_recording_id);
                 if(!batch||!preview_add(batch,hdr.scene_ref,hdr.scene_state,"hdrscene"))log_msg("POSTFX HDR_SKIP resolve=%llu reason=t2_readback_allocation",resolve);
@@ -441,8 +442,22 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
         if(bit==4)g->closed=1;
         if(g->visible.enabled&&bit==4){
             g->requested_mask|=1536u;
-            if(hash==0x577d52ef)log_msg("VISIBLE SKIP resolve=%llu stage=final reason=hdr_unsupported switch_game_HDR_off=1",resolve);
-            else if(hash==0xa93721c4&&chain&&!missing&&target&&g->visible.pre_ready&&g->visible.composite_ready&&
+            if(hash==0x577d52ef&&azvis_hdr&&chain&&!missing&&target){
+                AzpvBatch *batch=preview_batch(i,cl,s->trace_recording_id);
+                int result=batch?visible_hdr_finalize(&g->visible,cl,s,&hdr,target,resolve,copy_match,capture):0;
+                if(result==1)routed=1;
+                if(result&&capture){
+                    g->requested_mask|=16384u;
+                    if(!preview_add(batch,g->visible.hdr_scene,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,"hdrsrscene"))
+                        log_msg("VISIBLE HDR_SKIP resolve=%llu reason=scene_readback",resolve);
+                    if(result==2)g->requested_mask|=12288u;
+                    if(!preview_add(batch,g->visible.merged,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,result==1?"visiblehud":"hudprobe"))
+                        log_msg("VISIBLE HDR_SKIP resolve=%llu reason=composite_readback",resolve);
+                    if(!preview_add(batch,result==1?target:g->visible.probe_final,D3D12_RESOURCE_STATE_RENDER_TARGET,result==1?"visiblefinal":"finalprobe"))
+                        log_msg("VISIBLE HDR_SKIP resolve=%llu reason=final_readback",resolve);
+                }
+            }else if(hash==0x577d52ef)log_msg("VISIBLE SKIP resolve=%llu stage=final reason=hdr_mode_or_draw_gate missing=0x%x chain=%d",resolve,missing,chain);
+            else if(hash==0xa93721c4&&!azvis_hdr&&chain&&!missing&&target&&g->visible.pre_ready&&g->visible.composite_ready&&
                g->visible.list==cl&&g->visible.recording==s->trace_recording_id){
                 AzpvBatch *batch=preview_batch(i,cl,s->trace_recording_id);
                 int result=batch?visible_finalize(&g->visible,cl,s,input,target,resolve,capture):0;
@@ -465,6 +480,7 @@ static void preview_after_draw(ID3D12GraphicsCommandList *cl,ListState *s,int st
         visible_note_final(identity,(uintptr_t)input,cl,s->trace_recording_id,resolve,hash,routed,missing);
     if(target)ID3D12Resource_Release(target);
     if(hdr.scene_ref)ID3D12Resource_Release(hdr.scene_ref);
+    if(hdr.image_ref)ID3D12Resource_Release(hdr.image_ref);
 }
 static void preview_reset(ID3D12GraphicsCommandList *cl) {
     if(!azpv_enabled)return;
@@ -554,7 +570,7 @@ static void preview_poll(void) {
     unsigned pending=0,files=0,good_groups=0,failed_groups=0;
     unsigned saved_mask[AZPV_GROUPS]={0};
     uint64_t now=GetTickCount64();
-    static const char *names[]={"color","depth","mv","sr","preoverlay","composite","final","replay","srpostfx","visiblehud","visiblefinal","hdrscene","hudprobe","finalprobe"};
+    static const char *names[]={"color","depth","mv","sr","preoverlay","composite","final","replay","srpostfx","visiblehud","visiblefinal","hdrscene","hudprobe","finalprobe","hdrsrscene"};
     for(unsigned i=0;i<azpv_batch_count;++i){
         AzpvBatch *b=&azpv_batches[i];
         if(!b->life.state||b->group>=AZPV_GROUPS)continue;
@@ -586,13 +602,13 @@ static void preview_poll(void) {
         if(b->life.state==PV_SAVED){
             files+=b->good;
             for(unsigned k=0;k<b->count;++k)if(b->shots[k].name)
-                for(unsigned j=0;j<14;++j)if(!strcmp(b->shots[k].name,names[j]))saved_mask[b->group]|=1u<<j;
+                for(unsigned j=0;j<AZPV_SHOTS;++j)if(!strcmp(b->shots[k].name,names[j]))saved_mask[b->group]|=1u<<j;
         }else if(b->life.state!=PV_FAILED)++pending;
     }
     if(ended&&!pending){
         for(unsigned i=0;i<azpv_count;++i){
             AzpvGroup *g=&azpv_groups[i];
-            unsigned expected=(azpv_postfx?127u:15u)|(azrp_enabled?128u:0u)|(azrp_sr_enabled?256u:0u)|(g->visible.enabled?1536u:0u)|(azrp_profile.wide&&azrp_sr_enabled?2048u:0u);
+            unsigned expected=(azpv_postfx?127u:15u)|(azrp_enabled?128u:0u)|(azrp_sr_enabled?256u:0u)|(g->visible.enabled?(azvis_hdr&&!azvis_hdr_live?12288u:1536u):0u)|((azrp_profile.wide||azvis_hdr)&&azrp_sr_enabled?2048u:0u)|(g->visible.enabled&&azvis_hdr?16384u:0u);
             int core=(saved_mask[i]&15u)==15u;
             if(core)++good_groups;else ++failed_groups;
             log_msg("PREVIEW GROUP_RESULT resolve=%llu expected=0x%02x attempted=0x%02x saved=0x%02x postfxSeen=0x%x coreComplete=%d",

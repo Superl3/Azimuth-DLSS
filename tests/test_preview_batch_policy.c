@@ -2,7 +2,20 @@
 #include <stdio.h>
 #include "../src/preview_batch_policy.h"
 #include "../src/visible_tail_policy.h"
+#include "../src/hdr_replay_policy.h"
 int main(void) {
+    unsigned roots[]={1,1,2,2}, offsets[]={0,1,0,1};
+    assert(azhdr_distinct_slots(roots,offsets,3));
+    assert(azhdr_distinct_slots(roots,offsets,4));
+    offsets[3]=0;assert(!azhdr_distinct_slots(roots,offsets,4));
+    assert(!azhdr_distinct_slots(roots,offsets,2));
+    assert(azhdr_route_mode(0,1,1,1,1,1)==2);
+    assert(azhdr_route_mode(0,0,1,1,1,1)==0);
+    assert(azhdr_route_mode(1,0,1,1,1,1)==1);
+    assert(!azhdr_route_mode(1,1,0,1,1,1));
+    assert(!azhdr_route_mode(1,1,1,0,1,1));
+    assert(!azhdr_route_mode(1,1,1,1,0,1));
+    assert(!azhdr_route_mode(1,1,1,1,1,0));
     assert(azvis_duration_ms(0)==10000u);
     assert(azvis_duration_ms(9)==10000u);
     assert(azvis_duration_ms(10)==10000u);
