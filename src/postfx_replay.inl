@@ -6,11 +6,16 @@
 #include "replay_profile.h"
 static AzReplayProfile azrp_profile;
 #include "replay_bindings.inl"
+#include "replay_deferred_pso.inl"
 #define AZRP_MAX 8
 static int azrp_enabled;
 static SRWLOCK azrp_lock=SRWLOCK_INIT;
 static struct {ID3D12PipelineState *original,*variant;} azrp_psos[AZRP_MAX];
 static unsigned azrp_attempts;
+static int azrp_auto;
+static volatile LONG azrp_profile_ready;
+static AzrpDeferred *azrp_pending[AZRP_MAX];
+static int azrp_ready(void){return InterlockedCompareExchange(&azrp_profile_ready,0,0)!=0;}
 typedef struct {ID3D12Resource *image;ID3D12DescriptorHeap *rtv,*srv;} AzrpSurface;
 static AzrpSurface azrp_surfaces[4];
 static unsigned azrp_surface_count;
@@ -20,7 +25,10 @@ static void postfx_replay_init(void) {
     int requested=n==1&&b[0]=='1';
     char output[32]={0};DWORD len=GetEnvironmentVariableA("AZIMUTH_SR_OUTPUT",output,sizeof(output));
     char render[32]={0};DWORD rn=GetEnvironmentVariableA("AZIMUTH_SR_RENDER",render,sizeof(render));
-    if(len&&len<sizeof(output))azrp_profile=rn?(rn<sizeof(render)?azrp_profile_explicit(render,output):(AzReplayProfile){0}):azrp_profile_for(output);
+    azrp_auto=rn==4&&!strcmp(render,"auto");
+    if(len&&len<sizeof(output))azrp_profile=azrp_auto?azrp_profile_request(render,output):
+        rn?(rn<sizeof(render)?azrp_profile_explicit(render,output):(AzReplayProfile){0}):azrp_profile_for(output);
+    if(azrp_profile.rw)InterlockedExchange(&azrp_profile_ready,1);
     azrp_enabled=dlss_sr_preview_mode()&&requested&&azrp_profile.ow&&!GetModuleHandleW(L"renderdoc.dll");
     if(requested&&!azrp_enabled)log_msg("POSTFX REPLAY SKIP reason=unsupported_profile_or_capture_runtime");
     if(azrp_enabled){
@@ -44,6 +52,10 @@ static void postfx_replay_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *d,ID3D12
         log_msg("POSTFX REPLAY PSO skipped: unsupported original state");return;
     }
     AcquireSRWLockExclusive(&azrp_lock);
+    if(azrp_auto&&!azrp_ready()){
+        if(!azrp_defer(azrp_pending,AZRP_MAX,d,pso))log_msg("SR AUTO_PSO_SKIP role=postfx reason=copy_or_capacity");
+        goto done;
+    }
     for(unsigned i=0;i<AZRP_MAX;++i)if(azrp_psos[i].original==pso)goto done;
     if(azrp_attempts>=AZRP_MAX)goto done;
     unsigned slot=azrp_attempts++;
@@ -63,8 +75,23 @@ static void postfx_replay_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *d,ID3D12
     log_msg("POSTFX REPLAY PSO ready original=%p variant=%p remappedPositionLoads=2",(void *)pso,(void *)variant);
 done: ReleaseSRWLockExclusive(&azrp_lock);
 }
+static int azrp_accept_profile(unsigned rw,unsigned rh,unsigned ow,unsigned oh){
+    AzReplayProfile p=azrp_profile_sizes((AzSRSize){rw,rh},(AzSRSize){ow,oh});
+    if(!azrp_auto||!azrp_enabled||!p.ow||!azrp_match_output(azrp_profile,ow,oh))return 0;
+    AzrpDeferred *pending[AZRP_MAX]={0};AcquireSRWLockExclusive(&azrp_lock);
+    if(azrp_ready()){
+        int same=azrp_match_render(azrp_profile,rw,rh);
+        ReleaseSRWLockExclusive(&azrp_lock);return same;
+    }
+    azrp_profile=p;memcpy(pending,azrp_pending,sizeof(pending));memset(azrp_pending,0,sizeof(azrp_pending));
+    InterlockedExchange(&azrp_profile_ready,1);ReleaseSRWLockExclusive(&azrp_lock);
+    for(unsigned i=0;i<AZRP_MAX;++i)if(pending[i]){
+        postfx_replay_pso(&pending[i]->d,pending[i]->original);azrp_free_deferred(pending[i]);
+    }
+    log_msg("SR AUTO_PROFILE_LATCH render=%ux%u output=%ux%u fixedUntilRestart=1",rw,rh,ow,oh);return 1;
+}
 static ID3D12Resource *postfx_replay_draw(ID3D12GraphicsCommandList *cl,ListState *s,unsigned long long resolve,const AzrpBindings *bindings,AzrpSurface *owned) {
-    if(!azrp_enabled||!s||!cl||s->num_rtv!=1||s->has_dsv||s->num_vp!=1||s->num_sc!=1||
+    if(!azrp_enabled||!azrp_ready()||!s||!cl||s->num_rtv!=1||s->has_dsv||s->num_vp!=1||s->num_sc!=1||
        s->vp_jittered||s->vp[0].Width!=(float)azrp_profile.rw||s->vp[0].Height!=(float)azrp_profile.rh||
        s->vp[0].TopLeftX!=0||s->vp[0].TopLeftY!=0||s->trace_predicated||s->trace_queries||
        s->trace_query_unknown||s->trace_topology!=D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST||

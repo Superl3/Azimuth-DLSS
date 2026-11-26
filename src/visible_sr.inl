@@ -7,11 +7,12 @@
 #include "preview_batch_policy.h"
 static unsigned azvis_ms=10000u;
 #define AZPV_CAPTURE_COUNT 2u
-static int azvis_enabled,azvis_marker,azvis_hdr,azvis_hdr_live;
+static int azvis_enabled,azvis_marker,azvis_hdr,azvis_hdr_live,azvis_hud_delta;
 static volatile LONG azvis_chain_changed;
 static SRWLOCK azvis_pso_lock=SRWLOCK_INIT;
 static struct {ID3D12PipelineState *original,*merge,*scene;} azvis_psos[AZVIS_PSO_MAX];
 static unsigned azvis_pso_count;
+static AzrpDeferred *azvis_pending[AZVIS_PSO_MAX];
 typedef struct {
     int enabled,pre_ready,composite_ready,routed;
     ID3D12GraphicsCommandList *list;
@@ -33,6 +34,10 @@ static void visible_init(void){
     n=GetEnvironmentVariableA("AZIMUTH_DEBUG_HDR_LIVE",b,sizeof(b));
     azvis_hdr_live=azvis_hdr&&n==1&&b[0]=='1';
     azvis_enabled=azrp_enabled&&azrp_sr_enabled&&requested;
+    char hud[16]={0};DWORD hn=GetEnvironmentVariableA("AZIMUTH_SR_HUD",hud,sizeof(hud));
+    azvis_hud_delta=hn==5&&!strcmp(hud,"delta");
+    if(hn&&!(hn==6&&!strcmp(hud,"native"))&&!azvis_hud_delta){azvis_enabled=0;log_msg("VISIBLE HUD_INVALID nativeFallback=1");}
+    if(azvis_hud_delta)log_msg("VISIBLE HUD_CONFIG mode=delta alpha=lower_bound_estimate nativeResolutionUI=0 experimental=1");
     UINT seconds=0;
     if(azt_env_uint("AZIMUTH_DEBUG_VISIBLE_SECONDS",&seconds))azvis_ms=azvis_duration_ms(seconds);
     if(requested)log_msg("VISIBLE CONFIG enabled=%d durationMs=%u mode=native_hud_region_retention sdr=%d hdr=%d hdrLive=%d presentVerified=0 swapchainRefs=0",azvis_enabled,azvis_ms,!azvis_hdr,azvis_hdr,azvis_hdr_live);
@@ -89,13 +94,17 @@ static void visible_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *d,ID3D12Pipeli
         log_msg("VISIBLE PSO SKIP reason=unsupported_final_state");return;
     }
     AcquireSRWLockExclusive(&azvis_pso_lock);
+    if(azrp_auto&&!azrp_ready()){
+        if(!azrp_defer(azvis_pending,AZVIS_PSO_MAX,d,pso))log_msg("SR AUTO_PSO_SKIP role=final reason=copy_or_capacity");
+        goto done;
+    }
     for(unsigned i=0;i<azvis_pso_count;++i)if(azvis_psos[i].original==pso)goto done;
     if(azvis_pso_count>=AZVIS_PSO_MAX)goto done;
     ID3D12PipelineState *variants[2]={NULL,NULL};
     for(unsigned pass=0;pass<(pair==2?2u:1u);++pass){
         char marked[sizeof(azvis_merge_hlsl)+256];
-        int n=snprintf(marked,sizeof(marked),"#define AZVIS_MARKER %d\n#define AZVIS_SCENE %u\n#define AZVIS_RW %u\n#define AZVIS_RH %u\n#define AZVIS_OW %u\n#define AZVIS_OH %u\n%s",
-            azvis_marker,pass,azrp_profile.rw,azrp_profile.rh,azrp_profile.ow,azrp_profile.oh,azvis_merge_hlsl);
+        int n=snprintf(marked,sizeof(marked),"#define AZVIS_MARKER %d\n#define AZVIS_SCENE %u\n#define AZVIS_HUD_DELTA %d\n#define AZVIS_RW %u\n#define AZVIS_RH %u\n#define AZVIS_OW %u\n#define AZVIS_OH %u\n%s",
+            azvis_marker,pass,azvis_hud_delta,azrp_profile.rw,azrp_profile.rh,azrp_profile.ow,azrp_profile.oh,azvis_merge_hlsl);
         if(n<0||(size_t)n>=sizeof(marked))break;
         ID3DBlob *shader=compile(marked,"main","ps_5_0");
         if(!shader){log_msg("VISIBLE PSO SKIP reason=merge_compile pass=%u",pass);break;}
@@ -118,6 +127,13 @@ static void visible_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *d,ID3D12Pipeli
     azvis_psos[i].original=pso;azvis_psos[i].merge=variants[0];azvis_psos[i].scene=variants[1];
     log_msg("VISIBLE PSO READY original=%p merge=%p native_final_lut=1 hdr=%d sceneMerge=%p",(void *)pso,(void *)variants[0],pair==2,(void *)variants[1]);
 done: ReleaseSRWLockExclusive(&azvis_pso_lock);
+}
+static void azvis_accept_profile(void){
+    AzrpDeferred *pending[AZVIS_PSO_MAX]={0};AcquireSRWLockExclusive(&azvis_pso_lock);
+    memcpy(pending,azvis_pending,sizeof(pending));memset(azvis_pending,0,sizeof(azvis_pending));ReleaseSRWLockExclusive(&azvis_pso_lock);
+    for(unsigned i=0;i<AZVIS_PSO_MAX;++i)if(pending[i]){
+        visible_pso(&pending[i]->d,pending[i]->original);azrp_free_deferred(pending[i]);
+    }
 }
 static int azvis_texture(ID3D12Resource *r,UINT w,UINT h){
     if(!r)return 0;
@@ -338,7 +354,7 @@ static int visible_finalize(AzvisFrame *v,ID3D12GraphicsCommandList *cl,ListStat
     real_SetPipelineState(cl,merge);real_OMSetRenderTargets(cl,1,&rtv,FALSE,NULL);
     real_DrawInstanced(cl,3,1,0,0);
     hooks_transition(cl,v->merged,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    log_msg("VISIBLE %s resolve=%llu size=%ux%u policy=native_region alphaRecovered=0",probe?"PROBE_HUD_RECORDED":"HUD_COMPOSITE_RECORDED",resolve,azrp_profile.ow,azrp_profile.oh);
+    log_msg("VISIBLE %s resolve=%llu size=%ux%u policy=%s alphaRecovered=0",probe?"PROBE_HUD_RECORDED":"HUD_COMPOSITE_RECORDED",resolve,azrp_profile.ow,azrp_profile.oh,azvis_hud_delta?"delta_lower_bound":"native_region");
     azvis_set_tables(cl,&b);real_SetPipelineState(cl,s->pso);
     if(probe)real_OMSetRenderTargets(cl,1,&probe_rtv,FALSE,NULL);
     else real_OMSetRenderTargets(cl,s->num_rtv,s->rtv,s->rtv_single,NULL);

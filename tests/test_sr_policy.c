@@ -43,6 +43,17 @@ int main(void) {
     assert(azsr_scissor_ok(AZSR_ROUTE,fh2,0,0,2592,1080));
     f=(AzSRFrame){fh2,fh2,fh2,fh2,o,1,1,1};
     assert(azsr_decide(AZSR_PROBE,f)==AZSR_EVALUATE_ONLY);
+    AzSRStable stable={0};
+    assert(!azsr_stable(&stable,r,1)&&!azsr_stable(&stable,r,1)&&azsr_stable(&stable,r,1));
+    assert(!azsr_stable(&stable,r,0)&&!azsr_stable(&stable,r,1));
+    AzSROptimal perf={1920,800,3840,1600,1920,800,0};
+    assert(azsr_quality_distance((AzSRSize){1728,720},perf)<0);
+    assert(azsr_quality_distance((AzSRSize){1920,800},perf)==0);
+    AzSRGuideOptions guides={0,0,1,1,1,1};
+    assert(azsr_guides_valid(guides));guides.mv_scale_x=-1;
+    assert(azsr_guides_valid(guides));guides.mv_scale_y=0;
+    assert(!azsr_guides_valid(guides));guides.mv_scale_y=1;guides.pre_exposure=-1;
+    assert(!azsr_guides_valid(guides));
     puts("PASS: SR policy including observed FH2 covering scissor and probe dimensions");
     return 0;
 }

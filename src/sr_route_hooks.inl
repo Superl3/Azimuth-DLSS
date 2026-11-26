@@ -60,6 +60,15 @@ static void STDMETHODCALLTYPE trace_CopyBufferRegion(ID3D12GraphicsCommandList *
     visible_count_work(cl,state_for(cl),"CopyBufferRegion",dst,src,(UINT)doff,(UINT)soff,(UINT)bytes,0);real_CopyBufferRegion(cl,dst,doff,src,soff,bytes);
 }
 static void STDMETHODCALLTYPE trace_ClearDepthStencilView(ID3D12GraphicsCommandList *cl,D3D12_CPU_DESCRIPTOR_HANDLE h,D3D12_CLEAR_FLAGS flags,FLOAT depth,UINT8 stencil,UINT n,const D3D12_RECT *rect){
+    if(azguide_enabled&&(flags&D3D12_CLEAR_FLAG_DEPTH)){
+        static LONG budget;
+        AcquireSRWLockShared(&azt_lock);
+        int active=azdbg.active&&azdbg.id==1;
+        ReleaseSRWLockShared(&azt_lock);
+        const ViewEntry *e=view_find(h.ptr);
+        if(active&&e&&InterlockedIncrement(&budget)<=64)log_msg("NR DEPTH_CLEAR resource=%p size=%ux%u format=%u depth=%.7f full=%d stencil=%u candidateOnly=1",
+            (void *)e->resource,e->width,e->height,(unsigned)e->format,(double)depth,n==0,(unsigned)stencil);
+    }
     visible_count_work(cl,state_for(cl),"ClearDepthStencilView",NULL,NULL,(UINT)flags,n,0,0);real_ClearDepthStencilView(cl,h,flags,depth,stencil,n,rect);
 }
 static void STDMETHODCALLTYPE trace_ResolveQueryData(ID3D12GraphicsCommandList *cl,ID3D12QueryHeap *heap,D3D12_QUERY_TYPE type,UINT start,UINT count,ID3D12Resource *dst,UINT64 offset){

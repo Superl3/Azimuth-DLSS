@@ -20,6 +20,7 @@ int dlss_sr_trace_only(void);
 int dlss_sr_debug_mode(void);
 int dlss_sr_preview_mode(void);
 int dlss_sr_play_mode(void);
+int hooks_sr_accept_profile(unsigned rw,unsigned rh,unsigned ow,unsigned oh);
 int dlss_sr_play_available(void);
 void dlss_sr_play_disable(const char *reason);
 void dlss_sr_play_miss(void);

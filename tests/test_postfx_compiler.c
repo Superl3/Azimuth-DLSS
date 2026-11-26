@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include "../src/postfx_dxbc.h"
 #include "../src/visible_merge_shader.h"
+#include "../src/games/fh2.c"
 int main(void) {
     typedef HRESULT(WINAPI *CompileFn)(LPCVOID,SIZE_T,LPCSTR,const D3D_SHADER_MACRO *,ID3DInclude *,LPCSTR,LPCSTR,UINT,UINT,ID3DBlob **,ID3DBlob **);
     typedef HRESULT(WINAPI *DisasmFn)(LPCVOID,SIZE_T,UINT,LPCSTR,ID3DBlob **);
@@ -51,7 +52,33 @@ int main(void) {
     if(FAILED(hr)&&err)fprintf(stderr,"Visible marker shader: %s\n",(const char *)ID3D10Blob_GetBufferPointer(err));
     assert(SUCCEEDED(hr)&&code);
     if(err)ID3D10Blob_Release(err);
-    ID3D10Blob_Release(code);FreeLibrary(mod);
+    ID3D10Blob_Release(code);
+    /* Compile every live HUD policy including the HDR clean scene pass.
+       The same Windows compiler is used at runtime. PSO/root compatibility
+       and rendered output still require the game test. */
+    for(unsigned delta=0;delta<2;++delta)for(unsigned scene=0;scene<2;++scene){
+        const D3D_SHADER_MACRO macros[]={
+            {"AZVIS_HUD_DELTA",delta?"1":"0"},{"AZVIS_SCENE",scene?"1":"0"},
+            {"AZVIS_RW","2592"},{"AZVIS_RH","1080"},{"AZVIS_OW","3840"},{"AZVIS_OH","1600"},{NULL,NULL}};
+        code=NULL;err=NULL;
+        hr=compile(azvis_merge_hlsl,strlen(azvis_merge_hlsl),"visible_policy",macros,NULL,"main","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,&err);
+        if(FAILED(hr)&&err)fprintf(stderr,"HUD delta=%u scene=%u: %s\n",delta,scene,(const char *)ID3D10Blob_GetBufferPointer(err));
+        assert(SUCCEEDED(hr)&&code);
+        if(err)ID3D10Blob_Release(err);
+        ID3D10Blob_Release(code);
+    }
+    const char *guide_modes[]={NULL,"AZIMUTH_GUIDE_STENCIL","AZIMUTH_GUIDE_CONSTANTS"};
+    for(unsigned i=0;i<3;++i){
+        const D3D_SHADER_MACRO macros[]={{guide_modes[i],"1"},{NULL,NULL}};
+        code=NULL;err=NULL;
+        hr=compile(FH2_MV_PS_HLSL,strlen(FH2_MV_PS_HLSL),"fh2_guide",i?macros:NULL,NULL,"main","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,&err);
+        if(FAILED(hr)&&err)fprintf(stderr,"FH2 guide=%u: %s\n",i,(const char *)ID3D10Blob_GetBufferPointer(err));
+        assert(SUCCEEDED(hr)&&code);
+        if(err)ID3D10Blob_Release(err);
+        ID3D10Blob_Release(code);
+    }
+    FreeLibrary(mod);
+    puts("PASS: HUD native/delta/scene and FH2 velocity/stencil/constants shader variants");
     puts("PASS: real D3DCompile retail checksum and position-remapped DXBC disassembly");
     return 0;
 }

@@ -51,7 +51,14 @@ static AzSRMode sr_mode = AZSR_DLAA;
 static AzSRQuality sr_quality = AZSR_QUALITY;
 static AzSRSize sr_output, sr_render, sr_swapchain;
 static int sr_armed, sr_blocked, sr_optimal_checked;
-static int sr_preset,sr_play;
+static int sr_preset,sr_play,sr_auto_render,sr_auto_quality;
+static AzSRStable sr_stable;
+static AzSRGuideOptions sr_guides={0,0,1,1,1,1};
+static int sr_guides_override;
+static uint64_t sr_last_evaluate_ms;
+static unsigned sr_guide_log_budget=16;
+typedef int (*PfnNgxSetGuides)(const AzSRGuideOptions *);
+static PfnNgxSetGuides p_set_guides;
 static volatile LONG sr_play_disabled,sr_play_reset;
 static AzSRSize sr_fixed_render;
 typedef int (*PfnNgxSetPreset)(int);
@@ -88,28 +95,36 @@ static int sr_ini_value(const wchar_t *key,const wchar_t *fallback,char *out,uns
     return WideCharToMultiByte(CP_UTF8,0,value,-1,out,(int)cap,NULL,NULL)>0;
 }
 static int sr_play_config(void){
-    char render[32],output[32],quality[32],hdr[8],jitter[8],preset[16];
-    if(!sr_ini_value(L"Render",L"1280x720",render,sizeof(render))||
+    char render[32],output[32],quality[32],hdr[8],jitter[8],preset[16],hud[16],di[8],mj[8],mx[32],my[32],pe[32],es[32];
+    if(!sr_ini_value(L"Render",L"auto",render,sizeof(render))||
        !sr_ini_value(L"Output",L"1920x1080",output,sizeof(output))||
        !sr_ini_value(L"Quality",L"quality",quality,sizeof(quality))||
        !sr_ini_value(L"HDR",L"0",hdr,sizeof(hdr))||
        !sr_ini_value(L"Jitter",L"1",jitter,sizeof(jitter))||
-       !sr_ini_value(L"Preset",L"default",preset,sizeof(preset)))return 0;
-    AzReplayProfile profile=azrp_profile_explicit(render,output);
+       !sr_ini_value(L"Preset",L"default",preset,sizeof(preset))||
+       !sr_ini_value(L"HUD",L"native",hud,sizeof(hud))||
+       !sr_ini_value(L"DepthInverted",L"0",di,sizeof(di))||
+       !sr_ini_value(L"MVJittered",L"0",mj,sizeof(mj))||
+       !sr_ini_value(L"MVScaleX",L"1",mx,sizeof(mx))||
+       !sr_ini_value(L"MVScaleY",L"1",my,sizeof(my))||
+       !sr_ini_value(L"PreExposure",L"1",pe,sizeof(pe))||
+       !sr_ini_value(L"ExposureScale",L"1",es,sizeof(es)))return 0;
+    AzReplayProfile profile=!strcmp(render,"auto")?azrp_profile_request(render,output):azrp_profile_explicit(render,output);
     if(!profile.ow||(strcmp(hdr,"0")&&strcmp(hdr,"1"))||(strcmp(jitter,"0")&&strcmp(jitter,"1"))||
-       (strcmp(quality,"quality")&&strcmp(quality,"balanced")&&strcmp(quality,"performance"))||
-       azsr_preset(preset)<0)return 0;
+       (strcmp(quality,"quality")&&strcmp(quality,"balanced")&&strcmp(quality,"performance")&&strcmp(quality,"ultraperformance")&&strcmp(quality,"auto"))||
+       azsr_preset(preset)<0||(strcmp(hud,"native")&&strcmp(hud,"delta")))return 0;
     sr_fixed_render=(AzSRSize){profile.rw,profile.rh};
     const char *keys[]={"AZIMUTH_SR_RENDER","AZIMUTH_SR_OUTPUT","AZIMUTH_SR_QUALITY","AZIMUTH_SR_PRESET",
+        "AZIMUTH_SR_HUD","AZIMUTH_SR_DEPTH_INVERTED","AZIMUTH_SR_MV_JITTERED","AZIMUTH_SR_MV_SCALE_X","AZIMUTH_SR_MV_SCALE_Y","AZIMUTH_SR_PRE_EXPOSURE","AZIMUTH_SR_EXPOSURE_SCALE",
         "AZIMUTH_DEBUG_PREVIEW_JITTER","AZIMUTH_DEBUG_VISIBLE_HDR","AZIMUTH_DEBUG_HDR_LIVE",
         "AZIMUTH_DEBUG_PREVIEW_POSTFX","AZIMUTH_DEBUG_POSTFX_REPLAY","AZIMUTH_DEBUG_SR_REPLAY",
         "AZIMUTH_DEBUG_VISIBLE_SR","AZIMUTH_DEBUG_AUTO_TEST","AZIMUTH_DEBUG_PRODUCER_GPU_WAIT",
         "AZIMUTH_DEBUG_PRODUCER_WAIT_MS","AZIMUTH_DEBUG_VISIBLE_MARKER",
         "AZIMUTH_DEBUG_PRESENT_TRACE","AZIMUTH_DEBUG_RENDERDOC","AZIMUTH_DEBUG_SHADER_DISASM","AZIMUTH_DEBUG_QUEUE_TRACE"};
-    const char *values[]={render,output,quality,preset,jitter,hdr,hdr,"1","1","1","1","1","1","0","0","0","0","0","1"};
+    const char *values[]={render,output,quality,preset,hud,di,mj,mx,my,pe,es,jitter,hdr,hdr,"1","1","1","1","1","1","0","0","0","0","0","1"};
     for(unsigned i=0;i<sizeof(keys)/sizeof(keys[0]);++i)if(!SetEnvironmentVariableA(keys[i],values[i]))return 0;
     (void)SetEnvironmentVariableA("AZIMUTH_DEBUG_AUTO_READY_FILE",NULL);
-    log_msg("SR PLAY_CONFIG render=%s output=%s quality=%s hdr=%s jitter=%s preset=%s gpuWait=1 capture=0 fixedProfile=1",render,output,quality,hdr,jitter,preset);
+    log_msg("SR PLAY_CONFIG render=%s output=%s quality=%s hdr=%s jitter=%s preset=%s gpuWait=1 capture=0 profileLatch=1",render,output,quality,hdr,jitter,preset);
     return 1;
 }
 int dlss_sr_play_mode(void){return sr_play;}
@@ -118,6 +133,24 @@ void dlss_sr_play_disable(const char *reason){
     if(sr_play&&!InterlockedExchange(&sr_play_disabled,1))log_msg("SR PLAY_DISABLED reason=%s restartRequired=1",reason);
 }
 void dlss_sr_play_miss(void){if(sr_play)InterlockedExchange(&sr_play_reset,1);}
+static int sr_read_guides(void){
+    const char *flags[]={"AZIMUTH_SR_DEPTH_INVERTED","AZIMUTH_SR_MV_JITTERED"};
+    unsigned *fp[]={&sr_guides.depth_inverted,&sr_guides.mv_jittered};
+    const char *numbers[]={"AZIMUTH_SR_MV_SCALE_X","AZIMUTH_SR_MV_SCALE_Y","AZIMUTH_SR_PRE_EXPOSURE","AZIMUTH_SR_EXPOSURE_SCALE"};
+    float *np[]={&sr_guides.mv_scale_x,&sr_guides.mv_scale_y,&sr_guides.pre_exposure,&sr_guides.exposure_scale};
+    char b[64],tail;
+    for(unsigned i=0;i<2;++i){
+        DWORD n=GetEnvironmentVariableA(flags[i],b,sizeof(b));
+        if(n){if(n!=1||(b[0]!='0'&&b[0]!='1'))return 0;*fp[i]=(unsigned)(b[0]-'0');}
+    }
+    for(unsigned i=0;i<4;++i){
+        DWORD n=GetEnvironmentVariableA(numbers[i],b,sizeof(b));
+        if(n&&(n>=sizeof(b)||sscanf(b,"%f%c",np[i],&tail)!=1))return 0;
+    }
+    sr_guides_override=sr_guides.depth_inverted||sr_guides.mv_jittered||sr_guides.mv_scale_x!=1||
+        sr_guides.mv_scale_y!=1||sr_guides.pre_exposure!=1||sr_guides.exposure_scale!=1;
+    return azsr_guides_valid(sr_guides);
+}
 static void sr_read_config(void) {
     char b[64], tail;
     DWORD n = GetEnvironmentVariableA("AZIMUTH_SR_MODE", b, sizeof(b));
@@ -148,13 +181,20 @@ static void sr_read_config(void) {
         else if (!strcmp(b, "quality")) sr_quality = AZSR_QUALITY;
         else if (!strcmp(b, "balanced")) sr_quality = AZSR_BALANCED;
         else if (!strcmp(b, "performance")) sr_quality = AZSR_PERFORMANCE;
+        else if (!strcmp(b, "ultraperformance")) sr_quality = AZSR_ULTRA_PERFORMANCE;
+        else if (!strcmp(b, "auto")&&sr_preview_mode) sr_auto_quality=1;
         else sr_blocked = 1;
     }
     n=GetEnvironmentVariableA("AZIMUTH_SR_RENDER",b,sizeof(b));
-    if(n&&(n>=sizeof(b)||!azrp_parse_size(b,&sr_fixed_render)||!azsr_less(sr_fixed_render,sr_output)||!azsr_same_aspect(sr_fixed_render,sr_output)))sr_blocked=1;
+    if(n&&n<sizeof(b)&&!strcmp(b,"auto")&&sr_preview_mode){
+        sr_auto_render=1;sr_fixed_render=(AzSRSize){0,0};
+        if(sr_output.w>3840||sr_output.h>2160)sr_blocked=1;
+    }else if(n&&(n>=sizeof(b)||!azrp_parse_size(b,&sr_fixed_render)||!azsr_less(sr_fixed_render,sr_output)||!azsr_same_aspect(sr_fixed_render,sr_output)))sr_blocked=1;
     n=GetEnvironmentVariableA("AZIMUTH_SR_PRESET",b,sizeof(b));
     if(n){sr_preset=n<sizeof(b)?azsr_preset(b):-1;if(sr_preset<0)sr_blocked=1;}
-    if(sr_play&&sr_blocked)dlss_sr_play_disable("invalid_profile_or_preset");
+    if(!sr_read_guides())sr_blocked=1;
+    if(sr_play&&sr_blocked)dlss_sr_play_disable("invalid_profile_or_preset_or_guides");
+    log_msg("NR GUIDE_CONFIG depthInverted=%u mvJittered=%u scaleMultiplier=%.6f,%.6f preExposure=%.6f exposureScale=%.6f autoExposure=1 calibrated=%d engineExposure=unverified",sr_guides.depth_inverted,sr_guides.mv_jittered,(double)sr_guides.mv_scale_x,(double)sr_guides.mv_scale_y,(double)sr_guides.pre_exposure,(double)sr_guides.exposure_scale,sr_guides_override);
     log_msg("SR PRESET requested=%d hintOnly=1",sr_preset);
     if(sr_preview_mode){
         n=GetEnvironmentVariableA("AZIMUTH_DEBUG_PREVIEW_JITTER",b,sizeof(b));
@@ -241,6 +281,8 @@ static int load(void) {
     *(FARPROC *)&p_evaluate_sr = GetProcAddress(m, "azngx_evaluate_sr");
     *(FARPROC *)&p_optimal = GetProcAddress(m, "azngx_get_optimal");
     *(FARPROC *)&p_set_preset=GetProcAddress(m,"azngx_set_sr_preset");
+    *(FARPROC *)&p_set_guides=GetProcAddress(m,"azngx_set_sr_guides");
+    if(sr_guides_override&&(!p_set_guides||!p_set_guides(&sr_guides))){log_msg("SR: guide override requires compatible bridge");p_evaluate=NULL;return 0;}
     if(sr_preset>0&&(!p_set_preset||!p_set_preset(sr_preset))){log_msg("SR: requested preset requires compatible bridge");p_evaluate=NULL;return 0;}
     if (sr_mode >= AZSR_PROBE && (!p_evaluate_sr || !p_optimal)) {
         log_msg("SR experiment requires the rebuilt azimuth_ngx.dll");
@@ -386,10 +428,19 @@ int dlss_run(ID3D12GraphicsCommandList *cl, ID3D12Resource *color, D3D12_RESOURC
                 (int)decision,fresh_mv,top_left);
         }
         if (sr_mode >= AZSR_PROBE) {
-            if (decision == AZSR_REJECT || cd.SampleDesc.Count != 1 || dd.SampleDesc.Count != 1 ||
-                md.SampleDesc.Count != 1 || md.Format != DXGI_FORMAT_R16G16_FLOAT ||
-                cd.Format != DXGI_FORMAT_R11G11B10_FLOAT) return 0;
-            if(sr_fixed_render.w&&!azsr_equal(sr_fixed_render,f.motion))return 0;
+            int eligible=decision!=AZSR_REJECT&&cd.SampleDesc.Count==1&&dd.SampleDesc.Count==1&&
+                md.SampleDesc.Count==1&&md.Format==DXGI_FORMAT_R16G16_FLOAT&&cd.Format==DXGI_FORMAT_R11G11B10_FLOAT;
+            if(sr_auto_render&&!sr_armed){
+                eligible=eligible&&azrp_profile_sizes(f.motion,sr_output).ow!=0;
+                if(!azsr_stable(&sr_stable,f.motion,eligible))return 0;
+            }
+            if(!eligible)return 0;
+            if(sr_fixed_render.w&&!azsr_equal(sr_fixed_render,f.motion)){
+                static int mismatch_logged;
+                if(!mismatch_logged++){log_msg("SR PROFILE_MISMATCH requested=%ux%u measured=%ux%u native=1",sr_fixed_render.w,sr_fixed_render.h,f.motion.w,f.motion.h);}
+                if(sr_armed){sr_blocked=1;dlss_sr_play_disable("render_dimensions_changed");}
+                return 0;
+            }
             w = f.motion.w; h = f.motion.h; ow = sr_output.w; oh = sr_output.h;
             if (sr_armed && !azsr_equal(sr_render, f.motion)) {
                 sr_blocked = 1;
@@ -399,15 +450,26 @@ int dlss_run(ID3D12GraphicsCommandList *cl, ID3D12Resource *color, D3D12_RESOURC
             }
             sr_render = f.motion;
             phase_count = (int)azsr_phase_count(sr_render, sr_output);
-            /* Fixed resolution for the experiment. No new resource retirement paths. */
-            sr_armed = 1;
+            /* Arm only after the runtime range and replay profile accept. */
         }
     }
     if (!ensure_ready(ow, oh)){dlss_sr_play_disable("ngx_or_output_init");return 0;}
     if (sr_mode >= AZSR_PROBE && !sr_optimal_checked) {
-        AzSROptimal o;
-        int result = 0;
-        if (!p_optimal(ow, oh, (int)sr_quality, &o, &result)) {
+        AzSROptimal o={0};int result=0;
+        if(sr_auto_quality){
+            double best=-1.0;AzSRQuality chosen=AZSR_NATIVE;
+            for(int q=AZSR_QUALITY;q<=AZSR_ULTRA_PERFORMANCE;++q){
+                AzSROptimal candidate={0};int rc=0;
+                int ok=p_optimal(ow,oh,q,&candidate,&rc);
+                double score=ok?azsr_quality_distance(sr_render,candidate):-1.0;
+                log_msg("SR AUTO_QUALITY mode=%d query=%d ngx=%08x min=%ux%u max=%ux%u optimal=%ux%u eligible=%d",
+                    q,ok,(unsigned)rc,candidate.min_w,candidate.min_h,candidate.max_w,candidate.max_h,candidate.optimal_w,candidate.optimal_h,score>=0);
+                if(score>=0&&(best<0||score<best)){best=score;chosen=(AzSRQuality)q;o=candidate;}
+            }
+            if(chosen==AZSR_NATIVE){sr_blocked=1;dlss_sr_play_disable("ngx_no_supported_auto_quality");return 0;}
+            sr_quality=chosen;
+            log_msg("SR AUTO_QUALITY_SELECTED mode=%d actual=%ux%u",sr_quality,w,h);
+        }else if (!p_optimal(ow, oh, (int)sr_quality, &o, &result)) {
             sr_blocked = 1;
             log_msg("SR optimal query failed: 0x%08x", (unsigned)result);
             dlss_sr_play_disable("ngx_optimal_query");
@@ -421,7 +483,18 @@ int dlss_run(ID3D12GraphicsCommandList *cl, ID3D12Resource *color, D3D12_RESOURC
             dlss_sr_play_disable("ngx_render_outside_range");
             return 0;
         }
-        sr_optimal_checked = 1;
+        if(sr_auto_render&&!hooks_sr_accept_profile(w,h,ow,oh)){
+            sr_blocked=1;dlss_sr_play_disable("auto_profile_replay");return 0;
+        }
+        sr_optimal_checked=1;sr_armed=1;
+        log_msg("SR PROFILE_ACCEPTED render=%ux%u output=%ux%u quality=%d autoRender=%d autoQuality=%d restartOnChange=1",w,h,ow,oh,sr_quality,sr_auto_render,sr_auto_quality);
+    }
+    if(sr_mode>=AZSR_PROBE){
+        uint64_t now=GetTickCount64();
+        if(sr_last_evaluate_ms&&now-sr_last_evaluate_ms>500){
+            need_reset=1;log_msg("SR HISTORY_RESET reason=evaluation_gap gapMs=%llu",(unsigned long long)(now-sr_last_evaluate_ms));
+        }
+        sr_last_evaluate_ms=now;
     }
     /* Everything DLSS reads goes to a shader-read state. */
     if (color_state != READ_STATE) {
@@ -438,9 +511,16 @@ int dlss_run(ID3D12GraphicsCommandList *cl, ID3D12Resource *color, D3D12_RESOURC
        to pixels is the render size (same convention as the FSR version). */
     int ok;
     if (sr_mode >= AZSR_PROBE) {
+        float sx=(float)w*sr_guides.mv_scale_x,sy=(float)h*sr_guides.mv_scale_y;
+        int reset=need_reset!=0;
         ok = p_evaluate_sr(cl,color,depth,motion,out_tex,w,h,ow,oh,(int)sr_quality,
-                          jitter_used ? jx : 0.0f,jitter_used ? jy : 0.0f,
-                          (float)w,(float)h,need_reset != 0,&r);
+                          jitter_used ? jx : 0.0f,jitter_used ? jy : 0.0f,sx,sy,reset,&r);
+        if(sr_guide_log_budget||!ok||reset){
+            if(sr_guide_log_budget)--sr_guide_log_budget;
+            log_msg("NR INPUT_EVALUATE list=%p color=%p depth=%p mv=%p output=%p render=%ux%u outputSize=%ux%u quality=%d mvScale=%.7f,%.7f jitter=%.7f,%.7f depthInverted=%u mvJittered=%u reset=%d fresh=%d preExposure=%.7f exposureScale=%.7f autoExposure=1 ok=%d ngx=%08x receiverUnverified=1",
+                (void *)cl,(void *)color,(void *)depth,(void *)motion,(void *)out_tex,w,h,ow,oh,sr_quality,(double)sx,(double)sy,
+                (double)(jitter_used?jx:0),(double)(jitter_used?jy:0),sr_guides.depth_inverted,sr_guides.mv_jittered,reset,fresh_mv,(double)sr_guides.pre_exposure,(double)sr_guides.exposure_scale,ok,(unsigned)r);
+        }
     } else {
         ok = p_evaluate(cl, color, depth, motion, out_tex, w, h, jitter_used ? jx : 0.0f, jitter_used ? jy : 0.0f,
                         (float)w, (float)h, need_reset != 0, &r);

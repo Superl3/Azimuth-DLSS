@@ -73,6 +73,7 @@ jobs:
           zig cc -target x86_64-windows-gnu -std=c11 -Wall -Wextra -Werror tests/test_replay_binding_policy.c -o build/test_replay_binding_policy.exe
           ./build/test_replay_binding_policy.exe
           python tests/test_debug_capture.py
+          python tests/test_nr_guides.py
       - name: Test automatic capture packaging
         shell: pwsh
         run: ./tests/test_debug_launcher.ps1
@@ -88,7 +89,7 @@ jobs:
           New-Item -ItemType Directory -Path debug-build/tools -Force | Out-Null
           Copy-Item build/dxgi.dll,LICENSE,LICENSE-RENDERDOC.txt,docs/DEBUG_CAPTURE.md -Destination debug-build
           Copy-Item debug/azimuth_debug.ini,debug/Start-DebugCapture.cmd,debug/Start-DebugCapture.ps1 -Destination debug-build
-          Copy-Item tools/capture_sr.py,tools/analyze_sr_trace.py,tools/analyze_fg_trace.py,tools/analyze_debug_trace.py -Destination debug-build/tools
+          Copy-Item tools/capture_sr.py,tools/analyze_sr_trace.py,tools/analyze_fg_trace.py,tools/analyze_debug_trace.py,tools/analyze_nr_guides.py -Destination debug-build/tools
           Get-FileHash debug-build/dxgi.dll -Algorithm SHA256 | Format-Table -AutoSize | Out-String | Set-Content debug-build/SHA256.txt
       - uses: actions/upload-artifact@v4
         with:
@@ -133,7 +134,7 @@ jobs:
           New-Item -ItemType Directory -Path sr-build -Force | Out-Null
           Copy-Item build/dxgi.dll,build/azimuth_ngx.dll,LICENSE,LICENSE-NVIDIA-DLSS.txt,LICENSE-RENDERDOC.txt,docs/SR_EXPERIMENT.md -Destination sr-build
           New-Item -ItemType Directory -Path sr-build/tools -Force | Out-Null
-          Copy-Item tools/capture_sr.py,tools/analyze_sr_trace.py,tools/analyze_fg_trace.py,tools/analyze_debug_trace.py -Destination sr-build/tools
+          Copy-Item tools/capture_sr.py,tools/analyze_sr_trace.py,tools/analyze_fg_trace.py,tools/analyze_debug_trace.py,tools/analyze_nr_guides.py -Destination sr-build/tools
           Copy-Item docs/CAPTURE_FH2.md,docs/FG_INTEGRATION.md,docs/DEBUG_CAPTURE.md -Destination sr-build
           Copy-Item debug/Start-DebugCapture.cmd,debug/Start-DebugCapture.ps1,release/azimuth_sr.ini,docs/SR_PLAY.md,docs/SR_PROFILES.md -Destination sr-build
           Get-FileHash sr-build/*.dll -Algorithm SHA256 | Format-Table -AutoSize | Out-String | Set-Content sr-build/SHA256.txt

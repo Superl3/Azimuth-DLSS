@@ -6,8 +6,19 @@ typedef enum AzSRMode {
     AZSR_DLAA = 0, AZSR_DIAGNOSTIC = 1, AZSR_PROBE = 2, AZSR_PADDED = 3, AZSR_ROUTE = 4
 } AzSRMode;
 typedef enum AzSRQuality {
-    AZSR_NATIVE = 0, AZSR_QUALITY = 1, AZSR_BALANCED = 2, AZSR_PERFORMANCE = 3
+    AZSR_NATIVE = 0, AZSR_QUALITY = 1, AZSR_BALANCED = 2, AZSR_PERFORMANCE = 3, AZSR_ULTRA_PERFORMANCE = 4
 } AzSRQuality;
+typedef struct AzSRGuideOptions {
+    unsigned depth_inverted,mv_jittered;
+    float mv_scale_x,mv_scale_y,pre_exposure,exposure_scale;
+} AzSRGuideOptions;
+static inline int azsr_guides_valid(AzSRGuideOptions g){
+    return g.depth_inverted<=1&&g.mv_jittered<=1&&
+        g.mv_scale_x>=-4.0f&&g.mv_scale_x<=4.0f&&g.mv_scale_x!=0&&
+        g.mv_scale_y>=-4.0f&&g.mv_scale_y<=4.0f&&g.mv_scale_y!=0&&
+        g.pre_exposure>=0.001f&&g.pre_exposure<=1000.0f&&
+        g.exposure_scale>=0.001f&&g.exposure_scale<=1000.0f;
+}
 typedef struct AzSRSize { unsigned w, h; } AzSRSize;
 typedef struct AzSROptimal {
     unsigned optimal_w, optimal_h, max_w, max_h, min_w, min_h;
@@ -64,6 +75,13 @@ static inline AzSRDecision azsr_decide(AzSRMode mode, AzSRFrame f) {
         return AZSR_COPY_PADDED;
     return AZSR_REJECT;
 }
+typedef struct {AzSRSize size;unsigned streak;} AzSRStable;
+static inline int azsr_stable(AzSRStable *s,AzSRSize r,int valid){
+    if(!valid){s->size.w=s->size.h=s->streak=0;return 0;}
+    if(!azsr_equal(s->size,r)){s->size=r;s->streak=1;}
+    else if(s->streak<3)++s->streak;
+    return s->streak>=3;
+}
 static inline unsigned azsr_phase_count(AzSRSize render, AzSRSize output) {
     if (!render.h || output.h <= render.h) return 16;
     double ratio = (double)output.h / render.h;
@@ -75,5 +93,10 @@ static inline unsigned azsr_phase_count(AzSRSize render, AzSRSize output) {
 static inline int azsr_in_range(AzSRSize s, AzSROptimal o) {
     return azsr_nonzero(s) && o.min_w && o.min_h &&
         s.w >= o.min_w && s.h >= o.min_h && s.w <= o.max_w && s.h <= o.max_h;
+}
+static inline double azsr_quality_distance(AzSRSize r,AzSROptimal o){
+    if(!azsr_in_range(r,o)||!o.optimal_w||!o.optimal_h)return -1.0;
+    double x=(double)r.w/o.optimal_w-1.0,y=(double)r.h/o.optimal_h-1.0;
+    return x*x+y*y;
 }
 #endif

@@ -25,6 +25,11 @@ static int g_quality;
 static bool g_ready;
 static unsigned long long g_calls;
 static int g_preset;
+static AzSRGuideOptions g_guides={0,0,1,1,1,1};
+EXPORT int azngx_set_sr_guides(const AzSRGuideOptions *g){
+    if(g_feature||!g||!azsr_guides_valid(*g))return 0;
+    g_guides=*g;return 1;
+}
 EXPORT int azngx_set_sr_preset(int preset){
     if(g_feature||(preset!=0&&(preset<10||preset>13)))return 0;
     g_preset=preset;return 1;
@@ -97,12 +102,13 @@ static NVSDK_NGX_PerfQuality_Value ngx_quality(int quality) {
     case AZSR_QUALITY: return NVSDK_NGX_PerfQuality_Value_MaxQuality;
     case AZSR_BALANCED: return NVSDK_NGX_PerfQuality_Value_Balanced;
     case AZSR_PERFORMANCE: return NVSDK_NGX_PerfQuality_Value_MaxPerf;
+    case AZSR_ULTRA_PERFORMANCE: return NVSDK_NGX_PerfQuality_Value_UltraPerformance;
     default: return NVSDK_NGX_PerfQuality_Value_DLAA;
     }
 }
 
 EXPORT int azngx_get_optimal(unsigned ow, unsigned oh, int quality, AzSROptimal *o, int *ngx_result) {
-    if (!g_ready || !o || !ow || !oh || quality < AZSR_QUALITY || quality > AZSR_PERFORMANCE) {
+    if (!g_ready || !o || !ow || !oh || quality < AZSR_QUALITY || quality > AZSR_ULTRA_PERFORMANCE) {
         *ngx_result = (int)NVSDK_NGX_Result_FAIL_InvalidParameter;
         return 0;
     }
@@ -121,7 +127,7 @@ EXPORT int azngx_evaluate_sr(ID3D12GraphicsCommandList *cl, ID3D12Resource *colo
         *ngx_result = (int)NVSDK_NGX_Result_FAIL_NotInitialized;
         return 0;
     }
-    if (!w || !h || !ow || !oh || quality < AZSR_NATIVE || quality > AZSR_PERFORMANCE ||
+    if (!w || !h || !ow || !oh || quality < AZSR_NATIVE || quality > AZSR_ULTRA_PERFORMANCE ||
         (quality == AZSR_NATIVE ? (w != ow || h != oh) : (w >= ow || h >= oh))) {
         *ngx_result = (int)NVSDK_NGX_Result_FAIL_InvalidParameter;
         return 0;
@@ -155,10 +161,15 @@ EXPORT int azngx_evaluate_sr(ID3D12GraphicsCommandList *cl, ID3D12Resource *colo
         cp.Feature.InTargetHeight = oh;
         cp.Feature.InPerfQualityValue = ngx_quality(quality);
         cp.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure;
-        if (quality != AZSR_NATIVE) cp.InFeatureCreateFlags |= NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
+        if (quality != AZSR_NATIVE) {
+            cp.InFeatureCreateFlags |= NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
+            if(g_guides.depth_inverted)cp.InFeatureCreateFlags|=NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
+            if(g_guides.mv_jittered)cp.InFeatureCreateFlags|=NVSDK_NGX_DLSS_Feature_Flags_MVJittered;
+        }
         if(quality!=AZSR_NATIVE&&g_preset){
             const char *key=quality==AZSR_QUALITY?NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality:
-                quality==AZSR_BALANCED?NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced:NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance;
+                quality==AZSR_BALANCED?NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced:
+                quality==AZSR_ULTRA_PERFORMANCE?NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance:NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance;
             g_params->Set(key,(unsigned int)g_preset);
         }
         NVSDK_NGX_Result r = NGX_D3D12_CREATE_DLSS_EXT(cl, 1, 1, &g_feature, g_params, &cp);
@@ -188,8 +199,8 @@ EXPORT int azngx_evaluate_sr(ID3D12GraphicsCommandList *cl, ID3D12Resource *colo
     ep.InMVScaleY = mv_scale_y;
     ep.InRenderSubrectDimensions.Width = w;
     ep.InRenderSubrectDimensions.Height = h;
-    ep.InPreExposure = 1.0f;
-    ep.InExposureScale = 1.0f;
+    ep.InPreExposure = quality==AZSR_NATIVE?1.0f:g_guides.pre_exposure;
+    ep.InExposureScale = quality==AZSR_NATIVE?1.0f:g_guides.exposure_scale;
     NVSDK_NGX_Result r = NGX_D3D12_EVALUATE_DLSS_EXT(cl, g_feature, g_params, &ep);
     *ngx_result = (int)r;
     return NVSDK_NGX_SUCCEED(r) ? 1 : 0;
