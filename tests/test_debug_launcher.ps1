@@ -96,7 +96,19 @@ try {
     $autoMeta=Get-Content -LiteralPath (Join-Path $autoContents 'capture.json') -Raw | ConvertFrom-Json
     if(!$autoMeta.auto_test -or !$autoMeta.auto_ready -or !$autoMeta.visible_trial_complete -or $autoMeta.automatic_capture.id -ne 1 -or $autoMeta.automatic_resolve -ne 0 -or $autoMeta.capture_begins -ne 1){throw 'Wrong keyless auto-test metadata.'}
     if($autoMeta.visible_seconds_requested -ne 60 -or $autoMeta.visible_duration_ms_observed -ne 60000){throw 'Wrong requested/observed Visible SR duration metadata.'}
-    if($autoMeta.present_trace_requested -or $autoMeta.producer_gpu_wait_requested -or $autoMeta.visible_hdr_requested -or $autoMeta.hdr_live_requested){throw 'Experimental switches must default off.'}
+    if($autoMeta.present_trace_requested -or $autoMeta.present_copy_trace_requested -or $autoMeta.fg_hudless_probe_requested -or $autoMeta.producer_gpu_wait_requested -or $autoMeta.visible_hdr_requested -or $autoMeta.hdr_live_requested){throw 'Experimental switches must default off.'}
+
+    # The new private HUD-less final output uses the same tightly bounded RAW rules.
+    $fgRawName='f2002-fghudless-2x2-fmt24.raw'
+    [IO.File]::WriteAllBytes((Join-Path $rawDir $fgRawName),[byte[]]::new(16))
+    "PREVIEW FILE directory=azimuth_preview_123_456 file=$fgRawName bytes=16" | Add-Content -LiteralPath $log
+    $fgDest=Join-Path $root 'fg-hudless'
+    & $launcher @autoOpts -PresentTrace -PresentCopyTrace -FGHudlessProbe -Destination $fgDest
+    $fgZip=@(Get-ChildItem -LiteralPath $fgDest -Filter '*.zip')
+    $fgContents=Join-Path $root 'fg-contents'
+    Expand-Archive -LiteralPath $fgZip[0].FullName -DestinationPath $fgContents
+    $fgMeta=Get-Content -LiteralPath (Join-Path $fgContents 'capture.json') -Raw | ConvertFrom-Json
+    if(!$fgMeta.present_copy_trace_requested -or !$fgMeta.fg_hudless_probe_requested -or !(Test-Path -LiteralPath (Join-Path $fgContents ('gpu-raw\'+$fgRawName)))){throw 'Missing FG HUD-less fixture metadata or RAW.'}
 
     $launcherAst = [System.Management.Automation.Language.Parser]::ParseFile($launcher, [ref]$null, [ref]$null)
     $completion = $launcherAst.Find({

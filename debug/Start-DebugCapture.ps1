@@ -17,6 +17,7 @@ param(
     [switch]$HDRLive,
     [switch]$PresentTrace,
     [switch]$PresentCopyTrace,
+    [switch]$FGHudlessProbe,
     [switch]$ProducerGpuWait,
     [switch]$VisibleMarker,
     [ValidateRange(10,120)][int]$VisibleSeconds = 10,
@@ -63,6 +64,7 @@ if($VisibleSR -and $ExitAfterCapture -and !$AutoTest){throw 'For automatic Visib
 if($PreviewSRReplay -and !$PreviewReplay){throw '-PreviewSRReplay requires -PreviewReplay.'}
 if($ProducerGpuWait -and !$PreviewSRReplay){throw '-ProducerGpuWait requires -PreviewSRReplay.'}
 if($PresentCopyTrace -and !$PresentTrace){throw '-PresentCopyTrace requires -PresentTrace.'}
+if($FGHudlessProbe -and !$VisibleSR){throw '-FGHudlessProbe requires -VisibleSR or -VisibleHDR.'}
 if($PresentTrace -and !$VisibleSR){throw '-PresentTrace requires -VisibleSR or -VisibleHDR.'}
 if($PreviewReplay -and !$PreviewPostFx){throw '-PreviewReplay requires -PreviewPostFx.'}
 if ($ExitAfterCapture -and ((!$AutoResolve -and !$AutoTest) -or $CollectOnly)) {
@@ -198,7 +200,7 @@ try {
             $previous = (Get-Item -LiteralPath $log).LastWriteTimeUtc
             Copy-Item -LiteralPath $log -Destination (Join-Path $dest ($tag + '-previous.log'))
         }
-        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM','AZIMUTH_DEBUG_AUTO_RESOLVE','AZIMUTH_DEBUG_AUTO_TEST','AZIMUTH_DEBUG_PRODUCER_WAIT_MS','AZIMUTH_DEBUG_PRODUCER_GPU_WAIT','AZIMUTH_DEBUG_PRESENT_TRACE','AZIMUTH_DEBUG_PRESENT_COPY','AZIMUTH_DEBUG_AUTO_WARMUP_MS','AZIMUTH_DEBUG_AUTO_READY_FILE','AZIMUTH_SR_OUTPUT','AZIMUTH_SR_QUALITY','AZIMUTH_DEBUG_PREVIEW_POSTFX','AZIMUTH_DEBUG_PREVIEW_JITTER','AZIMUTH_DEBUG_POSTFX_REPLAY','AZIMUTH_DEBUG_SR_REPLAY','AZIMUTH_DEBUG_VISIBLE_SR','AZIMUTH_DEBUG_VISIBLE_HDR','AZIMUTH_DEBUG_HDR_LIVE','AZIMUTH_DEBUG_VISIBLE_MARKER','AZIMUTH_DEBUG_VISIBLE_SECONDS','AZIMUTH_DEBUG_QUEUE_TRACE')) {
+        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM','AZIMUTH_DEBUG_AUTO_RESOLVE','AZIMUTH_DEBUG_AUTO_TEST','AZIMUTH_DEBUG_PRODUCER_WAIT_MS','AZIMUTH_DEBUG_PRODUCER_GPU_WAIT','AZIMUTH_DEBUG_PRESENT_TRACE','AZIMUTH_DEBUG_PRESENT_COPY','AZIMUTH_DEBUG_AUTO_WARMUP_MS','AZIMUTH_DEBUG_AUTO_READY_FILE','AZIMUTH_SR_OUTPUT','AZIMUTH_SR_QUALITY','AZIMUTH_DEBUG_PREVIEW_POSTFX','AZIMUTH_DEBUG_PREVIEW_JITTER','AZIMUTH_DEBUG_POSTFX_REPLAY','AZIMUTH_DEBUG_SR_REPLAY','AZIMUTH_DEBUG_VISIBLE_SR','AZIMUTH_DEBUG_VISIBLE_HDR','AZIMUTH_DEBUG_HDR_LIVE','AZIMUTH_DEBUG_FG_HUDLESS','AZIMUTH_DEBUG_VISIBLE_MARKER','AZIMUTH_DEBUG_VISIBLE_SECONDS','AZIMUTH_DEBUG_QUEUE_TRACE')) {
             $oldEnv[$key] = [Environment]::GetEnvironmentVariable($key,'Process')
         }
         [Environment]::SetEnvironmentVariable('AZIMUTH_SR_MODE',$(if($Preview){'preview'}else{'debug'}),'Process')
@@ -212,6 +214,7 @@ try {
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_VISIBLE_SR',$(if($VisibleSR){'1'}else{'0'}),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_VISIBLE_HDR',$(if($VisibleHDR){'1'}else{'0'}),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_HDR_LIVE',$(if($HDRLive){'1'}else{'0'}),'Process')
+            [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_FG_HUDLESS',$(if($FGHudlessProbe){'1'}else{'0'}),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_VISIBLE_MARKER',$(if($VisibleMarker){'1'}else{'0'}),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_VISIBLE_SECONDS',[string]$VisibleSeconds,'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_QUEUE_TRACE','1','Process')
@@ -347,7 +350,7 @@ try {
     if($Preview){
         if($content -notmatch 'SR PREVIEW:' -and !$AutoTest){throw 'Log is not from preview mode.'}
         $total=0L
-        $rawRows=[regex]::Matches($content,'(?m)^PREVIEW FILE directory=(azimuth_preview_\d+_\d+) file=(f\d+-(?:color|depth|mv|sr|preoverlay|composite|final|replay|srpostfx|visiblehud|visiblefinal|hdrscene|hudprobe|finalprobe|hdrsrscene)-(\d+)x(\d+)-fmt(\d+)\.raw) bytes=(\d+)\r?$')
+        $rawRows=[regex]::Matches($content,'(?m)^PREVIEW FILE directory=(azimuth_preview_\d+_\d+) file=(f\d+-(?:color|depth|mv|sr|preoverlay|composite|final|replay|srpostfx|visiblehud|visiblefinal|hdrscene|hudprobe|finalprobe|hdrsrscene|fghudless)-(\d+)x(\d+)-fmt(\d+)\.raw) bytes=(\d+)\r?$')
         foreach($row in $rawRows){
             if($previewFiles.Count -ge $(if($VisibleHDR){28}else{22})){break}
             $folder=Join-Path $game $row.Groups[1].Value
@@ -377,7 +380,7 @@ try {
         auto_gate_open = [bool]($content -match '(?m)^PREVIEW AUTO_GATE_OPEN ')
         auto_ready = [bool]($content -match '(?m)^PREVIEW AUTO_READY ')
         visible_hdr_requested = [bool]$VisibleHDR; hdr_live_requested = [bool]$HDRLive
-        present_trace_requested = [bool]$PresentTrace; present_copy_trace_requested = [bool]$PresentCopyTrace; producer_gpu_wait_requested = [bool]$ProducerGpuWait
+        present_trace_requested = [bool]$PresentTrace; present_copy_trace_requested = [bool]$PresentCopyTrace; fg_hudless_probe_requested = [bool]$FGHudlessProbe; producer_gpu_wait_requested = [bool]$ProducerGpuWait
         visible_trial_complete = [bool]($content -match '(?m)^VISIBLE TRIAL_END ')
         visible_seconds_requested = $(if($VisibleSR){$VisibleSeconds}else{$null})
         visible_duration_ms_observed = $(if($content -match '(?m)^VISIBLE CONFIG enabled=1 durationMs=(\d+) '){[int]$Matches[1]}else{$null})
