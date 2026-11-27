@@ -301,24 +301,24 @@ void STDMETHODCALLTYPE execute(ID3D12CommandQueue *q,UINT n,ID3D12CommandList *c
     if(q->GetDesc().Type!=D3D12_COMMAND_LIST_TYPE_DIRECT){guard.unlock();fn(q,n,ls);return;}
     std::vector<Record*> used;
     std::vector<std::pair<uint64_t,Op>> ops;
-    std::vector<Packet*> marked;
     for(UINT i=0;ls&&i<n;++i){
         auto it=records.find(reinterpret_cast<ID3D12GraphicsCommandList*>(ls[i]));
         if(it==records.end()||it->second.ops.empty())continue;
         auto &r=it->second;
-        if(r.submitted||!r.known){
+        bool repeat=r.submitted||!r.known||std::find(used.begin(),used.end(),&r)!=used.end();
+        if(repeat){
             for(auto &o:r.ops){if(auto *p=find_packet(o.packet))p->bad=true;if(o.dst)lineage.erase(o.dst);}
         }
-        for(auto o:r.ops){if(r.submitted||!r.known){if(o.dst)ops.push_back({r.id,{invalid,o.dst,0,0}});}
+        for(auto o:r.ops){if(repeat){if(o.dst)ops.push_back({r.id,{invalid,o.dst,0,0}});}
             else ops.push_back({r.id,o});}
         used.push_back(&r);
     }
-    if(ops.empty()){guard.unlock();fn(q,n,ls);return;}
+    if(used.empty()){guard.unlock();fn(q,n,ls);return;}
     uint64_t sub=++submission_serial;
     // The same native submission may contain both the final draw and copy.
     // New provenance has no fence until this Execute has actually forwarded.
     for(auto &[rec,o]:ops){
-        if(o.kind==invalid){if(lineage.erase(o.dst)&&is_bb(o.dst))log("FG INVALIDATE bbCookie=%llu recording=%llu submit=%llu",o.dst,rec,sub);continue;}
+        if(o.kind==invalid){bool had=lineage.erase(o.dst)!=0;if(is_bb(o.dst))log("FG INVALIDATE bbCookie=%llu recording=%llu submit=%llu queue=%p generation=%llu hadLineage=%d",o.dst,rec,sub,q,generation,had);continue;}
         if(o.kind==copy){
             auto it=lineage.find(o.src);
             Provenance v=it==lineage.end()?Provenance{}:it->second;
@@ -334,7 +334,7 @@ void STDMETHODCALLTYPE execute(ID3D12CommandQueue *q,UINT n,ID3D12CommandList *c
         auto *p=find_packet(o.packet);if(!p)continue;
         auto *s=stage(*p,o.kind);
         if(!s||s->record!=rec||s->submitted||p->gen!=generation){p->bad=true;continue;}
-        s->queue=q;s->submitted=true;marked.push_back(p);
+        s->queue=q;s->submitted=true;
         if(o.kind==final&&!p->bad)lineage[o.dst]={p->id,rec,sub,generation,q,{}};
         if(o.kind==core&&p->token)marker(sl::PCLMarker::eRenderSubmitStart,*p->token);
         log("FG STAGE_SUBMIT stage=%u resolve=%llu packet=%llu gameRecording=%llu nativeRecording=%llu submit=%llu queue=%p generation=%llu",unsigned(o.kind),p->resolve,p->id,s->game_record,rec,sub,q,generation);
@@ -542,17 +542,24 @@ AZEXPORT int __cdecl azslBeforePresent(IDXGISwapChain1 *sc,UINT flags,uint64_t c
     auto it=lineage.find(bb[index]);auto v=it==lineage.end()?Provenance{}:it->second;
     lineage.erase(bb[index]); // consume once, never re-use old contents
     auto *p=find_packet(v.packet);
-    if(!p||p->bad||p->presented||p->gen!=generation||v.gen!=generation||v.queue!=present_queue.Get()||
-      !v.fence||!p->camera.submitted||!p->core.submitted||!p->final.submitted||!p->camera.retired||!p->core.retired||!p->final.retired){
-        off("unproven_present_lineage");log("FG PRESENT_SKIP call=%llu generation=%llu index=%u cookie=%llu reason=lineage",call,generation,index,bb[index]);return 1;
+    if(!p||p->bad||p->presented||p->gen!=generation||v.gen!=generation||v.queue!=present_queue.Get()||!v.fence){
+        off("unproven_present_lineage");
+        log("FG PRESENT_SKIP call=%llu generation=%llu index=%u cookie=%llu reason=lineage packet=%llu packetBad=%d packetPresented=%d transferRecording=%llu submit=%llu actualQueue=%p expectedQueue=%p transferFence=%d",call,generation,index,bb[index],v.packet,p?p->bad:0,p?p->presented:0,v.record,v.submit,v.queue,present_queue.Get(),bool(v.fence));return 1;
+    }
+    if(!p->camera.submitted||!p->core.submitted||!p->final.submitted||!p->camera.retired||!p->core.retired||!p->final.retired){
+        off("producer_record_not_retired");
+        log("FG PRESENT_SKIP call=%llu resolve=%llu packet=%llu reason=producer_lifetime cameraSubmitted=%d coreSubmitted=%d finalSubmitted=%d cameraRetired=%d coreRetired=%d finalRetired=%d",call,p->resolve,p->id,p->camera.submitted,p->core.submitted,p->final.submitted,p->camera.retired,p->core.retired,p->final.retired);return 1;
     }
     // Only the 256-byte camera is CPU mapped, and only after its fence is
     // already complete. No CPU fence wait or color comparison on Present.
     auto now=GetTickCount64();bool reset=!last_resolve||p->reset||last_generation!=generation||last_resolve+1!=p->resolve||now-last_tick>250;
     sl::Constants camera;
+    if(!p->camera.fence.done()){
+        p->bad=true;off("camera_pending");log("FG PRESENT_SKIP call=%llu resolve=%llu packet=%llu reason=camera_fence_pending",call,p->resolve,p->id);return 1;
+    }
     if(!camera_constants(*p,camera,reset)||!wait_submitted(present_queue.Get(),p->core.fence,p->core.queue)||
        !wait_submitted(present_queue.Get(),p->final.fence,p->final.queue)){
-        p->bad=true;off("guides_or_camera");log("FG PRESENT_SKIP call=%llu resolve=%llu reason=guides_or_camera",call,p->resolve);return 1;
+        p->bad=true;off("guides_or_camera");log("FG PRESENT_SKIP call=%llu resolve=%llu packet=%llu reason=guides_or_camera",call,p->resolve,p->id);return 1;
     }
     if(reset&&armed)off("discontinuity");
     const sl::ViewportHandle vp(0);sl::Extent render{0,0,rw,rh},full{0,0,ow,oh};
@@ -568,7 +575,7 @@ AZEXPORT int __cdecl azslBeforePresent(IDXGISwapChain1 *sc,UINT flags,uint64_t c
     if(status!=sl::Result::eOk){p->bad=true;off("sdk_tag_or_enable");}
     p->presented=true;active.packet=p->id;active.reset=reset;
     if(status==sl::Result::eOk){last_resolve=p->resolve;last_generation=generation;last_tick=now;}
-    log("FG PRESENT_TAG call=%llu resolve=%llu token=%u generation=%llu index=%u bufferCookie=%llu transferRecording=%llu submit=%llu queue=%p reset=%d mode=%d result=%u qpc=%lld",call,p->resolve,(uint32_t)*p->token,generation,index,bb[index],v.record,v.submit,v.queue,reset,armed,(unsigned)status,qpc());
+    log("FG PRESENT_TAG call=%llu resolve=%llu packet=%llu token=%u generation=%llu index=%u bufferCookie=%llu transferRecording=%llu submit=%llu queue=%p reset=%d mode=%d result=%u qpc=%lld",call,p->resolve,p->id,(uint32_t)*p->token,generation,index,bb[index],v.record,v.submit,v.queue,reset,armed,(unsigned)status,qpc());
     return 1;
 }
 AZEXPORT void __cdecl azslAfterPresent(HRESULT hr){
