@@ -8,6 +8,7 @@ param(
     [switch]$NoJitter,
     [switch]$NRGuideProbe,
     [switch]$NRTemporalProbe,
+    [switch]$FGInputProbe,
     [ValidateSet('native','delta')][string]$HUD = 'native',
     [ValidateSet(0,1)][int]$DepthInverted=0,
     [ValidateSet(0,1)][int]$MVJittered=0,
@@ -81,6 +82,9 @@ if($PSBoundParameters.ContainsKey('VisibleSeconds') -and !$VisibleSR){throw '-Vi
 if($NoJitter){$PreviewJitter=$false}
 if($VisibleSR -and (!$PreviewSRReplay -or (!$PreviewJitter -and !$NoJitter))){throw '-VisibleSR requires -PreviewSRReplay and either -PreviewJitter or -NoJitter.'}
 if($VisibleSR -and $ExitAfterCapture -and !$AutoTest){throw 'For automatic VisibleSR shutdown use -AutoTest; otherwise omit -ExitAfterCapture.'}
+if($FGInputProbe){
+    if(!$AutoTest -or !$VisibleSR -or ($VisibleHDR -and !$HDRLive) -or $VisibleMarker -or $NRTemporalProbe){throw '-FGInputProbe requires live automatic VisibleSR/HDRLive, without marker or NRTemporalProbe.'}
+}
 if($NRTemporalProbe){
     if(!$VisibleSR -or ($VisibleHDR -and !$HDRLive)){throw '-NRTemporalProbe requires live VisibleSR or VisibleHDR + HDRLive.'}
     $NRGuideProbe=$true
@@ -308,7 +312,7 @@ try {
             $previous = (Get-Item -LiteralPath $log).LastWriteTimeUtc
             Copy-Item -LiteralPath $log -Destination (Join-Path $dest ($tag + '-previous.log'))
         }
-        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM','AZIMUTH_DEBUG_AUTO_RESOLVE','AZIMUTH_DEBUG_AUTO_TEST','AZIMUTH_DEBUG_PRODUCER_WAIT_MS','AZIMUTH_DEBUG_PRODUCER_GPU_WAIT','AZIMUTH_DEBUG_PRESENT_TRACE','AZIMUTH_DEBUG_AUTO_WARMUP_MS','AZIMUTH_DEBUG_AUTO_READY_FILE','AZIMUTH_SR_OUTPUT','AZIMUTH_SR_RENDER','AZIMUTH_SR_PRESET','AZIMUTH_DEBUG_NR_GUIDES','AZIMUTH_DEBUG_NR_TEMPORAL','AZIMUTH_SR_HUD','AZIMUTH_SR_DEPTH_INVERTED','AZIMUTH_SR_MV_JITTERED','AZIMUTH_SR_MV_SCALE_X','AZIMUTH_SR_MV_SCALE_Y','AZIMUTH_SR_PRE_EXPOSURE','AZIMUTH_SR_EXPOSURE_SCALE','AZIMUTH_SR_LOD_BIAS','AZIMUTH_SR_QUALITY','AZIMUTH_DEBUG_PREVIEW_POSTFX','AZIMUTH_DEBUG_PREVIEW_JITTER','AZIMUTH_DEBUG_POSTFX_REPLAY','AZIMUTH_DEBUG_SR_REPLAY','AZIMUTH_DEBUG_VISIBLE_SR','AZIMUTH_DEBUG_VISIBLE_HDR','AZIMUTH_DEBUG_HDR_LIVE','AZIMUTH_DEBUG_VISIBLE_MARKER','AZIMUTH_DEBUG_VISIBLE_SECONDS','AZIMUTH_DEBUG_QUEUE_TRACE')) {
+        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM','AZIMUTH_DEBUG_AUTO_RESOLVE','AZIMUTH_DEBUG_AUTO_TEST','AZIMUTH_DEBUG_PRODUCER_WAIT_MS','AZIMUTH_DEBUG_PRODUCER_GPU_WAIT','AZIMUTH_DEBUG_PRESENT_TRACE','AZIMUTH_DEBUG_AUTO_WARMUP_MS','AZIMUTH_DEBUG_AUTO_READY_FILE','AZIMUTH_SR_OUTPUT','AZIMUTH_SR_RENDER','AZIMUTH_SR_PRESET','AZIMUTH_DEBUG_NR_GUIDES','AZIMUTH_DEBUG_NR_TEMPORAL','AZIMUTH_DEBUG_FG_INPUT','AZIMUTH_SR_HUD','AZIMUTH_SR_DEPTH_INVERTED','AZIMUTH_SR_MV_JITTERED','AZIMUTH_SR_MV_SCALE_X','AZIMUTH_SR_MV_SCALE_Y','AZIMUTH_SR_PRE_EXPOSURE','AZIMUTH_SR_EXPOSURE_SCALE','AZIMUTH_SR_LOD_BIAS','AZIMUTH_SR_QUALITY','AZIMUTH_DEBUG_PREVIEW_POSTFX','AZIMUTH_DEBUG_PREVIEW_JITTER','AZIMUTH_DEBUG_POSTFX_REPLAY','AZIMUTH_DEBUG_SR_REPLAY','AZIMUTH_DEBUG_VISIBLE_SR','AZIMUTH_DEBUG_VISIBLE_HDR','AZIMUTH_DEBUG_HDR_LIVE','AZIMUTH_DEBUG_VISIBLE_MARKER','AZIMUTH_DEBUG_VISIBLE_SECONDS','AZIMUTH_DEBUG_QUEUE_TRACE')) {
             $oldEnv[$key] = [Environment]::GetEnvironmentVariable($key,'Process')
         }
         [Environment]::SetEnvironmentVariable('AZIMUTH_SR_MODE',$(if($Preview){'preview'}else{'debug'}),'Process')
@@ -319,6 +323,7 @@ try {
             $culture=[Globalization.CultureInfo]::InvariantCulture
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_NR_GUIDES',$(if($NRGuideProbe){'1'}else{'0'}),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_NR_TEMPORAL',$(if($NRTemporalProbe){'1'}else{'0'}),'Process')
+            [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_FG_INPUT',$(if($FGInputProbe){'1'}else{'0'}),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_SR_HUD',$HUD.ToLowerInvariant(),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_SR_DEPTH_INVERTED',[string]$DepthInverted,'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_SR_MV_JITTERED',[string]$MVJittered,'Process')
@@ -481,7 +486,7 @@ try {
     if($Preview){
         if($content -notmatch 'SR PREVIEW:' -and !$AutoTest){throw 'Log is not from preview mode.'}
         $total=0L
-        $rawRows=[regex]::Matches($content,'(?m)^PREVIEW FILE directory=(azimuth_preview_\d+_\d+) file=(f\d+-(?:color|depth|mv|sr|preoverlay|composite|final|replay|srpostfx|visiblehud|visiblefinal|hdrscene|hudprobe|finalprobe|hdrsrscene|stencil|guidecb)-(\d+)x(\d+)-fmt(\d+)\.raw) bytes=(\d+)\r?$')
+        $rawRows=[regex]::Matches($content,'(?m)^PREVIEW FILE directory=(azimuth_preview_\d+_\d+) file=(f\d+-(?:color|depth|mv|sr|preoverlay|composite|final|replay|srpostfx|visiblehud|visiblefinal|hdrscene|hudprobe|finalprobe|hdrsrscene|stencil|guidecb|fghudless)-(\d+)x(\d+)-fmt(\d+)\.raw) bytes=(\d+)\r?$')
         foreach($row in $rawRows){
             if($previewFiles.Count -ge $(if($NRGuideProbe){34}elseif($VisibleHDR){28}else{22})){break}
             $folder=Join-Path $game $row.Groups[1].Value
@@ -518,7 +523,7 @@ try {
         auto_ready = [bool]($content -match '(?m)^PREVIEW AUTO_READY ')
         visible_hdr_requested = [bool]$VisibleHDR; hdr_live_requested = [bool]$HDRLive
         sr_render_requested = $RenderSize; sr_preset_requested = $Preset; sr_no_jitter_requested = [bool]$NoJitter
-        nr_guide_probe_requested=[bool]$NRGuideProbe; nr_temporal_probe_requested=[bool]$NRTemporalProbe; sr_lod_bias_requested=$LodBias; sr_hud_requested=$HUD; sr_depth_inverted_requested=$DepthInverted; sr_mv_jittered_requested=$MVJittered; sr_mv_scale_requested=@($MVScaleX,$MVScaleY); sr_pre_exposure_requested=$PreExposure; sr_exposure_scale_requested=$ExposureScale
+        nr_guide_probe_requested=[bool]$NRGuideProbe; nr_temporal_probe_requested=[bool]$NRTemporalProbe; fg_input_probe_requested=[bool]$FGInputProbe; sr_lod_bias_requested=$LodBias; sr_hud_requested=$HUD; sr_depth_inverted_requested=$DepthInverted; sr_mv_jittered_requested=$MVJittered; sr_mv_scale_requested=@($MVScaleX,$MVScaleY); sr_pre_exposure_requested=$PreExposure; sr_exposure_scale_requested=$ExposureScale
         present_trace_requested = [bool]$PresentTrace; producer_gpu_wait_requested = [bool]$ProducerGpuWait
         visible_trial_complete = [bool]($content -match '(?m)^VISIBLE TRIAL_END ')
         visible_seconds_requested = $(if($VisibleSR){$VisibleSeconds}else{$null})
