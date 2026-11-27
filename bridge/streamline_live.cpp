@@ -134,10 +134,21 @@ bool rgb10(ID3D12Resource *r){
     return d.Dimension==D3D12_RESOURCE_DIMENSION_TEXTURE2D&&d.Width==ow&&d.Height==oh&&
       d.DepthOrArraySize==1&&d.MipLevels==1&&d.SampleDesc.Count==1&&d.Format==DXGI_FORMAT_R10G10B10A2_UNORM&&!(d.Flags&D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
 }
-uint64_t cookie(ID3D12Resource *r){
-    if(!rgb10(r))return 0;uint64_t v=0;UINT n=sizeof(v);
-    if(SUCCEEDED(r->GetPrivateData(cookie_guid,&n,&v))&&n==sizeof(v)&&v)return v;
-    v=++cookie_serial;return SUCCEEDED(r->SetPrivateData(cookie_guid,sizeof(v),&v))?v:0;
+// Optional bounded chain diagnostics; do not relax the lineage contract.
+struct CookieDiagnostic {
+    bool descriptor_ok=false,read_attempted=false,write_attempted=false;
+    HRESULT read_hr=E_PENDING,write_hr=E_PENDING;
+    UINT read_size=0;
+};
+uint64_t cookie(ID3D12Resource *r,CookieDiagnostic *diag=nullptr){
+    bool ok=rgb10(r);if(diag)diag->descriptor_ok=ok;
+    if(!ok)return 0;uint64_t v=0;UINT n=sizeof(v);
+    HRESULT hr=r->GetPrivateData(cookie_guid,&n,&v);
+    if(diag){diag->read_attempted=true;diag->read_hr=hr;diag->read_size=n;}
+    if(SUCCEEDED(hr)&&n==sizeof(v)&&v)return v;
+    v=++cookie_serial;hr=r->SetPrivateData(cookie_guid,sizeof(v),&v);
+    if(diag){diag->write_attempted=true;diag->write_hr=hr;}
+    return SUCCEEDED(hr)?v:0;
 }
 enum Kind { invalid,copy,cam,core,final };
 struct Op {Kind kind;uint64_t dst=0,src=0,packet=0;};
@@ -388,9 +399,33 @@ bool clone(ID3D12GraphicsCommandList *cl,ID3D12Resource *src,ComPtr<ID3D12Resour
 }
 bool chain_info(IDXGISwapChain1 *sc){
     if(sc!=managed)return false;ComPtr<IDXGISwapChain3> s;
+    // Called under lock. Limit detailed logging to the first eight checks
+    // of each generation (creation, resize, colorspace, and early Presents).
+    static uint64_t diagnostic_generation=0;
+    static unsigned diagnostic_checks=0;
+    if(diagnostic_generation!=generation){diagnostic_generation=generation;diagnostic_checks=0;}
+    bool trace=diagnostic_checks<8;
+    if(trace)++diagnostic_checks;
     DXGI_SWAP_CHAIN_DESC1 d{};
-    shape=SUCCEEDED(sc->QueryInterface(IID_PPV_ARGS(&s)))&&SUCCEEDED(s->GetDesc1(&d))&&d.Width==ow&&d.Height==oh&&d.Format==DXGI_FORMAT_R10G10B10A2_UNORM&&d.BufferCount==3;
-    bb={};if(shape)for(unsigned i=0;i<3;++i){ComPtr<ID3D12Resource> b;if(SUCCEEDED(s->GetBuffer(i,IID_PPV_ARGS(&b))))bb[i]=cookie(b.Get());if(!bb[i])shape=false;}
+    HRESULT qi=sc->QueryInterface(IID_PPV_ARGS(&s));
+    HRESULT desc_hr=SUCCEEDED(qi)&&s?s->GetDesc1(&d):E_PENDING;
+    bool desc_ok=SUCCEEDED(qi)&&s&&SUCCEEDED(desc_hr)&&d.Width==ow&&d.Height==oh&&d.Format==DXGI_FORMAT_R10G10B10A2_UNORM&&d.BufferCount==3;
+    shape=desc_ok;
+    bb={};
+    if(shape)for(unsigned i=0;i<3;++i){
+        ComPtr<ID3D12Resource> b;CookieDiagnostic diag;
+        HRESULT buffer_hr=s->GetBuffer(i,IID_PPV_ARGS(&b));
+        if(SUCCEEDED(buffer_hr))bb[i]=cookie(b.Get(),trace?&diag:nullptr);
+        if(!bb[i])shape=false;
+        if(trace){
+            D3D12_RESOURCE_DESC rd{};if(b)rd=b->GetDesc();
+            log("FG BUFFER_CHECK generation=%llu check=%u index=%u buffer=%p bufferHr=%08lx dimension=%u width=%llu height=%u array=%u mips=%u samples=%u format=%u flags=%u rgb10=%d cookieRead=%d cookieReadHr=%08lx cookieReadSize=%u cookieWrite=%d cookieWriteHr=%08lx cookie=%llu",
+                generation,diagnostic_checks,i,b.Get(),(unsigned long)buffer_hr,(unsigned)rd.Dimension,(unsigned long long)rd.Width,rd.Height,(unsigned)rd.DepthOrArraySize,(unsigned)rd.MipLevels,rd.SampleDesc.Count,(unsigned)rd.Format,(unsigned)rd.Flags,
+                diag.descriptor_ok,diag.read_attempted,(unsigned long)diag.read_hr,diag.read_size,diag.write_attempted,(unsigned long)diag.write_hr,(unsigned long long)bb[i]);
+        }
+    }
+    if(trace)log("FG CHAIN_CHECK generation=%llu check=%u chain=%p qiHr=%08lx descHr=%08lx width=%u height=%u format=%u buffers=%u descOK=%d shape=%d qpc=%lld",
+        generation,diagnostic_checks,sc,(unsigned long)qi,(unsigned long)desc_hr,d.Width,d.Height,(unsigned)d.Format,d.BufferCount,desc_ok,shape,qpc());
     return shape;
 }
 #include "streamline_camera.inl"
