@@ -107,7 +107,7 @@ static int visible_hdr_finalize(AzvisFrame *v,ID3D12GraphicsCommandList *cl,List
     v->hdr_scene=azvis_new_texture(1,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,D3D12_RESOURCE_STATE_RENDER_TARGET);
     if(mode==2)v->probe_final=azvis_new_texture(1,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,D3D12_RESOURCE_STATE_RENDER_TARGET);
     if(!v->merged||!v->hdr_scene||(mode==2&&!v->probe_final))return 0;
-    if(azvis_fg_probe&&capture&&mode==1)v->fg_hudless=azvis_new_texture(1,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,D3D12_RESOURCE_STATE_RENDER_TARGET);
+    if(mode==1&&((azvis_fg_probe&&capture)||(azsl_live_available()&&azsl_wants_final&&azsl_wants_final(resolve))))v->fg_hudless=azvis_new_texture(1,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,D3D12_RESOURCE_STATE_RENDER_TARGET);
     D3D12_DESCRIPTOR_HEAP_DESC hd={0};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=(mode==2?3u:2u)+(v->fg_hudless?1u:0u);
     if(!real_CreateDescriptorHeap||FAILED(real_CreateDescriptorHeap(g_device,&hd,&IID_ID3D12DescriptorHeap,(void **)&v->rtv))||!v->rtv)return 0;
     D3D12_CPU_DESCRIPTOR_HANDLE rtv[4];v->rtv->lpVtbl->GetCPUDescriptorHandleForHeapStart(v->rtv,&rtv[0]);
@@ -149,6 +149,7 @@ static int visible_hdr_finalize(AzvisFrame *v,ID3D12GraphicsCommandList *cl,List
     if(mode==2){log_msg("VISIBLE PROBE_FINAL_RECORDED resolve=%llu list=%p recording=%llu target=%p qpc=%lld nativePreserved=1 presentVerified=0 hdr=1",
         resolve,(void *)cl,v->recording,(void *)v->probe_final,azvis_qpc());return 2;}
     v->routed=1;v->target_id=(uintptr_t)target;
+    if(v->fg_hudless&&azsl_live_available()&&azsl_final)azsl_final(cl,target,v->fg_hudless,resolve,v->recording);
     log_msg("VISIBLE FINAL_RECORDED resolve=%llu list=%p recording=%llu target=%p qpc=%lld nativeFinalShader=1 marker=%d presentVerified=0 hdr=1",
         resolve,(void *)cl,v->recording,(void *)target,azvis_qpc(),azvis_marker);
     return 1;

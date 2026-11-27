@@ -258,6 +258,7 @@ void hooks_preview_record(ID3D12GraphicsCommandList *cl,ID3D12Resource *color,ID
     unsigned long long recording=s?s->trace_recording_id:0;
     ReleaseSRWLockExclusive(&azt_lock);
     if(!wanted&&!live)return;
+    if(live&&azsl_live_available()&&azsl_core&&recording)azsl_core(cl,depth,motion,(unsigned)read_state,resolve,recording,(uint64_t)mv_seq,reset,fresh_mv,jitter_used);
     AcquireSRWLockExclusive(&azpv_lock);
     preview_reap_live(resolve);
     for(unsigned i=0;i<AZPV_TOTAL;++i)if(azpv_groups[i].resolve==resolve)goto done;

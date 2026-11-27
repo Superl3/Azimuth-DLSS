@@ -42,6 +42,7 @@ template<class T> T *feature(PFun_slGetFeatureFunction *f,sl::Feature id,const c
     void *v=nullptr;return f(id,n,v)==sl::Result::eOk?reinterpret_cast<T*>(v):nullptr;
 }
 std::recursive_mutex lock;
+std::recursive_mutex submit_lock;
 FILE *logfile=nullptr;
 long long qpc(){LARGE_INTEGER t{};QueryPerformanceCounter(&t);return t.QuadPart;}
 void log(const char *fmt,...){
@@ -50,6 +51,7 @@ void log(const char *fmt,...){
     std::fputc('\n',logfile);std::fflush(logfile);
 }
 bool env(const wchar_t *n){wchar_t s[2];return GetEnvironmentVariableW(n,s,2)==1&&s[0]==L'1';}
+bool gameplay_gate(){wchar_t p[1024];DWORD n=GetEnvironmentVariableW(L"FH2_STREAMLINE_ACTIVE_FILE",p,1024);return n&&n<1024&&GetFileAttributesW(p)!=INVALID_FILE_ATTRIBUTES;}
 ComPtr<ID3D12Device> device;
 ComPtr<ID3D12CommandQueue> present_queue;
 IDXGISwapChain1 *managed=nullptr; // borrowed identity only, no permanent chain/buffer ref
@@ -294,8 +296,9 @@ bool wait_submitted(ID3D12CommandQueue *q,const Fence &f,ID3D12CommandQueue *pro
 // submitted producer fence before forwarding the native list.
 void STDMETHODCALLTYPE execute(ID3D12CommandQueue *q,UINT n,ID3D12CommandList *const *ls){
     auto fn=original<decltype(&execute)>(q,10);
-    std::lock_guard<std::recursive_mutex> guard(lock);
-    if(q->GetDesc().Type!=D3D12_COMMAND_LIST_TYPE_DIRECT){fn(q,n,ls);return;}
+    std::lock_guard<std::recursive_mutex> order(submit_lock);
+    std::unique_lock<std::recursive_mutex> guard(lock);
+    if(q->GetDesc().Type!=D3D12_COMMAND_LIST_TYPE_DIRECT){guard.unlock();fn(q,n,ls);return;}
     std::vector<Record*> used;
     std::vector<std::pair<uint64_t,Op>> ops;
     std::vector<Packet*> marked;
@@ -310,7 +313,7 @@ void STDMETHODCALLTYPE execute(ID3D12CommandQueue *q,UINT n,ID3D12CommandList *c
             else ops.push_back({r.id,o});}
         used.push_back(&r);
     }
-    if(ops.empty()){fn(q,n,ls);return;}
+    if(ops.empty()){guard.unlock();fn(q,n,ls);return;}
     uint64_t sub=++submission_serial;
     // The same native submission may contain both the final draw and copy.
     // New provenance has no fence until this Execute has actually forwarded.
@@ -336,7 +339,8 @@ void STDMETHODCALLTYPE execute(ID3D12CommandQueue *q,UINT n,ID3D12CommandList *c
         if(o.kind==core&&p->token)marker(sl::PCLMarker::eRenderSubmitStart,*p->token);
         log("FG STAGE_SUBMIT stage=%u resolve=%llu packet=%llu gameRecording=%llu nativeRecording=%llu submit=%llu queue=%p generation=%llu",unsigned(o.kind),p->resolve,p->id,s->game_record,rec,sub,q,generation);
     }
-    fn(q,n,ls);
+    // Never hold the lineage lock while forwarding into another proxy.
+    guard.unlock();fn(q,n,ls);guard.lock();
     for(auto *r:used)r->submitted=true;
     Fence f=signal(q);
     for(auto &[rec,o]:ops)if(auto *p=find_packet(o.packet)){
@@ -461,7 +465,7 @@ AZEXPORT void __cdecl azslChainChange(IDXGISwapChain1 *sc,int action,unsigned co
 }
 AZEXPORT uint64_t __cdecl azslCameraBegin(ID3D12Device *wrapper,ID3D12GraphicsCommandList *cl,uint64_t resolve,uint64_t recording,uint64_t seq,D3D12_CPU_DESCRIPTOR_HANDLE *rt){
     std::lock_guard<std::recursive_mutex> g(lock);
-    if(!initialized||fatal||!hdr||!shape||!rt||!resolve||!recording||!wrapper)return 0;
+    if(!initialized||fatal||!hdr||!shape||!rt||!resolve||!recording||!wrapper||!gameplay_gate())return 0;
     auto n=native<ID3D12GraphicsCommandList>(cl);
     if(!n||n.Get()==cl||!hook_list(n.Get()))return 0;
     auto &r=record(n.Get());if(!r.known||r.submitted)return 0;
@@ -523,7 +527,7 @@ AZEXPORT int __cdecl azslBeforePresent(IDXGISwapChain1 *sc,UINT flags,uint64_t c
     std::lock_guard<std::recursive_mutex> g(lock);
     if(sc!=managed||flags&DXGI_PRESENT_TEST||active.call)return 0;
     active={};active.call=call?call:UINT64_MAX;active.gen=generation;
-    if(!initialized||fatal||!hdr||!chain_info(sc)){off("chain_or_hooks");return 1;}
+    if(!initialized||fatal||!hdr||!chain_info(sc)||!gameplay_gate()){off("chain_or_hooks_or_gameplay_gate");return 1;}
     ComPtr<IDXGISwapChain3> s;if(FAILED(sc->QueryInterface(IID_PPV_ARGS(&s)))){off("chain3");return 1;}
     unsigned index=s->GetCurrentBackBufferIndex();active.index=index;
     if(index>=bb.size()){off("index");return 1;}
@@ -531,7 +535,7 @@ AZEXPORT int __cdecl azslBeforePresent(IDXGISwapChain1 *sc,UINT flags,uint64_t c
     lineage.erase(bb[index]); // consume once, never re-use old contents
     auto *p=find_packet(v.packet);
     if(!p||p->bad||p->presented||p->gen!=generation||v.gen!=generation||v.queue!=present_queue.Get()||
-      !v.fence||!p->camera.submitted||!p->core.submitted||!p->final.submitted){
+      !v.fence||!p->camera.submitted||!p->core.submitted||!p->final.submitted||!p->camera.retired||!p->core.retired||!p->final.retired){
         off("unproven_present_lineage");log("FG PRESENT_SKIP call=%llu generation=%llu index=%u cookie=%llu reason=lineage",call,generation,index,bb[index]);return 1;
     }
     // Only the 256-byte camera is CPU mapped, and only after its fence is
