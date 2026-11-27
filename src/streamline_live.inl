@@ -7,6 +7,7 @@ static _Thread_local int azsl_in_factory;
 static volatile LONG azsl_selected,azsl_profile_ready;
 static IDXGISwapChain1 *azsl_managed_chain;
 static int (__cdecl *azsl_ready)(void);
+static void (__cdecl *azsl_register_queue)(ID3D12CommandQueue *);
 static int (__cdecl *azsl_native_chain)(IDXGISwapChain1 *,IDXGISwapChain1 **);
 static void (__cdecl *azsl_change)(IDXGISwapChain1 *,int,unsigned,HRESULT);
 static uint64_t (__cdecl *azsl_camera_begin)(ID3D12Device *,ID3D12GraphicsCommandList *,uint64_t,uint64_t,uint64_t,D3D12_CPU_DESCRIPTOR_HANDLE *);
@@ -33,12 +34,12 @@ static int azsl_chain_probe(IDXGIFactory2 *factory,IUnknown *queue,HWND hwnd,con
     AzslCreate create=m?(AzslCreate)(void *)GetProcAddress(m,"azslCreateManagedHdrChain"):NULL;
     if(!create){log_msg("STREAMLINE CHAIN_PREPARE sidecar_not_loaded win32=%lu",(unsigned long)GetLastError());return 0;}
 #define AZSL_LOAD(name,exp) *(FARPROC *)&name=GetProcAddress(m,exp)
-    AZSL_LOAD(azsl_ready,"azslReady");AZSL_LOAD(azsl_native_chain,"azslNativeChain");AZSL_LOAD(azsl_change,"azslChainChange");
+    AZSL_LOAD(azsl_ready,"azslReady");AZSL_LOAD(azsl_register_queue,"azslRegisterQueue");AZSL_LOAD(azsl_native_chain,"azslNativeChain");AZSL_LOAD(azsl_change,"azslChainChange");
     AZSL_LOAD(azsl_camera_begin,"azslCameraBegin");AZSL_LOAD(azsl_camera_end,"azslCameraEnd");
     AZSL_LOAD(azsl_core,"azslCore");AZSL_LOAD(azsl_wants_final,"azslWantsFinal");AZSL_LOAD(azsl_final,"azslFinal");
     AZSL_LOAD(azsl_before,"azslBeforePresent");AZSL_LOAD(azsl_after,"azslAfterPresent");
 #undef AZSL_LOAD
-    if(!azsl_ready||!azsl_native_chain||!azsl_change||!azsl_camera_begin||!azsl_camera_end||
+    if(!azsl_ready||!azsl_register_queue||!azsl_native_chain||!azsl_change||!azsl_camera_begin||!azsl_camera_end||
        !azsl_core||!azsl_wants_final||!azsl_final||!azsl_before||!azsl_after){log_msg("STREAMLINE CHAIN_PREPARE missing_exports");return 0;}
     *chain=NULL;azsl_in_factory=1;
     *result=create(factory,queue,hwnd,desc,fullscreen,output,chain);

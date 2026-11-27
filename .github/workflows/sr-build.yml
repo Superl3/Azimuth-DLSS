@@ -113,6 +113,19 @@ jobs:
           test "$(git -C third_party/DLSS rev-parse HEAD)" = 9981c6350dc58c0ce21f024fd65e31e851c31689
           test -f third_party/DLSS/include/nvsdk_ngx.h
           test -f third_party/DLSS/lib/Windows_x86_64/x64/nvsdk_ngx_s.lib
+      - name: Fetch pinned Streamline 2.14.1 SDK headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p third_party/Streamline
+          git -C third_party/Streamline init
+          git -C third_party/Streamline remote add origin https://github.com/NVIDIA-RTX/Streamline.git
+          git -C third_party/Streamline sparse-checkout init --cone
+          git -C third_party/Streamline sparse-checkout set include
+          git -C third_party/Streamline fetch --depth 1 --filter=blob:none origin 2122257e0fce486f91b385aa63b9a09b0a34b363
+          git -C third_party/Streamline checkout --detach FETCH_HEAD
+          test "$(git -C third_party/Streamline rev-parse HEAD)" = 2122257e0fce486f91b385aa63b9a09b0a34b363
+          test -f third_party/Streamline/include/sl_dlss_g.h
       - name: Build NGX bridge using Visual Studio x64 tools
         shell: pwsh
         run: |
@@ -127,6 +140,8 @@ jobs:
           call bridge\build_bridge.bat
           if errorlevel 1 exit /b 1
           call bridge\build_fg_replay.bat
+          if errorlevel 1 exit /b %errorlevel%
+          call bridge\build_streamline_live.bat
           exit /b %errorlevel%
           "@ | Set-Content -Encoding ascii build-bridge-ci.cmd
           cmd /d /c build-bridge-ci.cmd
@@ -135,10 +150,10 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path sr-build -Force | Out-Null
-          Copy-Item build/dxgi.dll,build/azimuth_ngx.dll,build/azimuth_fg_replay.exe,LICENSE,LICENSE-NVIDIA-DLSS.txt,LICENSE-RENDERDOC.txt,docs/SR_EXPERIMENT.md -Destination sr-build
+          Copy-Item build/dxgi.dll,build/azimuth_ngx.dll,build/azimuth_fg_replay.exe,build/azimuth_streamline_live.dll,LICENSE,LICENSE-NVIDIA-DLSS.txt,LICENSE-RENDERDOC.txt,docs/SR_EXPERIMENT.md -Destination sr-build
           New-Item -ItemType Directory -Path sr-build/tools -Force | Out-Null
           Copy-Item tools/capture_sr.py,tools/analyze_sr_trace.py,tools/analyze_fg_trace.py,tools/analyze_debug_trace.py,tools/analyze_nr_guides.py,tools/run_fg_replay.py -Destination sr-build/tools
-          Copy-Item docs/CAPTURE_FH2.md,docs/FG_INTEGRATION.md,docs/FG_DIRECT_REPLAY.md,docs/DEBUG_CAPTURE.md -Destination sr-build
+          Copy-Item docs/CAPTURE_FH2.md,docs/FG_INTEGRATION.md,docs/FG_DIRECT_REPLAY.md,docs/FG_STREAMLINE_LIVE.md,docs/DEBUG_CAPTURE.md -Destination sr-build
           Copy-Item debug/Start-DebugCapture.cmd,debug/Start-DebugCapture.ps1,release/azimuth_sr.ini,docs/SR_PLAY.md,docs/SR_PROFILES.md -Destination sr-build
           Get-FileHash sr-build/*.dll,sr-build/azimuth_fg_replay.exe -Algorithm SHA256 | Format-Table -AutoSize | Out-String | Set-Content sr-build/SHA256.txt
       - uses: actions/upload-artifact@v4

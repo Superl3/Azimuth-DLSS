@@ -132,7 +132,7 @@ Packet *final_packet(uint64_t resolve){
 bool rgb10(ID3D12Resource *r){
     if(!r)return false;auto d=r->GetDesc();
     return d.Dimension==D3D12_RESOURCE_DIMENSION_TEXTURE2D&&d.Width==ow&&d.Height==oh&&
-      d.DepthOrArraySize==1&&d.MipLevels==1&&d.SampleDesc.Count==1&&d.Format==DXGI_FORMAT_R10G10B10A2_UNORM;
+      d.DepthOrArraySize==1&&d.MipLevels==1&&d.SampleDesc.Count==1&&d.Format==DXGI_FORMAT_R10G10B10A2_UNORM&&!(d.Flags&D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
 }
 uint64_t cookie(ID3D12Resource *r){
     if(!rgb10(r))return 0;uint64_t v=0;UINT n=sizeof(v);
@@ -161,7 +161,7 @@ void invalidate(ID3D12GraphicsCommandList *cl,uint64_t dst){if(dst)add(cl,{inval
 void retire(ID3D12GraphicsCommandList *cl){
     auto &r=record(cl);
     for(auto &p:ring)for(auto *s:{&p.camera,&p.core,&p.final})
-        if(s->record==r.id){s->retired=true;if(!s->submitted)p.bad=true;}
+        if(s->record==r.id){s->retired=true;if(!s->submitted){p.bad=true;if(s==&p.core){p.core_initialized=false;p.depth.Reset();p.mv.Reset();}if(s==&p.final){p.hud_initialized=false;p.hud.Reset();}}}
     r={};r.id=++recording_serial;r.known=true;
 }
 struct Patch{void **slot;void *original;};
@@ -449,6 +449,14 @@ AZEXPORT HRESULT __cdecl azslCreateManagedHdrChain(IDXGIFactory2 *factory,IUnkno
     log("FG OWNER managed=%p physical=%p queue=%p device=%p hooks=%d requested=%d generation=%llu",managed,base.Get(),present_queue.Get(),device.Get(),initialized,enabled,generation);
     *result=sc.Detach();return S_OK;
 }
+AZEXPORT void __cdecl azslRegisterQueue(ID3D12CommandQueue *wrapper){
+    if(!wrapper)return;
+    std::lock_guard<std::recursive_mutex> g(lock);
+    if(!initialized||fatal)return;
+    auto q=native<ID3D12CommandQueue>(wrapper);
+    if(!q||q.Get()==wrapper||q->GetDesc().Type!=D3D12_COMMAND_LIST_TYPE_DIRECT)return;
+    if(!patch(q.Get(),10,reinterpret_cast<void*>(&execute))){fatal=true;log("FG FATAL native_queue_hook_failed queue=%p",q.Get());}
+}
 AZEXPORT int __cdecl azslReady(){std::lock_guard<std::recursive_mutex> g(lock);return initialized&&!fatal&&hdr&&shape;}
 AZEXPORT int __cdecl azslNativeChain(IDXGISwapChain1 *sc,IDXGISwapChain1 **out){
     std::lock_guard<std::recursive_mutex> g(lock);if(!out||!get_native||sc!=managed)return 0;*out=nullptr;
@@ -540,7 +548,7 @@ AZEXPORT int __cdecl azslBeforePresent(IDXGISwapChain1 *sc,UINT flags,uint64_t c
     }
     // Only the 256-byte camera is CPU mapped, and only after its fence is
     // already complete. No CPU fence wait or color comparison on Present.
-    auto now=GetTickCount64();bool reset=!armed||p->reset||last_generation!=generation||last_resolve+1!=p->resolve||now-last_tick>250;
+    auto now=GetTickCount64();bool reset=!last_resolve||p->reset||last_generation!=generation||last_resolve+1!=p->resolve||now-last_tick>250;
     sl::Constants camera;
     if(!camera_constants(*p,camera,reset)||!wait_submitted(present_queue.Get(),p->core.fence,p->core.queue)||
        !wait_submitted(present_queue.Get(),p->final.fence,p->final.queue)){
