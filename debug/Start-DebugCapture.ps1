@@ -8,6 +8,11 @@ param(
     [switch]$NoJitter,
     [switch]$NRGuideProbe,
     [switch]$NRTemporalProbe,
+    [switch]$FGInputProbe,
+    [switch]$StreamlineFG,
+    [switch]$StreamlineControl,
+    [string]$StreamlineRuntime='',
+    [switch]$ConfirmSmoothMotionOff,
     [ValidateSet('native','delta')][string]$HUD = 'native',
     [ValidateSet(0,1)][int]$DepthInverted=0,
     [ValidateSet(0,1)][int]$MVJittered=0,
@@ -81,6 +86,18 @@ if($PSBoundParameters.ContainsKey('VisibleSeconds') -and !$VisibleSR){throw '-Vi
 if($NoJitter){$PreviewJitter=$false}
 if($VisibleSR -and (!$PreviewSRReplay -or (!$PreviewJitter -and !$NoJitter))){throw '-VisibleSR requires -PreviewSRReplay and either -PreviewJitter or -NoJitter.'}
 if($VisibleSR -and $ExitAfterCapture -and !$AutoTest){throw 'For automatic VisibleSR shutdown use -AutoTest; otherwise omit -ExitAfterCapture.'}
+if($FGInputProbe){
+    if(!$AutoTest -or !$VisibleSR -or ($VisibleHDR -and !$HDRLive) -or $VisibleMarker -or $NRTemporalProbe -or !$NoJitter -or $MVJittered){throw '-FGInputProbe requires live automatic VisibleSR/HDRLive, -NoJitter, MVJittered=0, without marker or NRTemporalProbe.'}
+}
+$streamlineTrial=[bool]($StreamlineFG -or $StreamlineControl)
+if($StreamlineFG -and $StreamlineControl){throw 'Choose either StreamlineFG or StreamlineControl.'}
+if($streamlineTrial){
+    if(!$AutoTest -or !$InstallProxy -or $ProxyMode -ne 'ReShade' -or !$VisibleHDR -or !$HDRLive -or !$NoJitter -or $HUD -ne 'delta' -or $Quality -ne 'quality' -or $Output -ne '3840x1600' -or ($RenderSize -and $RenderSize -ne '2592x1080') -or !$ReadyFile -or !$ConfirmSmoothMotionOff -or $FGInputProbe -or $NRTemporalProbe -or $NRGuideProbe -or $VisibleMarker -or $DepthInverted -or $MVJittered -or $MVScaleX -ne 1 -or $MVScaleY -ne 1){throw 'Streamline trial requires the fixed FH2 HDR Quality profile, HUD delta, NoJitter, ReShade, AutoTest, ReadyFile, ConfirmSmoothMotionOff; no other probes or guide overrides.'}
+    $RenderSize='2592x1080'
+    $PresentTrace=$true
+    if(!$StreamlineRuntime){throw 'Specify a separate official Streamline 2.14.1 runtime folder.'}
+    Write-Host 'Confirm NR Nexus evaluation OFF. Smooth Motion must be OFF for azimuth.exe only; the launcher does not edit NVIDIA profiles.'
+}
 if($NRTemporalProbe){
     if(!$VisibleSR -or ($VisibleHDR -and !$HDRLive)){throw '-NRTemporalProbe requires live VisibleSR or VisibleHDR + HDRLive.'}
     $NRGuideProbe=$true
@@ -134,6 +151,25 @@ $log = Join-Path $game 'azimuth_dlaa.log'
 $artifact = Join-Path $PSScriptRoot 'dxgi.dll'
 $bridge = Join-Path $game 'azimuth_ngx.dll'
 $bridgeArtifact = Join-Path $PSScriptRoot 'azimuth_ngx.dll'
+$streamlineSidecar=Join-Path $PSScriptRoot 'azimuth_streamline_live.dll'
+$streamlineManifest=@()
+if($streamlineTrial){
+    $StreamlineRuntime=(Resolve-Path -LiteralPath $StreamlineRuntime).Path
+    if($StreamlineRuntime -eq $game){throw 'Use a separate Streamline runtime folder, not the game folder.'}
+    if(!(Test-Path -LiteralPath $streamlineSidecar -PathType Leaf)){throw 'Missing matching azimuth_streamline_live.dll build artifact.'}
+    foreach($name in @('sl.interposer.dll','sl.common.dll','sl.dlss_g.dll','sl.reflex.dll','sl.pcl.dll','nvngx_dlssg.dll','nvngx_dlss.dll')){
+        $file=Join-Path $StreamlineRuntime $name
+        $item=Get-Item -LiteralPath $file
+        if($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw "Invalid runtime DLL: $name"}
+        $sig=Get-AuthenticodeSignature -LiteralPath $file
+        if($sig.Status -ne 'Valid' -or !$sig.SignerCertificate -or $sig.SignerCertificate.Subject -notmatch 'NVIDIA'){throw "Expected valid NVIDIA signature: $name"}
+        $version=$item.VersionInfo.FileVersion
+        if($name.StartsWith('sl.') -and $version -notmatch '^2[.,]\s*14[.,]\s*1([.,\s]|$)'){throw "Expected Streamline 2.14.1: $name ($version)"}
+        $streamlineManifest+= [ordered]@{name=$name;version=$version;sha256=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash;signature=$sig.Status.ToString();signer=$sig.SignerCertificate.Subject}
+    }
+    $gameSr=Join-Path $game 'nvngx_dlss.dll'
+    if(!(Test-Path -LiteralPath $gameSr -PathType Leaf) -or (Get-FileHash -LiteralPath $gameSr -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath (Join-Path $StreamlineRuntime 'nvngx_dlss.dll') -Algorithm SHA256).Hash){throw 'Use the byte-identical game SR runtime in Streamline search path; no implicit replacement.'}
+}
 if (!(Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'azimuth.exe not found' }
 if (Get-Process -Name azimuth -ErrorAction SilentlyContinue) { throw 'Close existing Azimuth instances before launching or collecting.' }
 if (!$Label) { $Label = Read-Host 'Capture label (for example FH2-native-HUD-on)' }
@@ -157,6 +193,8 @@ New-Item -ItemType Directory -Path $dest -Force | Out-Null
 $tag = $Label + '-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0,8)
 $stage = Join-Path $dest ($tag + '.tmp')
 $zip = Join-Path $dest ($tag + '.zip')
+$streamlineLogs=Join-Path $dest ($tag + '-streamline-logs')
+if($streamlineTrial){New-Item -ItemType Directory -Path $streamlineLogs | Out-Null}
 $backup = $null
 $installedHash = $null
 $installed = $false
@@ -308,9 +346,15 @@ try {
             $previous = (Get-Item -LiteralPath $log).LastWriteTimeUtc
             Copy-Item -LiteralPath $log -Destination (Join-Path $dest ($tag + '-previous.log'))
         }
-        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM','AZIMUTH_DEBUG_AUTO_RESOLVE','AZIMUTH_DEBUG_AUTO_TEST','AZIMUTH_DEBUG_PRODUCER_WAIT_MS','AZIMUTH_DEBUG_PRODUCER_GPU_WAIT','AZIMUTH_DEBUG_PRESENT_TRACE','AZIMUTH_DEBUG_AUTO_WARMUP_MS','AZIMUTH_DEBUG_AUTO_READY_FILE','AZIMUTH_SR_OUTPUT','AZIMUTH_SR_RENDER','AZIMUTH_SR_PRESET','AZIMUTH_DEBUG_NR_GUIDES','AZIMUTH_DEBUG_NR_TEMPORAL','AZIMUTH_SR_HUD','AZIMUTH_SR_DEPTH_INVERTED','AZIMUTH_SR_MV_JITTERED','AZIMUTH_SR_MV_SCALE_X','AZIMUTH_SR_MV_SCALE_Y','AZIMUTH_SR_PRE_EXPOSURE','AZIMUTH_SR_EXPOSURE_SCALE','AZIMUTH_SR_LOD_BIAS','AZIMUTH_SR_QUALITY','AZIMUTH_DEBUG_PREVIEW_POSTFX','AZIMUTH_DEBUG_PREVIEW_JITTER','AZIMUTH_DEBUG_POSTFX_REPLAY','AZIMUTH_DEBUG_SR_REPLAY','AZIMUTH_DEBUG_VISIBLE_SR','AZIMUTH_DEBUG_VISIBLE_HDR','AZIMUTH_DEBUG_HDR_LIVE','AZIMUTH_DEBUG_VISIBLE_MARKER','AZIMUTH_DEBUG_VISIBLE_SECONDS','AZIMUTH_DEBUG_QUEUE_TRACE')) {
+        foreach ($key in @('AZIMUTH_SR_MODE','AZIMUTH_DEBUG_RENDERDOC','AZIMUTH_DEBUG_SHADER_DISASM','AZIMUTH_DEBUG_AUTO_RESOLVE','AZIMUTH_DEBUG_AUTO_TEST','AZIMUTH_DEBUG_PRODUCER_WAIT_MS','AZIMUTH_DEBUG_PRODUCER_GPU_WAIT','AZIMUTH_DEBUG_PRESENT_TRACE','AZIMUTH_DEBUG_AUTO_WARMUP_MS','AZIMUTH_DEBUG_AUTO_READY_FILE','AZIMUTH_SR_OUTPUT','AZIMUTH_SR_RENDER','AZIMUTH_SR_PRESET','AZIMUTH_DEBUG_NR_GUIDES','AZIMUTH_DEBUG_NR_TEMPORAL','AZIMUTH_DEBUG_FG_INPUT','AZIMUTH_SR_HUD','AZIMUTH_SR_DEPTH_INVERTED','AZIMUTH_SR_MV_JITTERED','AZIMUTH_SR_MV_SCALE_X','AZIMUTH_SR_MV_SCALE_Y','AZIMUTH_SR_PRE_EXPOSURE','AZIMUTH_SR_EXPOSURE_SCALE','AZIMUTH_SR_LOD_BIAS','AZIMUTH_SR_QUALITY','AZIMUTH_DEBUG_PREVIEW_POSTFX','AZIMUTH_DEBUG_PREVIEW_JITTER','AZIMUTH_DEBUG_POSTFX_REPLAY','AZIMUTH_DEBUG_SR_REPLAY','AZIMUTH_DEBUG_VISIBLE_SR','AZIMUTH_DEBUG_VISIBLE_HDR','AZIMUTH_DEBUG_HDR_LIVE','AZIMUTH_DEBUG_VISIBLE_MARKER','AZIMUTH_DEBUG_VISIBLE_SECONDS','AZIMUTH_DEBUG_QUEUE_TRACE','FH2_STREAMLINE_CHAIN_PROBE','FH2_STREAMLINE_RUNTIME','FH2_STREAMLINE_LOGS','FH2_STREAMLINE_NATIVE_SR','FH2_STREAMLINE_LIVE_FG','FH2_STREAMLINE_ACTIVE_FILE')) {
             $oldEnv[$key] = [Environment]::GetEnvironmentVariable($key,'Process')
         }
+        [Environment]::SetEnvironmentVariable('FH2_STREAMLINE_CHAIN_PROBE',$(if($streamlineTrial){$streamlineSidecar}else{$null}),'Process')
+        [Environment]::SetEnvironmentVariable('FH2_STREAMLINE_RUNTIME',$(if($streamlineTrial){$StreamlineRuntime}else{$null}),'Process')
+        [Environment]::SetEnvironmentVariable('FH2_STREAMLINE_LOGS',$(if($streamlineTrial){$streamlineLogs}else{$null}),'Process')
+        [Environment]::SetEnvironmentVariable('FH2_STREAMLINE_NATIVE_SR',$(if($streamlineTrial){'1'}else{$null}),'Process')
+        [Environment]::SetEnvironmentVariable('FH2_STREAMLINE_LIVE_FG',$(if($StreamlineFG){'1'}elseif($streamlineTrial){'0'}else{$null}),'Process')
+        [Environment]::SetEnvironmentVariable('FH2_STREAMLINE_ACTIVE_FILE',$(if($streamlineTrial){$ReadyFile}else{$null}),'Process')
         [Environment]::SetEnvironmentVariable('AZIMUTH_SR_MODE',$(if($Preview){'preview'}else{'debug'}),'Process')
         if($Preview){
             [Environment]::SetEnvironmentVariable('AZIMUTH_SR_OUTPUT',$Output,'Process')
@@ -319,6 +363,7 @@ try {
             $culture=[Globalization.CultureInfo]::InvariantCulture
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_NR_GUIDES',$(if($NRGuideProbe){'1'}else{'0'}),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_NR_TEMPORAL',$(if($NRTemporalProbe){'1'}else{'0'}),'Process')
+            [Environment]::SetEnvironmentVariable('AZIMUTH_DEBUG_FG_INPUT',$(if($FGInputProbe){'1'}else{'0'}),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_SR_HUD',$HUD.ToLowerInvariant(),'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_SR_DEPTH_INVERTED',[string]$DepthInverted,'Process')
             [Environment]::SetEnvironmentVariable('AZIMUTH_SR_MV_JITTERED',[string]$MVJittered,'Process')
@@ -433,6 +478,17 @@ try {
     New-Item -ItemType Directory -Path $stage | Out-Null
     $stageCreated = $true
     Copy-Item -LiteralPath $log -Destination (Join-Path $stage 'azimuth_dlaa.log')
+    if($streamlineTrial){
+        $streamlineManifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $stage 'streamline-runtime.json') -Encoding UTF8
+        foreach($name in @('fg-live.log','sl.log')){
+            $file=Join-Path $streamlineLogs $name
+            if(Test-Path -LiteralPath $file -PathType Leaf){
+                $item=Get-Item -LiteralPath $file
+                if($item.Length -le 64MB -and !($item.Attributes -band [IO.FileAttributes]::ReparsePoint)){Copy-Item -LiteralPath $file -Destination (Join-Path $stage $name)}
+                else{Write-Warning "Keep oversized/unsafe log outside capture ZIP: $file"}
+            }
+        }
+    }
     if($NRLogPath -and (Test-Path -LiteralPath $NRLogPath -PathType Leaf)){
         $nrFile=Get-Item -LiteralPath $NRLogPath
         if(!($nrFile.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $nrFile.Length -le 134217728){
@@ -481,7 +537,7 @@ try {
     if($Preview){
         if($content -notmatch 'SR PREVIEW:' -and !$AutoTest){throw 'Log is not from preview mode.'}
         $total=0L
-        $rawRows=[regex]::Matches($content,'(?m)^PREVIEW FILE directory=(azimuth_preview_\d+_\d+) file=(f\d+-(?:color|depth|mv|sr|preoverlay|composite|final|replay|srpostfx|visiblehud|visiblefinal|hdrscene|hudprobe|finalprobe|hdrsrscene|stencil|guidecb)-(\d+)x(\d+)-fmt(\d+)\.raw) bytes=(\d+)\r?$')
+        $rawRows=[regex]::Matches($content,'(?m)^PREVIEW FILE directory=(azimuth_preview_\d+_\d+) file=(f\d+-(?:color|depth|mv|sr|preoverlay|composite|final|replay|srpostfx|visiblehud|visiblefinal|hdrscene|hudprobe|finalprobe|hdrsrscene|stencil|guidecb|fghudless)-(\d+)x(\d+)-fmt(\d+)\.raw) bytes=(\d+)\r?$')
         foreach($row in $rawRows){
             if($previewFiles.Count -ge $(if($NRGuideProbe){34}elseif($VisibleHDR){28}else{22})){break}
             $folder=Join-Path $game $row.Groups[1].Value
@@ -517,8 +573,9 @@ try {
         auto_gate_open = [bool]($content -match '(?m)^PREVIEW AUTO_GATE_OPEN ')
         auto_ready = [bool]($content -match '(?m)^PREVIEW AUTO_READY ')
         visible_hdr_requested = [bool]$VisibleHDR; hdr_live_requested = [bool]$HDRLive
+        streamline_fg_requested=[bool]$StreamlineFG; streamline_control_requested=[bool]$StreamlineControl; smooth_motion_off_operator_confirmed=[bool]$ConfirmSmoothMotionOff; streamline_sidecar_sha256=$(if($streamlineTrial){(Get-FileHash -LiteralPath $streamlineSidecar -Algorithm SHA256).Hash}else{$null})
         sr_render_requested = $RenderSize; sr_preset_requested = $Preset; sr_no_jitter_requested = [bool]$NoJitter
-        nr_guide_probe_requested=[bool]$NRGuideProbe; nr_temporal_probe_requested=[bool]$NRTemporalProbe; sr_lod_bias_requested=$LodBias; sr_hud_requested=$HUD; sr_depth_inverted_requested=$DepthInverted; sr_mv_jittered_requested=$MVJittered; sr_mv_scale_requested=@($MVScaleX,$MVScaleY); sr_pre_exposure_requested=$PreExposure; sr_exposure_scale_requested=$ExposureScale
+        nr_guide_probe_requested=[bool]$NRGuideProbe; nr_temporal_probe_requested=[bool]$NRTemporalProbe; fg_input_probe_requested=[bool]$FGInputProbe; sr_lod_bias_requested=$LodBias; sr_hud_requested=$HUD; sr_depth_inverted_requested=$DepthInverted; sr_mv_jittered_requested=$MVJittered; sr_mv_scale_requested=@($MVScaleX,$MVScaleY); sr_pre_exposure_requested=$PreExposure; sr_exposure_scale_requested=$ExposureScale
         present_trace_requested = [bool]$PresentTrace; producer_gpu_wait_requested = [bool]$ProducerGpuWait
         visible_trial_complete = [bool]($content -match '(?m)^VISIBLE TRIAL_END ')
         visible_seconds_requested = $(if($VisibleSR){$VisibleSeconds}else{$null})

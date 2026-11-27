@@ -11,6 +11,7 @@
 #include "common.h"
 #include "replay_profile.h"
 #include "lod_policy.h"
+#include "reshade_native.h"
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
@@ -34,6 +35,7 @@ static PfnNgxResultString p_result_string;
 static int load_failed;
 static int ngx_ready;
 static int ngx_failed;
+static int ngx_use_native_interfaces;
 
 static ID3D12Device *device;
 static UINT ctx_w, ctx_h;
@@ -376,7 +378,16 @@ static int ensure_ready(UINT w, UINT h) {
         wchar_t dir[MAX_PATH];
         exe_dir(dir);
         int r = 0;
-        if (!p_init(device, dir, &r)) {
+        wchar_t flag[2];
+        ngx_use_native_interfaces=GetEnvironmentVariableW(L"FH2_STREAMLINE_NATIVE_SR",flag,2)==1&&flag[0]==L'1';
+        ID3D12Device *native_device=NULL;
+        if(ngx_use_native_interfaces&&FAILED(az_reshade_native((IUnknown *)device,&IID_ID3D12Device,(void **)&native_device))){
+            log_msg("STREAMLINE SR_NATIVE_DEVICE unavailable");ngx_failed=1;return 0;
+        }
+        if(native_device)log_msg("STREAMLINE SR_NATIVE_DEVICE wrapper=%p native=%p",(void *)device,(void *)native_device);
+        int inited=p_init(native_device?native_device:device,dir,&r);
+        if(native_device)ID3D12Device_Release(native_device);
+        if(!inited){
             log_msg("DLSS: NGX init failed (%s, 0x%08x). Needs an NVIDIA RTX GPU, a recent driver and nvngx_dlss.dll.",
                     p_result_string(r), (unsigned)r);
             ngx_failed = 1;
@@ -526,6 +537,12 @@ int dlss_run(ID3D12GraphicsCommandList *cl, ID3D12Resource *color, D3D12_RESOURC
         }
         sr_last_evaluate_ms=now;
     }
+    ID3D12GraphicsCommandList *native_cl=NULL;
+    if(ngx_use_native_interfaces&&FAILED(az_reshade_native((IUnknown *)cl,&IID_ID3D12GraphicsCommandList,(void **)&native_cl))){
+        log_msg("STREAMLINE SR_NATIVE_COMMAND_LIST unavailable");sr_blocked=1;return 0;
+    }
+    if(native_cl){static int reported;if(!reported++)log_msg("STREAMLINE SR_NATIVE_COMMAND_LIST wrapper=%p native=%p",(void *)cl,(void *)native_cl);}
+    ID3D12GraphicsCommandList *ngx_list=native_cl?native_cl:cl;
     /* Everything DLSS reads goes to a shader-read state. */
     if (color_state != READ_STATE) {
         hooks_transition(cl, color, color_state, READ_STATE);
@@ -543,7 +560,7 @@ int dlss_run(ID3D12GraphicsCommandList *cl, ID3D12Resource *color, D3D12_RESOURC
     if (sr_mode >= AZSR_PROBE) {
         float sx=(float)w*sr_guides.mv_scale_x,sy=(float)h*sr_guides.mv_scale_y;
         int reset=need_reset!=0;
-        ok = p_evaluate_sr(cl,color,depth,motion,out_tex,w,h,ow,oh,(int)sr_quality,
+        ok = p_evaluate_sr(ngx_list,color,depth,motion,out_tex,w,h,ow,oh,(int)sr_quality,
                           jitter_used ? jx : 0.0f,jitter_used ? jy : 0.0f,sx,sy,reset,&r);
         if(sr_guide_log_budget||!ok||reset){
             if(sr_guide_log_budget)--sr_guide_log_budget;
@@ -552,9 +569,10 @@ int dlss_run(ID3D12GraphicsCommandList *cl, ID3D12Resource *color, D3D12_RESOURC
                 (double)(jitter_used?jx:0),(double)(jitter_used?jy:0),sr_guides.depth_inverted,sr_guides.mv_jittered,reset,fresh_mv,(double)sr_guides.pre_exposure,(double)sr_guides.exposure_scale,ok,(unsigned)r);
         }
     } else {
-        ok = p_evaluate(cl, color, depth, motion, out_tex, w, h, jitter_used ? jx : 0.0f, jitter_used ? jy : 0.0f,
+        ok = p_evaluate(ngx_list, color, depth, motion, out_tex, w, h, jitter_used ? jx : 0.0f, jitter_used ? jy : 0.0f,
                         (float)w, (float)h, need_reset != 0, &r);
     }
+    if(native_cl)ID3D12GraphicsCommandList_Release(native_cl);
     if(decision==AZSR_EVALUATE_ONLY){
         static unsigned probe_samples;
         if(probe_samples<12||!ok){

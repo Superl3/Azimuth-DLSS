@@ -231,6 +231,7 @@ static void (STDMETHODCALLTYPE *dbg_real_execute)(ID3D12CommandQueue *,UINT,ID3D
 static HRESULT (STDMETHODCALLTYPE *dbg_real_signal)(ID3D12CommandQueue *,ID3D12Fence *,UINT64);
 static HRESULT (STDMETHODCALLTYPE *dbg_real_wait)(ID3D12CommandQueue *,ID3D12Fence *,UINT64);
 static void STDMETHODCALLTYPE dbg_execute(ID3D12CommandQueue *q,UINT n,ID3D12CommandList *const *lists) {
+    if(azsl_register_queue&&azsl_managed_chain)azsl_register_queue(q);
     AcquireSRWLockExclusive(&azt_lock);
     if(azdbg_aux_locked()){
         log_msg("DEBUG SUBMIT id=%u resolve=%llu queue=%p count=%u",azdbg.id,azt_frame,(void *)q,n);

@@ -58,6 +58,8 @@ void log_msg(const char *fmt, ...) {
     LeaveCriticalSection(&log_lock);
 }
 
+#include "streamline_live.inl"
+
 /* ---------------------------------------------------------------- patching */
 
 static void patch_slot(void **slot, void *hook, void **original) {
@@ -287,7 +289,7 @@ static void remember_pso(ID3D12PipelineState *pso, ID3D12PipelineState *variant,
 /* The two diagnostic variants are private and never change NGX motion.
    Only exact FH2 native velocity PS and matching original PSO state. */
 static void azguide_build(const GameProfile *profile,const D3D12_GRAPHICS_PIPELINE_STATE_DESC *mv,ID3D12PipelineState *original){
-    if(!azguide_enabled||strcmp(profile->id,"fh2"))return;
+    if((!azguide_enabled&&!azsl_requested())||strcmp(profile->id,"fh2"))return;
     D3D12_GRAPHICS_PIPELINE_STATE_DESC d=*mv;
     d.RTVFormats[0]=DXGI_FORMAT_R32_FLOAT;
     ID3D12PipelineState *out[2]={0};
@@ -975,6 +977,32 @@ static void azguide_record(ID3D12GraphicsCommandList *cl,ListState *s,UINT w,UIN
     log_msg("NR GUIDE_RECORDED resolve=%llu recording=%llu list=%p mvSeq=%llu size=%ux%u stencil=%p constants=%p cameraAndExposureCandidate=1",
         resolve,recording,(void *)cl,g->seq,w,h,(void *)g->stencil,(void *)g->constants);
 }
+/* Render only the validated 64x1 camera shader into a sidecar ring slot. */
+static void azsl_record_camera(ID3D12GraphicsCommandList *cl,ListState *s,UINT w,UINT h,UINT vc,UINT ic,UINT sv,UINT si){
+    if(!azsl_live_available()||!azsl_camera_begin||!azsl_camera_end||w!=2592||h!=1080||vc!=3||ic!=1||sv||si||
+       !s||s->trace_predicated||s->trace_queries||s->trace_query_unknown||
+       s->trace_topology!=D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST||cl->lpVtbl->GetType(cl)!=D3D12_COMMAND_LIST_TYPE_DIRECT)return;
+    AcquireSRWLockExclusive(&azt_lock);
+    int active=azvis_window_locked()&&!azt_incomplete;
+    uint64_t resolve=azt_frame+1;
+    if(active&&!s->trace_recording_id)s->trace_recording_id=++azt_generation;
+    uint64_t recording=s->trace_recording_id;
+    ReleaseSRWLockExclusive(&azt_lock);
+    if(!active||!recording)return;
+    ID3D12PipelineState *p=NULL;
+    AcquireSRWLockShared(&pso_lock);
+    for(unsigned i=0;i<MAX_VARIANTS;++i)if(azguide_psos[i].original==s->pso){p=azguide_psos[i].constants;break;}
+    ReleaseSRWLockShared(&pso_lock);
+    if(!p)return;
+    D3D12_CPU_DESCRIPTOR_HANDLE rt={0};
+    uint64_t id=azsl_camera_begin(g_device,cl,resolve,recording,(uint64_t)mv_seq+1,&rt);
+    if(!id)return;
+    D3D12_VIEWPORT vp={0,0,64,1,0,1};D3D12_RECT sc={0,0,64,1};
+    real_SetPipelineState(cl,p);real_OMSetRenderTargets(cl,1,&rt,FALSE,NULL);
+    real_RSSetViewports(cl,1,&vp);real_RSSetScissorRects(cl,1,&sc);real_DrawInstanced(cl,3,1,0,0);
+    azsl_camera_end(cl,id);
+    log_msg("FG CAMERA_RECORD resolve=%llu packet=%llu recording=%llu mvSeq=%llu",resolve,id,recording,(uint64_t)mv_seq+1);
+}
 static void record_mv_pass(ID3D12GraphicsCommandList *cl, ListState *s, ID3D12PipelineState *variant,
                            UINT vc, UINT ic, UINT sv, UINT si) {
     const GameProfile *profile = game_profile_active();
@@ -996,6 +1024,7 @@ static void record_mv_pass(ID3D12GraphicsCommandList *cl, ListState *s, ID3D12Pi
         real_DrawInstanced(cl, vc, ic, sv, si);
         transition(cl, mv_tex, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         if(azguide_enabled)azguide_record(cl,s,w,h,vc,ic,sv,si);
+        if(azsl_live_available())azsl_record_camera(cl,s,w,h,vc,ic,sv,si);
         /* Restore the game's state exactly as it set it. */
         real_SetPipelineState(cl, s->pso);
         real_OMSetRenderTargets(cl, s->num_rtv, s->num_rtv ? s->rtv : NULL, s->rtv_single,
@@ -1426,8 +1455,10 @@ static HRESULT STDMETHODCALLTYPE hook_CreateSwapChainForHwnd(IDXGIFactory2 *f, I
                                                              const DXGI_SWAP_CHAIN_DESC1 *desc,
                                                              const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *fs,
                                                              IDXGIOutput *out, IDXGISwapChain1 **sc) {
+    if(azsl_in_factory)return real_CreateSwapChainForHwnd(f,device,hwnd,desc,fs,out,sc);
     uint64_t attempt=visible_create_begin(hwnd,device,desc,fs);
-    HRESULT hr = real_CreateSwapChainForHwnd(f, device, hwnd, desc, fs, out, sc);
+    HRESULT hr;
+    if(!azsl_chain_probe(f,device,hwnd,desc,fs,out,sc,&hr))hr=real_CreateSwapChainForHwnd(f,device,hwnd,desc,fs,out,sc);
     if(attempt)log_msg("VISIBLE SWAPCHAIN_RESULT attempt=%llu hwnd=%p hr=%08lx chain=%p qpc=%lld",
         (unsigned long long)attempt,(void *)hwnd,(unsigned long)hr,SUCCEEDED(hr)&&sc?(void *)*sc:NULL,azvis_qpc());
     if (SUCCEEDED(hr) && sc && *sc) {
@@ -1438,6 +1469,8 @@ static HRESULT STDMETHODCALLTYPE hook_CreateSwapChainForHwnd(IDXGIFactory2 *f, I
         fg_trace_swapchain(*sc,device,&snapshot);
         if(attempt)visible_note_chain(attempt,(uintptr_t)hwnd,(uintptr_t)*sc,&snapshot);
         azdx_install(*sc);
+        if(*sc==azsl_managed_chain&&azsl_native_chain){IDXGISwapChain1 *physical=NULL;
+            if(azsl_native_chain(*sc,&physical)&&physical){azdx_install(physical);IDXGISwapChain1_Release(physical);}}
     }
     return hr;
 }
