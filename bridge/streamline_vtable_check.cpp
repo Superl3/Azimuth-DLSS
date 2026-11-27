@@ -13,3 +13,11 @@ SLOT(ID3D12GraphicsCommandList,ClearRenderTargetView,48);SLOT(ID3D12GraphicsComm
 SLOT(ID3D12GraphicsCommandList,ClearUnorderedAccessViewFloat,50);SLOT(ID3D12GraphicsCommandList,DiscardResource,51);
 SLOT(ID3D12Device,CreateRenderTargetView,20);SLOT(ID3D12Device,CopyDescriptors,23);
 SLOT(ID3D12Device,CopyDescriptorsSimple,24);SLOT(ID3D12CommandQueue,ExecuteCommandLists,10);
+
+SLOT(ID3D12GraphicsCommandList,Dispatch,14);SLOT(ID3D12GraphicsCommandList,SetPipelineState,25);
+SLOT(ID3D12GraphicsCommandList,SetDescriptorHeaps,28);SLOT(ID3D12GraphicsCommandList,SetComputeRootSignature,29);
+SLOT(ID3D12GraphicsCommandList,SetGraphicsRootSignature,30);SLOT(ID3D12GraphicsCommandList,SetComputeRootDescriptorTable,31);
+SLOT(ID3D12GraphicsCommandList,SetGraphicsRootDescriptorTable,32);
+SLOT(ID3D12Device,CreateDescriptorHeap,14);SLOT(ID3D12Device,CreateRootSignature,16);
+SLOT(ID3D12Device,CreateConstantBufferView,17);SLOT(ID3D12Device,CreateShaderResourceView,18);SLOT(ID3D12Device,CreateUnorderedAccessView,19);
+SLOT(ID3D12CommandQueue,Signal,14);SLOT(ID3D12CommandQueue,Wait,15);

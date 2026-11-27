@@ -112,6 +112,7 @@ Packet *allocate(uint64_t resolve,uint64_t seq){
         if(p.id&&!p.quarantined&&p.camera.safe()&&p.core.safe()&&p.final.safe()&&
           (!p.tagged||(!p.quarantined&&p.consumption.done()))&&
           (p.bad||p.presented||p.gen!=generation||resolve>p.resolve+slots)){
+            if(p.probe_only)log("FG PROBE_RETIRE resolve=%llu packet=%llu generation=%llu cameraSubmitted=%d cameraDone=%d coreSubmitted=%d coreDone=%d finalSubmitted=%d finalDone=%d bad=%d qpc=%lld",p.resolve,p.id,p.gen,p.camera.submitted,p.camera.fence.done(),p.core.submitted,p.core.fence.done(),p.final.submitted,p.final.fence.done(),p.bad,qpc());
             reset_metadata(p);
         }
         if(!p.id){p.id=++serial;p.resolve=resolve;p.seq=seq;p.gen=generation;p.probe_only=uav_probe;return &p;}
@@ -172,9 +173,24 @@ uint64_t observed_cookie(ID3D12Resource *r){
       std::find(probe_bb.begin(),probe_bb.end(),v)!=probe_bb.end()?v:0;
 }
 uint64_t write_cookie(ID3D12Resource *r){auto c=cookie(r);return c?c:observed_cookie(r);}
+// Diagnostic-only native work metadata. No resource/heap COM references retained.
+struct ProbeHeap { SIZE_T cpu=0; uint64_t gpu=0; UINT count=0,inc=0; };
+struct ProbeView { uint64_t identity=0; unsigned kind=0,format=0; };
+struct ProbeRange { unsigned root=0,kind=0,reg=0,space=0,offset=0,count=0; };
+struct ProbeRoot { std::vector<ProbeRange> ranges; bool complete=false; };
+struct ProbeBinding { SIZE_T cpu=0; uint64_t gpu=0; unsigned root=0,kind=0,reg=0,space=0; ProbeView at_record; };
+struct ProbeWork {
+    const char *method=nullptr; uint64_t dst=0; uintptr_t pso=0,root=0;
+    unsigned a=0,b=0,c=0,ordinal=0; bool root_known=false,truncated=false;
+    std::vector<ProbeBinding> bindings;
+};
+struct ProbeState {
+    uintptr_t pso=0,graphics_root=0,compute_root=0;
+    ProbeHeap heap; std::array<uint64_t,64> graphics{},compute{};
+};
 enum Kind { invalid,copy,cam,core,final,probe_full_copy,probe_other_copy };
-struct Op {Kind kind;uint64_t dst=0,src=0,packet=0;};
-struct Record {uint64_t id=0;bool known=false,submitted=false;std::vector<Op> ops;std::array<uint64_t,8> rt{};};
+struct Op {Kind kind;uint64_t dst=0,src=0,packet=0;const char *reason=nullptr;unsigned a=0,b=0,c=0;};
+struct Record {uint64_t id=0;bool known=false,submitted=false;std::vector<Op> ops;std::array<uint64_t,8> rt{};ProbeState probe;std::vector<ProbeWork> work;};
 struct Provenance {uint64_t packet=0,record=0,submit=0,gen=0;ID3D12CommandQueue *queue=nullptr;Fence fence;};
 std::unordered_map<ID3D12GraphicsCommandList*,Record> records;
 std::unordered_map<uint64_t,Provenance> lineage;
@@ -190,7 +206,7 @@ void add(ID3D12GraphicsCommandList *cl,Op op){
     if(r.ops.size()>=4096){fatal=true;return;}
     r.ops.push_back(op);
 }
-void invalidate(ID3D12GraphicsCommandList *cl,uint64_t dst){if(dst)add(cl,{invalid,dst,0,0});}
+void invalidate(ID3D12GraphicsCommandList *cl,uint64_t dst,const char *reason=nullptr,unsigned a=0,unsigned b=0,unsigned c=0){if(dst)add(cl,{invalid,dst,0,0,reason,a,b,c});}
 void retire(ID3D12GraphicsCommandList *cl){
     auto &r=record(cl);
     for(auto &p:ring)for(auto *s:{&p.camera,&p.core,&p.final})
@@ -215,11 +231,12 @@ bool patch(void *o,unsigned n,void *fn){
     VirtualProtect(s,sizeof(void*),old,&tmp);return true;
 }
 template<class T> bool hook(void *o,unsigned n,T fn){return patch(o,n,reinterpret_cast<void*>(fn));}
+#include "streamline_transfer_probe.inl"
 void STDMETHODCALLTYPE copy_resource(ID3D12GraphicsCommandList *cl,ID3D12Resource *d,ID3D12Resource *s){
     auto fn=original<decltype(&copy_resource)>(cl,17);
     {std::lock_guard<std::recursive_mutex> g(lock);uint64_t dst=cookie(d),src=cookie(s);
-     if(dst)add(cl,{src&&src!=dst?copy:invalid,dst,src,0});
-     else if(auto probe=observed_cookie(d))add(cl,{src?probe_full_copy:probe_other_copy,probe,src,0});}
+     if(dst)add(cl,{src&&src!=dst?copy:invalid,dst,src,0,"CopyResource"});
+     else if(auto probe=observed_cookie(d))add(cl,{src?probe_full_copy:probe_other_copy,probe,src,0,"CopyResource"});}
     fn(cl,d,s);
 }
 void STDMETHODCALLTYPE copy_region(ID3D12GraphicsCommandList *cl,const D3D12_TEXTURE_COPY_LOCATION *d,UINT x,UINT y,UINT z,const D3D12_TEXTURE_COPY_LOCATION *s,const D3D12_BOX *b){
@@ -230,17 +247,17 @@ void STDMETHODCALLTYPE copy_region(ID3D12GraphicsCommandList *cl,const D3D12_TEX
      bool full=(dst||probe)&&s&&x==0&&y==0&&z==0&&
        d->Type==D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX&&s->Type==D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX&&
        d->SubresourceIndex==0&&s->SubresourceIndex==0&&(!b||(b->left==0&&b->top==0&&b->front==0&&b->right==ow&&b->bottom==oh&&b->back==1));
-     if(dst)add(cl,{full&&src&&dst!=src?copy:invalid,dst,src,0});
-     else if(probe)add(cl,{full&&src?probe_full_copy:probe_other_copy,probe,src,0});}
+     if(dst)add(cl,{full&&src&&dst!=src?copy:invalid,dst,src,0,"CopyTextureRegion",x,y,z});
+     else if(probe)add(cl,{full&&src?probe_full_copy:probe_other_copy,probe,src,0,"CopyTextureRegion",x,y,z});}
     fn(cl,d,x,y,z,s,b);
 }
 HRESULT STDMETHODCALLTYPE reset_list(ID3D12GraphicsCommandList *cl,ID3D12CommandAllocator *a,ID3D12PipelineState *p){
     auto fn=original<decltype(&reset_list)>(cl,10);auto hr=fn(cl,a,p);
-    if(SUCCEEDED(hr)){std::lock_guard<std::recursive_mutex> g(lock);retire(cl);}return hr;
+    if(SUCCEEDED(hr)){std::lock_guard<std::recursive_mutex> g(lock);retire(cl);record(cl).probe.pso=reinterpret_cast<uintptr_t>(p);}return hr;
 }
 void STDMETHODCALLTYPE clear_state(ID3D12GraphicsCommandList *cl,ID3D12PipelineState *p){
     auto fn=original<decltype(&clear_state)>(cl,11);
-    {std::lock_guard<std::recursive_mutex> g(lock);record(cl).rt={};}fn(cl,p);
+    {std::lock_guard<std::recursive_mutex> g(lock);auto &r=record(cl);r.rt={};r.probe={};r.probe.pso=reinterpret_cast<uintptr_t>(p);}fn(cl,p);
 }
 void STDMETHODCALLTYPE barriers(ID3D12GraphicsCommandList *cl,UINT n,const D3D12_RESOURCE_BARRIER *b){
     auto fn=original<decltype(&barriers)>(cl,26);
@@ -248,9 +265,9 @@ void STDMETHODCALLTYPE barriers(ID3D12GraphicsCommandList *cl,UINT n,const D3D12
      for(UINT i=0;b&&i<n;++i){
         if(b[i].Type==D3D12_RESOURCE_BARRIER_TYPE_TRANSITION&&
            (b[i].Transition.StateAfter&(D3D12_RESOURCE_STATE_RENDER_TARGET|D3D12_RESOURCE_STATE_COPY_DEST|D3D12_RESOURCE_STATE_UNORDERED_ACCESS|D3D12_RESOURCE_STATE_RESOLVE_DEST)))
-             invalidate(cl,write_cookie(b[i].Transition.pResource));
+             invalidate(cl,write_cookie(b[i].Transition.pResource),"Transition",(unsigned)b[i].Transition.StateBefore,(unsigned)b[i].Transition.StateAfter,b[i].Transition.Subresource);
         else if(b[i].Type==D3D12_RESOURCE_BARRIER_TYPE_ALIASING){
-             invalidate(cl,write_cookie(b[i].Aliasing.pResourceBefore));invalidate(cl,write_cookie(b[i].Aliasing.pResourceAfter));}
+             invalidate(cl,write_cookie(b[i].Aliasing.pResourceBefore),"AliasBefore");invalidate(cl,write_cookie(b[i].Aliasing.pResourceAfter),"AliasAfter");}
      }}
     fn(cl,n,b);
 }
@@ -260,12 +277,14 @@ void STDMETHODCALLTYPE create_rtv(ID3D12Device *d,ID3D12Resource *r,const D3D12_
 }
 void STDMETHODCALLTYPE copy_desc_simple(ID3D12Device *d,UINT n,D3D12_CPU_DESCRIPTOR_HANDLE dst,D3D12_CPU_DESCRIPTOR_HANDLE src,D3D12_DESCRIPTOR_HEAP_TYPE type){
     auto fn=original<decltype(&copy_desc_simple)>(d,24);fn(d,n,dst,src,type);
+    if(type==D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV){std::lock_guard<std::recursive_mutex> g(lock);probe_copy_views(d,1,&dst,&n,1,&src,&n);return;}
     if(type!=D3D12_DESCRIPTOR_HEAP_TYPE_RTV)return;
     std::lock_guard<std::recursive_mutex> g(lock);UINT inc=d->GetDescriptorHandleIncrementSize(type);
     for(UINT i=0;i<n;++i)rtv_map[dst.ptr+SIZE_T(i)*inc]=rtv_map[src.ptr+SIZE_T(i)*inc];
 }
 void STDMETHODCALLTYPE copy_desc(ID3D12Device *d,UINT nd,const D3D12_CPU_DESCRIPTOR_HANDLE *ds,const UINT *dn,UINT ns,const D3D12_CPU_DESCRIPTOR_HANDLE *ss,const UINT *sn,D3D12_DESCRIPTOR_HEAP_TYPE type){
     auto fn=original<decltype(&copy_desc)>(d,23);fn(d,nd,ds,dn,ns,ss,sn,type);
+    if(type==D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV){std::lock_guard<std::recursive_mutex> g(lock);probe_copy_views(d,nd,ds,dn,ns,ss,sn);return;}
     if(type!=D3D12_DESCRIPTOR_HEAP_TYPE_RTV)return;
     std::lock_guard<std::recursive_mutex> g(lock);UINT inc=d->GetDescriptorHandleIncrementSize(type),a=0,b=0;
     std::vector<uint64_t> values;
@@ -280,48 +299,49 @@ void STDMETHODCALLTYPE set_rt(ID3D12GraphicsCommandList *cl,UINT n,const D3D12_C
         auto it=rtv_map.find(h);if(it!=rtv_map.end())r.rt[i]=it->second;}}
     fn(cl,n,rt,contiguous,ds);
 }
-void draw_writes(ID3D12GraphicsCommandList *cl){auto &r=record(cl);for(auto id:r.rt)invalidate(cl,id);}
+void draw_writes(ID3D12GraphicsCommandList *cl,const char *method,unsigned a=0,unsigned b=0,unsigned c=0){auto &r=record(cl);for(auto id:r.rt){invalidate(cl,id,method,a,b,c);if(uav_probe&&is_bb(id))probe_work(r,method,id,false,a,b,c);}}
 void STDMETHODCALLTYPE draw(ID3D12GraphicsCommandList *cl,UINT a,UINT b,UINT c,UINT d){
     auto fn=original<decltype(&draw)>(cl,12);
-    {std::lock_guard<std::recursive_mutex> g(lock);draw_writes(cl);}fn(cl,a,b,c,d);
+    {std::lock_guard<std::recursive_mutex> g(lock);draw_writes(cl,"DrawInstanced",a,b,c);}fn(cl,a,b,c,d);
 }
 void STDMETHODCALLTYPE draw_indexed(ID3D12GraphicsCommandList *cl,UINT a,UINT b,UINT c,INT d,UINT e){
     auto fn=original<decltype(&draw_indexed)>(cl,13);
-    {std::lock_guard<std::recursive_mutex> g(lock);draw_writes(cl);}fn(cl,a,b,c,d,e);
+    {std::lock_guard<std::recursive_mutex> g(lock);draw_writes(cl,"DrawIndexedInstanced",a,b,c);}fn(cl,a,b,c,d,e);
 }
 void STDMETHODCALLTYPE clear_rtv(ID3D12GraphicsCommandList *cl,D3D12_CPU_DESCRIPTOR_HANDLE h,const FLOAT col[4],UINT n,const D3D12_RECT *r){
     auto fn=original<decltype(&clear_rtv)>(cl,48);
-    {std::lock_guard<std::recursive_mutex> g(lock);auto i=rtv_map.find(h.ptr);if(i!=rtv_map.end())invalidate(cl,i->second);}fn(cl,h,col,n,r);
+    {std::lock_guard<std::recursive_mutex> g(lock);auto i=rtv_map.find(h.ptr);if(i!=rtv_map.end())invalidate(cl,i->second,"ClearRTV",n);}fn(cl,h,col,n,r);
 }
 void STDMETHODCALLTYPE resolve_sub(ID3D12GraphicsCommandList *cl,ID3D12Resource *d,UINT di,ID3D12Resource *s,UINT si,DXGI_FORMAT f){
     auto fn=original<decltype(&resolve_sub)>(cl,19);
-    {std::lock_guard<std::recursive_mutex> g(lock);invalidate(cl,write_cookie(d));}fn(cl,d,di,s,si,f);
+    {std::lock_guard<std::recursive_mutex> g(lock);invalidate(cl,write_cookie(d),"ResolveSubresource",di,si,(unsigned)f);}fn(cl,d,di,s,si,f);
 }
 void STDMETHODCALLTYPE discard(ID3D12GraphicsCommandList *cl,ID3D12Resource *r,const D3D12_DISCARD_REGION *reg){
     auto fn=original<decltype(&discard)>(cl,51);
-    {std::lock_guard<std::recursive_mutex> g(lock);invalidate(cl,write_cookie(r));}fn(cl,r,reg);
+    {std::lock_guard<std::recursive_mutex> g(lock);invalidate(cl,write_cookie(r),"DiscardResource");}fn(cl,r,reg);
 }
 void STDMETHODCALLTYPE bundle(ID3D12GraphicsCommandList *cl,ID3D12GraphicsCommandList *b){
     auto fn=original<decltype(&bundle)>(cl,27);
-    {std::lock_guard<std::recursive_mutex> g(lock);draw_writes(cl);}fn(cl,b);
+    {std::lock_guard<std::recursive_mutex> g(lock);draw_writes(cl,"ExecuteBundle");}fn(cl,b);
 }
 void STDMETHODCALLTYPE clear_uav_u(ID3D12GraphicsCommandList *cl,D3D12_GPU_DESCRIPTOR_HANDLE g,D3D12_CPU_DESCRIPTOR_HANDLE c,ID3D12Resource *r,const UINT a[4],UINT n,const D3D12_RECT *rect){
     auto fn=original<decltype(&clear_uav_u)>(cl,49);
-    {std::lock_guard<std::recursive_mutex> l(lock);invalidate(cl,write_cookie(r));}fn(cl,g,c,r,a,n,rect);
+    {std::lock_guard<std::recursive_mutex> l(lock);invalidate(cl,write_cookie(r),"ClearUAVUint",n);}fn(cl,g,c,r,a,n,rect);
 }
 void STDMETHODCALLTYPE clear_uav_f(ID3D12GraphicsCommandList *cl,D3D12_GPU_DESCRIPTOR_HANDLE g,D3D12_CPU_DESCRIPTOR_HANDLE c,ID3D12Resource *r,const FLOAT a[4],UINT n,const D3D12_RECT *rect){
     auto fn=original<decltype(&clear_uav_f)>(cl,50);
-    {std::lock_guard<std::recursive_mutex> l(lock);invalidate(cl,write_cookie(r));}fn(cl,g,c,r,a,n,rect);
+    {std::lock_guard<std::recursive_mutex> l(lock);invalidate(cl,write_cookie(r),"ClearUAVFloat",n);}fn(cl,g,c,r,a,n,rect);
 }
 bool hook_list(ID3D12GraphicsCommandList *cl){
-    return hook(cl,10,reset_list)&&hook(cl,11,clear_state)&&hook(cl,12,draw)&&hook(cl,13,draw_indexed)&&
+    bool base=hook(cl,10,reset_list)&&hook(cl,11,clear_state)&&hook(cl,12,draw)&&hook(cl,13,draw_indexed)&&
       hook(cl,16,copy_region)&&hook(cl,17,copy_resource)&&hook(cl,19,resolve_sub)&&hook(cl,26,barriers)&&
       hook(cl,27,bundle)&&hook(cl,46,set_rt)&&hook(cl,48,clear_rtv)&&hook(cl,49,clear_uav_u)&&hook(cl,50,clear_uav_f)&&hook(cl,51,discard);
+    if(base)probe_list_hooks(cl);return base;
 }
 Stage *stage(Packet &p,Kind k){return k==cam?&p.camera:k==core?&p.core:k==final?&p.final:nullptr;}
 Fence signal(ID3D12CommandQueue *q){
     Fence f;if(!device||FAILED(device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&f.f))))return {};
-    f.value=1;if(FAILED(q->Signal(f.f.Get(),f.value)))return {};return f;
+    f.value=1;probe_internal_signal=true;auto hr=q->Signal(f.f.Get(),f.value);probe_internal_signal=false;if(FAILED(hr))return {};return f;
 }
 bool wait_submitted(ID3D12CommandQueue *q,const Fence &f,ID3D12CommandQueue *producer){
     if(!f)return false;if(f.done()||q==producer)return true;
@@ -337,11 +357,21 @@ void STDMETHODCALLTYPE execute(ID3D12CommandQueue *q,UINT n,ID3D12CommandList *c
     if(q->GetDesc().Type!=D3D12_COMMAND_LIST_TYPE_DIRECT){guard.unlock();fn(q,n,ls);return;}
     std::vector<Record*> used;
     std::vector<std::pair<uint64_t,Op>> ops;
+    // Preserve original recording facts separately from strict repeat rejection.
+    bool observe=uav_probe&&gameplay_gate()&&probe_submit_logs<4096;
+    uint64_t observe_execute=observe?++probe_execute_serial:0;
+    uint64_t observed_submit=submission_serial+1;
     for(UINT i=0;ls&&i<n;++i){
         auto it=records.find(reinterpret_cast<ID3D12GraphicsCommandList*>(ls[i]));
-        if(it==records.end()||it->second.ops.empty())continue;
+        if(it==records.end())continue;
         auto &r=it->second;
+        if(r.ops.empty()){
+            // A compute descriptor candidate may not create any strict op.
+            if(observe&&!r.work.empty())probe_log_record(q,r,i,observed_submit,r.submitted||!r.known,false,observe_execute);
+            continue;
+        }
         bool repeat=r.submitted||!r.known||std::find(used.begin(),used.end(),&r)!=used.end();
+        if(observe)probe_log_record(q,r,i,observed_submit,repeat,true,observe_execute);
         if(repeat){
             for(auto &o:r.ops){if(auto *p=find_packet(o.packet))p->bad=true;if(o.dst)lineage.erase(o.dst);}
         }
@@ -349,7 +379,11 @@ void STDMETHODCALLTYPE execute(ID3D12CommandQueue *q,UINT n,ID3D12CommandList *c
             else ops.push_back({r.id,o});}
         used.push_back(&r);
     }
-    if(used.empty()){guard.unlock();fn(q,n,ls);return;}
+    if(used.empty()){
+        // Diagnostic-only compute/work candidates use a distinct attempt ID;
+        // no strict lineage or fence is invented for an untracked submission.
+        guard.unlock();fn(q,n,ls);guard.lock();if(observe_execute)log("FG TRANSFER_EXECUTE execute=%llu queue=%p strictSubmit=0 generation=%llu qpc=%lld",observe_execute,q,generation,qpc());return;
+    }
     uint64_t sub=++submission_serial;
     // The same native submission may contain both the final draw and copy.
     // New provenance has no fence until this Execute has actually forwarded.
@@ -381,6 +415,7 @@ void STDMETHODCALLTYPE execute(ID3D12CommandQueue *q,UINT n,ID3D12CommandList *c
     }
     // Never hold the lineage lock while forwarding into another proxy.
     guard.unlock();fn(q,n,ls);guard.lock();
+    if(observe_execute)log("FG TRANSFER_EXECUTE execute=%llu queue=%p strictSubmit=%llu generation=%llu qpc=%lld",observe_execute,q,sub,generation,qpc());
     for(auto *r:used)r->submitted=true;
     Fence f=signal(q);
     for(auto &[rec,o]:ops)if(o.kind==probe_full_copy||o.kind==probe_other_copy)
@@ -407,7 +442,8 @@ bool ensure_hooks(){
     ComPtr<ID3D12CommandAllocator> a;ComPtr<ID3D12GraphicsCommandList> cl;
     if(FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&a)))||
        FAILED(device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,a.Get(),nullptr,IID_PPV_ARGS(&cl)))||FAILED(cl->Close()))return false;
-    return hook(device.Get(),20,create_rtv)&&hook(device.Get(),23,copy_desc)&&hook(device.Get(),24,copy_desc_simple)&&hook_list(cl.Get())&&hook(present_queue.Get(),10,execute);
+    bool base=hook(device.Get(),20,create_rtv)&&hook(device.Get(),23,copy_desc)&&hook(device.Get(),24,copy_desc_simple)&&hook_list(cl.Get())&&hook(present_queue.Get(),10,execute);
+    if(base){probe_device_hooks(device.Get());probe_queue_hooks(present_queue.Get());}return base;
 }
 bool make_texture(ID3D12Device *d,ComPtr<ID3D12Resource> &r,unsigned w,unsigned h,DXGI_FORMAT fmt,D3D12_RESOURCE_STATES state,D3D12_RESOURCE_FLAGS flags=D3D12_RESOURCE_FLAG_NONE){
     if(r)return true;D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;heap.CreationNodeMask=heap.VisibleNodeMask=1;
@@ -444,7 +480,7 @@ bool chain_info(IDXGISwapChain1 *sc){
     bool desc_ok=SUCCEEDED(qi)&&s&&SUCCEEDED(desc_hr)&&d.Width==ow&&d.Height==oh&&d.Format==DXGI_FORMAT_R10G10B10A2_UNORM&&d.BufferCount==3;
     shape=desc_ok;
     uav_probe=desc_ok;
-    bb={};probe_bb={};
+    bb={};probe_bb={};probe_view_bb={};
     if(desc_ok)for(unsigned i=0;i<3;++i){
         ComPtr<ID3D12Resource> b;CookieDiagnostic diag;
         HRESULT buffer_hr=s->GetBuffer(i,IID_PPV_ARGS(&b));
@@ -454,6 +490,7 @@ bool chain_info(IDXGISwapChain1 *sc){
         bool observed=observed_uav_shape(b.Get())&&observed_uav_shape(n.Get());
         CookieDiagnostic probe_diag;
         if(observed)probe_bb[i]=identity_cookie(n.Get(),trace?&probe_diag:nullptr);
+        if(observed){probe_view_bb[i]=probe_view_identity(n.Get());if(trace)log("FG TRANSFER_BUFFER generation=%llu index=%u cookie=%llu viewIdentity=%llu",generation,i,probe_bb[i],probe_view_bb[i]);}
         if(!observed)uav_probe=false;
         if(trace&&observed)log("FG PROBE_BUFFER generation=%llu check=%u index=%u native=%p cookie=%llu cookieRead=%d cookieReadHr=%08lx cookieWrite=%d cookieWriteHr=%08lx",
             generation,diagnostic_checks,i,n.Get(),probe_bb[i],probe_diag.read_attempted,(unsigned long)probe_diag.read_hr,probe_diag.write_attempted,(unsigned long)probe_diag.write_hr);
@@ -464,7 +501,7 @@ bool chain_info(IDXGISwapChain1 *sc){
                 diag.descriptor_ok,diag.read_attempted,(unsigned long)diag.read_hr,diag.read_size,diag.write_attempted,(unsigned long)diag.write_hr,(unsigned long long)bb[i]);
         }
     }
-    if(!uav_probe||shape){uav_probe=false;probe_bb={};}
+    if(!uav_probe||shape){uav_probe=false;probe_bb={};probe_view_bb={};}
     // No ambiguous virtual identity can participate in observation.
     if(uav_probe&&(!probe_bb[0]||!probe_bb[1]||!probe_bb[2]||
        probe_bb[0]==probe_bb[1]||probe_bb[0]==probe_bb[2]||probe_bb[1]==probe_bb[2]))probe_bb={};
@@ -535,6 +572,7 @@ AZEXPORT void __cdecl azslRegisterQueue(ID3D12CommandQueue *wrapper){
     auto q=native<ID3D12CommandQueue>(wrapper);
     if(!q||q.Get()==wrapper||q->GetDesc().Type!=D3D12_COMMAND_LIST_TYPE_DIRECT)return;
     if(!patch(q.Get(),10,reinterpret_cast<void*>(&execute))){fatal=true;log("FG FATAL native_queue_hook_failed queue=%p",q.Get());}
+    else probe_queue_hooks(q.Get());
 }
 AZEXPORT int __cdecl azslReady(){std::lock_guard<std::recursive_mutex> g(lock);return initialized&&!fatal&&hdr&&producer_ready();}
 AZEXPORT int __cdecl azslNativeChain(IDXGISwapChain1 *sc,IDXGISwapChain1 **out){
@@ -544,7 +582,7 @@ AZEXPORT int __cdecl azslNativeChain(IDXGISwapChain1 *sc,IDXGISwapChain1 **out){
 }
 AZEXPORT void __cdecl azslChainChange(IDXGISwapChain1 *sc,int action,unsigned color,HRESULT hr){
     std::lock_guard<std::recursive_mutex> g(lock);if(sc!=managed)return;
-    if(action==0){off("resize");++generation;lineage.clear();bb={};probe_bb={};shape=false;uav_probe=false;}
+    if(action==0){off("resize");++generation;lineage.clear();bb={};probe_bb={};probe_view_bb={};shape=false;uav_probe=false;}
     else if(action==1){if(SUCCEEDED(hr))chain_info(sc);}
     else if(action==2&&SUCCEEDED(hr)){bool pq=color==DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
         if(pq!=hdr){off("colorspace");++generation;lineage.clear();hdr=pq;}chain_info(sc);}
@@ -607,7 +645,8 @@ AZEXPORT void __cdecl azslFinal(ID3D12GraphicsCommandList *cl,ID3D12Resource *ta
     p->final.record=r.id;p->final.game_record=recording;
     bool ok=clone(n.Get(),h.Get(),p->hud,ow,oh,DXGI_FORMAT_R10G10B10A2_UNORM,D3D12_RESOURCE_STATE_RENDER_TARGET,p->hud_initialized);
     p->hud_initialized=ok;if(!ok){p->bad=true;p->quarantined=true;}
-    add(n.Get(),{final,id,0,p->id});
+    add(n.Get(),{final,id,0,p->id,"NativeHDRFinal"});
+    if(p->probe_only){probe_note_final(id,probe_view_identity(t.Get()),p->resolve,p->id);}
     log("FG FINAL_RECORD resolve=%llu packet=%llu target=%p cookie=%llu gameRecording=%llu nativeRecording=%llu generation=%llu hudless=%d probeOnly=%d observedCookie=%llu",resolve,p->id,t.Get(),id,recording,r.id,generation,ok,p->probe_only,probe);
 }
 AZEXPORT int __cdecl azslBeforePresent(IDXGISwapChain1 *sc,UINT flags,uint64_t call){
