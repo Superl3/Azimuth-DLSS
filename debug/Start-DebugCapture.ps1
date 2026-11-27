@@ -83,7 +83,7 @@ if($NoJitter){$PreviewJitter=$false}
 if($VisibleSR -and (!$PreviewSRReplay -or (!$PreviewJitter -and !$NoJitter))){throw '-VisibleSR requires -PreviewSRReplay and either -PreviewJitter or -NoJitter.'}
 if($VisibleSR -and $ExitAfterCapture -and !$AutoTest){throw 'For automatic VisibleSR shutdown use -AutoTest; otherwise omit -ExitAfterCapture.'}
 if($FGInputProbe){
-    if(!$AutoTest -or !$VisibleSR -or ($VisibleHDR -and !$HDRLive) -or $VisibleMarker -or $NRTemporalProbe){throw '-FGInputProbe requires live automatic VisibleSR/HDRLive, without marker or NRTemporalProbe.'}
+    if(!$AutoTest -or !$VisibleSR -or ($VisibleHDR -and !$HDRLive) -or $VisibleMarker -or $NRTemporalProbe -or !$NoJitter -or $MVJittered){throw '-FGInputProbe requires live automatic VisibleSR/HDRLive, -NoJitter, MVJittered=0, without marker or NRTemporalProbe.'}
 }
 if($NRTemporalProbe){
     if(!$VisibleSR -or ($VisibleHDR -and !$HDRLive)){throw '-NRTemporalProbe requires live VisibleSR or VisibleHDR + HDRLive.'}

@@ -9,6 +9,8 @@
 #include <wrl/client.h>
 #include <algorithm>
 #include <cmath>
+#include <climits>
+#include <cwchar>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -23,7 +25,7 @@
 using Microsoft::WRL::ComPtr;
 namespace fs=std::filesystem;
 using Bytes=std::vector<uint8_t>;
-static constexpr auto ReadState= D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+static const D3D12_RESOURCE_STATES ReadState=static_cast<D3D12_RESOURCE_STATES>(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 static void check(HRESULT r,const char *where){
     if(FAILED(r)){std::fprintf(stderr,"%s HRESULT=%08lx\n",where,(unsigned long)r);throw std::runtime_error(where);}
 }
@@ -76,7 +78,9 @@ static Frame captured(const Setup &s,unsigned id){
     // Read D32/R32 depth as identical IEEE binary32 values. Reject invalid
     // depths rather than guessing a linearization convention.
     for(size_t i=0;i<render;i+=4){float z;std::memcpy(&z,&f.depth[i],4);
-        require(std::isfinite(z)&&z>=0&&z<=1,"invalid depth sample");}
+        require(std::isfinite(z)&&z>=0&&z<=1,"invalid depth sample");
+        uint16_t m[2];std::memcpy(m,&f.mv[i],4);
+        require((m[0]&0x7c00u)!=0x7c00u&&(m[1]&0x7c00u)!=0x7c00u,"nonfinite motion vector");}
     return f;
 }
 static uint16_t half(float x){
@@ -226,6 +230,7 @@ struct Gpu {
 };
 struct Session {
     Gpu &gpu;NVSDK_NGX_Parameter *params=nullptr;NVSDK_NGX_Handle *feature=nullptr;bool ready=false;
+    std::wstring runtime_path;const wchar_t *paths[1]={};
     explicit Session(Gpu &g):gpu(g){}
     ~Session(){
         if(feature)NVSDK_NGX_D3D12_ReleaseFeature(feature);
@@ -234,7 +239,7 @@ struct Session {
     }
     void init(const Setup &s){
         require(fs::is_regular_file(s.runtime/L"nvngx_dlssg.dll"),"supply official nvngx_dlssg.dll in runtime directory");
-        const wchar_t *paths[]={s.runtime.c_str()};
+        runtime_path=s.runtime.wstring();paths[0]=runtime_path.c_str();
         NVSDK_NGX_FeatureCommonInfo info={};info.PathListInfo.Path=paths;info.PathListInfo.Length=1;
         ngx(NVSDK_NGX_D3D12_Init_with_ProjectID("b4c6e1f2-3a7d-4e59-8c21-6f0a9d2e7b13",NVSDK_NGX_ENGINE_TYPE_CUSTOM,"1.0",s.output.c_str(),gpu.device.Get(),&info),"INIT");
         ready=true;ngx(NVSDK_NGX_D3D12_GetCapabilityParameters(&params),"CAPABILITIES");
@@ -243,7 +248,7 @@ struct Session {
         auto ar=params->Get(NVSDK_NGX_Parameter_FrameGeneration_Available,&available);
         params->Get(NVSDK_NGX_Parameter_FrameGeneration_NeedsUpdatedDriver,&driver);
         std::printf("FG AVAILABLE value=%d needsDriver=%d query=%08x\n",available,driver,(unsigned)ar);
-        require(NVSDK_NGX_SUCCEED(ar)&&available&&!driver,"DLSS-G unavailable; do not bypass capability checks");
+        require(NVSDK_NGX_SUCCEED(ar)&&available==1&&!driver,"DLSS-G unavailable; do not bypass capability checks");
         NVSDK_NGX_DLSSG_Create_Params cp={};cp.Width=s.ow;cp.Height=s.oh;cp.RenderWidth=s.rw;cp.RenderHeight=s.rh;
         cp.NativeBackbufferFormat=DXGI_FORMAT_R10G10B10A2_UNORM;
         params->Set(NVSDK_NGX_DLSSG_Parameter_UserInterfaceRecompositionEnabled,0u);
@@ -332,6 +337,7 @@ static int run(const Setup &s){
     bool candidate=disabled[1]==0&&differs[1];
     std::ofstream report(s.output/"fg-result.json");
     report<<"{\n  \"backend\": \"NVIDIA NGX FrameGeneration\",\n  \"gpu_completed\": true,\n  \"second_frame_disable_byte\": "<<disabled[1]<<",\n  \"second_frame_distinct\": "<<(differs[1]?"true":"false")<<",\n  \"candidate\": "<<(candidate?"true":"false")<<",\n  \"camera\": \""<<(s.smoke?"synthetic":s.calibrated?"operator_supplied":"unverified")<<"\",\n  \"presented\": false\n}\n";
+    report.flush();require(bool(report),"write result report failed");
     std::printf("FG DONE candidate=%d presented=0 qualityUnverified=1\n",candidate);
     return candidate?0:2;
 }
