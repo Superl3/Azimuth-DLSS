@@ -65,6 +65,9 @@ PFun_slDLSSGGetState *get_state=nullptr;
 PFun_slReflexSetOptions *reflex_options=nullptr;
 sl::DLSSGOptions options;
 bool initialized=false, enabled=false, armed=false, hdr=false, shape=false, fatal=false;
+// Exact observed FH2 UAV chain: producer diagnostics only, never FG-ready.
+bool uav_probe=false;
+bool producer_ready(){return shape||uav_probe;}
 uint64_t generation=1, serial=0, last_resolve=0, last_generation=0, last_tick=0;
 uint64_t cookie_serial=0, recording_serial=0, submission_serial=0;
 uint32_t token_serial=0;
@@ -80,7 +83,7 @@ struct Stage {
 };
 struct Packet {
     uint64_t id=0,resolve=0,seq=0,gen=0;
-    bool reset=false,bad=false,presented=false,tagged=false,quarantined=false;
+    bool reset=false,bad=false,presented=false,tagged=false,quarantined=false,probe_only=false;
     bool guide_initialized=false,core_initialized=false,hud_initialized=false;
     Stage camera,core,final;
     Fence consumption;
@@ -101,7 +104,7 @@ void off(const char *reason){
     armed=false;last_resolve=last_generation=last_tick=0;
 }
 void reset_metadata(Packet &p){
-    p.id=p.resolve=p.seq=p.gen=0;p.reset=p.bad=p.presented=p.tagged=p.quarantined=false;
+    p.id=p.resolve=p.seq=p.gen=0;p.reset=p.bad=p.presented=p.tagged=p.quarantined=p.probe_only=false;
     p.camera={};p.core={};p.final={};p.consumption={};p.token=nullptr;
 }
 Packet *allocate(uint64_t resolve,uint64_t seq){
@@ -111,7 +114,7 @@ Packet *allocate(uint64_t resolve,uint64_t seq){
           (p.bad||p.presented||p.gen!=generation||resolve>p.resolve+slots)){
             reset_metadata(p);
         }
-        if(!p.id){p.id=++serial;p.resolve=resolve;p.seq=seq;p.gen=generation;return &p;}
+        if(!p.id){p.id=++serial;p.resolve=resolve;p.seq=seq;p.gen=generation;p.probe_only=uav_probe;return &p;}
     }
     log("FG SKIP reason=ring_busy resolve=%llu",(unsigned long long)resolve);return nullptr;
 }
@@ -129,10 +132,17 @@ Packet *final_packet(uint64_t resolve){
     }
     return match;
 }
+bool rgb10_geometry(const D3D12_RESOURCE_DESC &d){
+    return d.Dimension==D3D12_RESOURCE_DIMENSION_TEXTURE2D&&d.Width==ow&&d.Height==oh&&
+      d.DepthOrArraySize==1&&d.MipLevels==1&&d.SampleDesc.Count==1&&d.Format==DXGI_FORMAT_R10G10B10A2_UNORM;
+}
 bool rgb10(ID3D12Resource *r){
     if(!r)return false;auto d=r->GetDesc();
-    return d.Dimension==D3D12_RESOURCE_DIMENSION_TEXTURE2D&&d.Width==ow&&d.Height==oh&&
-      d.DepthOrArraySize==1&&d.MipLevels==1&&d.SampleDesc.Count==1&&d.Format==DXGI_FORMAT_R10G10B10A2_UNORM&&!(d.Flags&D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    return rgb10_geometry(d)&&!(d.Flags&D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+}
+bool observed_uav_shape(ID3D12Resource *r){
+    if(!r)return false;auto d=r->GetDesc();
+    return rgb10_geometry(d)&&d.Flags==(D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET|D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
 }
 // Optional bounded chain diagnostics; do not relax the lineage contract.
 struct CookieDiagnostic {
@@ -140,9 +150,8 @@ struct CookieDiagnostic {
     HRESULT read_hr=E_PENDING,write_hr=E_PENDING;
     UINT read_size=0;
 };
-uint64_t cookie(ID3D12Resource *r,CookieDiagnostic *diag=nullptr){
-    bool ok=rgb10(r);if(diag)diag->descriptor_ok=ok;
-    if(!ok)return 0;uint64_t v=0;UINT n=sizeof(v);
+uint64_t identity_cookie(ID3D12Resource *r,CookieDiagnostic *diag){
+    uint64_t v=0;UINT n=sizeof(v);
     HRESULT hr=r->GetPrivateData(cookie_guid,&n,&v);
     if(diag){diag->read_attempted=true;diag->read_hr=hr;diag->read_size=n;}
     if(SUCCEEDED(hr)&&n==sizeof(v)&&v)return v;
@@ -150,7 +159,20 @@ uint64_t cookie(ID3D12Resource *r,CookieDiagnostic *diag=nullptr){
     if(diag){diag->write_attempted=true;diag->write_hr=hr;}
     return SUCCEEDED(hr)?v:0;
 }
-enum Kind { invalid,copy,cam,core,final };
+uint64_t cookie(ID3D12Resource *r,CookieDiagnostic *diag=nullptr){
+    bool ok=rgb10(r);if(diag)diag->descriptor_ok=ok;
+    return ok?identity_cookie(r,diag):0;
+}
+// Register UAV identities only via chain_info, never as strict copy inputs.
+std::array<uint64_t,3> probe_bb{};
+uint64_t observed_cookie(ID3D12Resource *r){
+    if(!uav_probe||!observed_uav_shape(r))return 0;
+    uint64_t v=0;UINT n=sizeof(v);
+    return SUCCEEDED(r->GetPrivateData(cookie_guid,&n,&v))&&n==sizeof(v)&&v&&
+      std::find(probe_bb.begin(),probe_bb.end(),v)!=probe_bb.end()?v:0;
+}
+uint64_t write_cookie(ID3D12Resource *r){auto c=cookie(r);return c?c:observed_cookie(r);}
+enum Kind { invalid,copy,cam,core,final,probe_full_copy,probe_other_copy };
 struct Op {Kind kind;uint64_t dst=0,src=0,packet=0;};
 struct Record {uint64_t id=0;bool known=false,submitted=false;std::vector<Op> ops;std::array<uint64_t,8> rt{};};
 struct Provenance {uint64_t packet=0,record=0,submit=0,gen=0;ID3D12CommandQueue *queue=nullptr;Fence fence;};
@@ -158,7 +180,7 @@ std::unordered_map<ID3D12GraphicsCommandList*,Record> records;
 std::unordered_map<uint64_t,Provenance> lineage;
 std::unordered_map<SIZE_T,uint64_t> rtv_map;
 std::array<uint64_t,3> bb{};
-bool is_bb(uint64_t c){return c&&std::find(bb.begin(),bb.end(),c)!=bb.end();}
+bool is_bb(uint64_t c){return c&&(std::find(bb.begin(),bb.end(),c)!=bb.end()||(uav_probe&&std::find(probe_bb.begin(),probe_bb.end(),c)!=probe_bb.end()));}
 Record &record(ID3D12GraphicsCommandList *cl){
     auto &r=records[cl];if(!r.id)r.id=++recording_serial;return r;
 }
@@ -196,17 +218,20 @@ template<class T> bool hook(void *o,unsigned n,T fn){return patch(o,n,reinterpre
 void STDMETHODCALLTYPE copy_resource(ID3D12GraphicsCommandList *cl,ID3D12Resource *d,ID3D12Resource *s){
     auto fn=original<decltype(&copy_resource)>(cl,17);
     {std::lock_guard<std::recursive_mutex> g(lock);uint64_t dst=cookie(d),src=cookie(s);
-     if(dst)add(cl,{src&&src!=dst?copy:invalid,dst,src,0});}
+     if(dst)add(cl,{src&&src!=dst?copy:invalid,dst,src,0});
+     else if(auto probe=observed_cookie(d))add(cl,{src?probe_full_copy:probe_other_copy,probe,src,0});}
     fn(cl,d,s);
 }
 void STDMETHODCALLTYPE copy_region(ID3D12GraphicsCommandList *cl,const D3D12_TEXTURE_COPY_LOCATION *d,UINT x,UINT y,UINT z,const D3D12_TEXTURE_COPY_LOCATION *s,const D3D12_BOX *b){
     auto fn=original<decltype(&copy_region)>(cl,16);
     {std::lock_guard<std::recursive_mutex> g(lock);
      uint64_t dst=d?cookie(d->pResource):0,src=s?cookie(s->pResource):0;
-     bool full=dst&&src&&dst!=src&&x==0&&y==0&&z==0&&
+     uint64_t probe=!dst&&d?observed_cookie(d->pResource):0;
+     bool full=(dst||probe)&&s&&x==0&&y==0&&z==0&&
        d->Type==D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX&&s->Type==D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX&&
        d->SubresourceIndex==0&&s->SubresourceIndex==0&&(!b||(b->left==0&&b->top==0&&b->front==0&&b->right==ow&&b->bottom==oh&&b->back==1));
-     if(dst)add(cl,{full?copy:invalid,dst,src,0});}
+     if(dst)add(cl,{full&&src&&dst!=src?copy:invalid,dst,src,0});
+     else if(probe)add(cl,{full&&src?probe_full_copy:probe_other_copy,probe,src,0});}
     fn(cl,d,x,y,z,s,b);
 }
 HRESULT STDMETHODCALLTYPE reset_list(ID3D12GraphicsCommandList *cl,ID3D12CommandAllocator *a,ID3D12PipelineState *p){
@@ -223,15 +248,15 @@ void STDMETHODCALLTYPE barriers(ID3D12GraphicsCommandList *cl,UINT n,const D3D12
      for(UINT i=0;b&&i<n;++i){
         if(b[i].Type==D3D12_RESOURCE_BARRIER_TYPE_TRANSITION&&
            (b[i].Transition.StateAfter&(D3D12_RESOURCE_STATE_RENDER_TARGET|D3D12_RESOURCE_STATE_COPY_DEST|D3D12_RESOURCE_STATE_UNORDERED_ACCESS|D3D12_RESOURCE_STATE_RESOLVE_DEST)))
-             invalidate(cl,cookie(b[i].Transition.pResource));
+             invalidate(cl,write_cookie(b[i].Transition.pResource));
         else if(b[i].Type==D3D12_RESOURCE_BARRIER_TYPE_ALIASING){
-             invalidate(cl,cookie(b[i].Aliasing.pResourceBefore));invalidate(cl,cookie(b[i].Aliasing.pResourceAfter));}
+             invalidate(cl,write_cookie(b[i].Aliasing.pResourceBefore));invalidate(cl,write_cookie(b[i].Aliasing.pResourceAfter));}
      }}
     fn(cl,n,b);
 }
 void STDMETHODCALLTYPE create_rtv(ID3D12Device *d,ID3D12Resource *r,const D3D12_RENDER_TARGET_VIEW_DESC *desc,D3D12_CPU_DESCRIPTOR_HANDLE h){
     auto fn=original<decltype(&create_rtv)>(d,20);fn(d,r,desc,h);
-    std::lock_guard<std::recursive_mutex> g(lock);rtv_map[h.ptr]=cookie(r);
+    std::lock_guard<std::recursive_mutex> g(lock);rtv_map[h.ptr]=write_cookie(r);
 }
 void STDMETHODCALLTYPE copy_desc_simple(ID3D12Device *d,UINT n,D3D12_CPU_DESCRIPTOR_HANDLE dst,D3D12_CPU_DESCRIPTOR_HANDLE src,D3D12_DESCRIPTOR_HEAP_TYPE type){
     auto fn=original<decltype(&copy_desc_simple)>(d,24);fn(d,n,dst,src,type);
@@ -270,11 +295,11 @@ void STDMETHODCALLTYPE clear_rtv(ID3D12GraphicsCommandList *cl,D3D12_CPU_DESCRIP
 }
 void STDMETHODCALLTYPE resolve_sub(ID3D12GraphicsCommandList *cl,ID3D12Resource *d,UINT di,ID3D12Resource *s,UINT si,DXGI_FORMAT f){
     auto fn=original<decltype(&resolve_sub)>(cl,19);
-    {std::lock_guard<std::recursive_mutex> g(lock);invalidate(cl,cookie(d));}fn(cl,d,di,s,si,f);
+    {std::lock_guard<std::recursive_mutex> g(lock);invalidate(cl,write_cookie(d));}fn(cl,d,di,s,si,f);
 }
 void STDMETHODCALLTYPE discard(ID3D12GraphicsCommandList *cl,ID3D12Resource *r,const D3D12_DISCARD_REGION *reg){
     auto fn=original<decltype(&discard)>(cl,51);
-    {std::lock_guard<std::recursive_mutex> g(lock);invalidate(cl,cookie(r));}fn(cl,r,reg);
+    {std::lock_guard<std::recursive_mutex> g(lock);invalidate(cl,write_cookie(r));}fn(cl,r,reg);
 }
 void STDMETHODCALLTYPE bundle(ID3D12GraphicsCommandList *cl,ID3D12GraphicsCommandList *b){
     auto fn=original<decltype(&bundle)>(cl,27);
@@ -282,11 +307,11 @@ void STDMETHODCALLTYPE bundle(ID3D12GraphicsCommandList *cl,ID3D12GraphicsComman
 }
 void STDMETHODCALLTYPE clear_uav_u(ID3D12GraphicsCommandList *cl,D3D12_GPU_DESCRIPTOR_HANDLE g,D3D12_CPU_DESCRIPTOR_HANDLE c,ID3D12Resource *r,const UINT a[4],UINT n,const D3D12_RECT *rect){
     auto fn=original<decltype(&clear_uav_u)>(cl,49);
-    {std::lock_guard<std::recursive_mutex> l(lock);invalidate(cl,cookie(r));}fn(cl,g,c,r,a,n,rect);
+    {std::lock_guard<std::recursive_mutex> l(lock);invalidate(cl,write_cookie(r));}fn(cl,g,c,r,a,n,rect);
 }
 void STDMETHODCALLTYPE clear_uav_f(ID3D12GraphicsCommandList *cl,D3D12_GPU_DESCRIPTOR_HANDLE g,D3D12_CPU_DESCRIPTOR_HANDLE c,ID3D12Resource *r,const FLOAT a[4],UINT n,const D3D12_RECT *rect){
     auto fn=original<decltype(&clear_uav_f)>(cl,50);
-    {std::lock_guard<std::recursive_mutex> l(lock);invalidate(cl,cookie(r));}fn(cl,g,c,r,a,n,rect);
+    {std::lock_guard<std::recursive_mutex> l(lock);invalidate(cl,write_cookie(r));}fn(cl,g,c,r,a,n,rect);
 }
 bool hook_list(ID3D12GraphicsCommandList *cl){
     return hook(cl,10,reset_list)&&hook(cl,11,clear_state)&&hook(cl,12,draw)&&hook(cl,13,draw_indexed)&&
@@ -329,6 +354,10 @@ void STDMETHODCALLTYPE execute(ID3D12CommandQueue *q,UINT n,ID3D12CommandList *c
     // The same native submission may contain both the final draw and copy.
     // New provenance has no fence until this Execute has actually forwarded.
     for(auto &[rec,o]:ops){
+        if(o.kind==probe_full_copy||o.kind==probe_other_copy){
+            // Observation is not a provenance edge into a UAV resource.
+            lineage.erase(o.dst);continue;
+        }
         if(o.kind==invalid){bool had=lineage.erase(o.dst)!=0;if(is_bb(o.dst))log("FG INVALIDATE bbCookie=%llu recording=%llu submit=%llu queue=%p generation=%llu hadLineage=%d",o.dst,rec,sub,q,generation,had);continue;}
         if(o.kind==copy){
             auto it=lineage.find(o.src);
@@ -336,7 +365,7 @@ void STDMETHODCALLTYPE execute(ID3D12CommandQueue *q,UINT n,ID3D12CommandList *c
             lineage.erase(o.dst);
             auto *p=find_packet(v.packet);
             bool valid=p&&!p->bad&&!p->presented&&v.gen==generation&&
-              (v.submit==sub||wait_submitted(q,v.fence,v.queue));
+              (v.submit==sub||(p->probe_only?(v.fence&&(v.queue==q||v.fence.done())):wait_submitted(q,v.fence,v.queue)));
             if(valid){v.record=rec;v.submit=sub;v.queue=q;v.fence={};lineage[o.dst]=v;}
             if(valid||is_bb(o.dst))log("FG COPY resolve=%llu srcCookie=%llu dstCookie=%llu nativeRecording=%llu submit=%llu queue=%p generation=%llu proven=%d",
                 valid?p->resolve:0,o.src,o.dst,rec,sub,q,generation,valid);
@@ -346,7 +375,7 @@ void STDMETHODCALLTYPE execute(ID3D12CommandQueue *q,UINT n,ID3D12CommandList *c
         auto *s=stage(*p,o.kind);
         if(!s||s->record!=rec||s->submitted||p->gen!=generation){p->bad=true;continue;}
         s->queue=q;s->submitted=true;
-        if(o.kind==final&&!p->bad)lineage[o.dst]={p->id,rec,sub,generation,q,{}};
+        if(o.kind==final&&!p->bad&&o.dst)lineage[o.dst]={p->id,rec,sub,generation,q,{}};
         if(o.kind==core&&p->token)marker(sl::PCLMarker::eRenderSubmitStart,*p->token);
         log("FG STAGE_SUBMIT stage=%u resolve=%llu packet=%llu gameRecording=%llu nativeRecording=%llu submit=%llu queue=%p generation=%llu",unsigned(o.kind),p->resolve,p->id,s->game_record,rec,sub,q,generation);
     }
@@ -354,6 +383,9 @@ void STDMETHODCALLTYPE execute(ID3D12CommandQueue *q,UINT n,ID3D12CommandList *c
     guard.unlock();fn(q,n,ls);guard.lock();
     for(auto *r:used)r->submitted=true;
     Fence f=signal(q);
+    for(auto &[rec,o]:ops)if(o.kind==probe_full_copy||o.kind==probe_other_copy)
+        log("FG PROBE_COPY srcCookie=%llu dstCookie=%llu nativeRecording=%llu submit=%llu queue=%p generation=%llu fullCandidate=%d signalOK=%d fenceValue=%llu fenceDone=%d qpc=%lld",
+            o.src,o.dst,rec,sub,q,generation,o.kind==probe_full_copy,bool(f),f.value,f.done(),qpc());
     for(auto &[rec,o]:ops)if(auto *p=find_packet(o.packet)){
         if(auto *s=stage(*p,o.kind)){s->fence=f;if(!f){p->bad=true;p->quarantined=true;}
             if(o.kind==final&&p->token)marker(sl::PCLMarker::eRenderSubmitEnd,*p->token);}
@@ -411,12 +443,20 @@ bool chain_info(IDXGISwapChain1 *sc){
     HRESULT desc_hr=SUCCEEDED(qi)&&s?s->GetDesc1(&d):E_PENDING;
     bool desc_ok=SUCCEEDED(qi)&&s&&SUCCEEDED(desc_hr)&&d.Width==ow&&d.Height==oh&&d.Format==DXGI_FORMAT_R10G10B10A2_UNORM&&d.BufferCount==3;
     shape=desc_ok;
-    bb={};
-    if(shape)for(unsigned i=0;i<3;++i){
+    uav_probe=desc_ok;
+    bb={};probe_bb={};
+    if(desc_ok)for(unsigned i=0;i<3;++i){
         ComPtr<ID3D12Resource> b;CookieDiagnostic diag;
         HRESULT buffer_hr=s->GetBuffer(i,IID_PPV_ARGS(&b));
         if(SUCCEEDED(buffer_hr))bb[i]=cookie(b.Get(),trace?&diag:nullptr);
         if(!bb[i])shape=false;
+        auto n=SUCCEEDED(buffer_hr)?native<ID3D12Resource>(b.Get()):ComPtr<ID3D12Resource>{};
+        bool observed=observed_uav_shape(b.Get())&&observed_uav_shape(n.Get());
+        CookieDiagnostic probe_diag;
+        if(observed)probe_bb[i]=identity_cookie(n.Get(),trace?&probe_diag:nullptr);
+        if(!observed)uav_probe=false;
+        if(trace&&observed)log("FG PROBE_BUFFER generation=%llu check=%u index=%u native=%p cookie=%llu cookieRead=%d cookieReadHr=%08lx cookieWrite=%d cookieWriteHr=%08lx",
+            generation,diagnostic_checks,i,n.Get(),probe_bb[i],probe_diag.read_attempted,(unsigned long)probe_diag.read_hr,probe_diag.write_attempted,(unsigned long)probe_diag.write_hr);
         if(trace){
             D3D12_RESOURCE_DESC rd{};if(b)rd=b->GetDesc();
             log("FG BUFFER_CHECK generation=%llu check=%u index=%u buffer=%p bufferHr=%08lx dimension=%u width=%llu height=%u array=%u mips=%u samples=%u format=%u flags=%u rgb10=%d cookieRead=%d cookieReadHr=%08lx cookieReadSize=%u cookieWrite=%d cookieWriteHr=%08lx cookie=%llu",
@@ -424,8 +464,12 @@ bool chain_info(IDXGISwapChain1 *sc){
                 diag.descriptor_ok,diag.read_attempted,(unsigned long)diag.read_hr,diag.read_size,diag.write_attempted,(unsigned long)diag.write_hr,(unsigned long long)bb[i]);
         }
     }
-    if(trace)log("FG CHAIN_CHECK generation=%llu check=%u chain=%p qiHr=%08lx descHr=%08lx width=%u height=%u format=%u buffers=%u descOK=%d shape=%d qpc=%lld",
-        generation,diagnostic_checks,sc,(unsigned long)qi,(unsigned long)desc_hr,d.Width,d.Height,(unsigned)d.Format,d.BufferCount,desc_ok,shape,qpc());
+    if(!uav_probe||shape){uav_probe=false;probe_bb={};}
+    // No ambiguous virtual identity can participate in observation.
+    if(uav_probe&&(!probe_bb[0]||!probe_bb[1]||!probe_bb[2]||
+       probe_bb[0]==probe_bb[1]||probe_bb[0]==probe_bb[2]||probe_bb[1]==probe_bb[2]))probe_bb={};
+    if(trace)log("FG CHAIN_CHECK generation=%llu check=%u chain=%p qiHr=%08lx descHr=%08lx width=%u height=%u format=%u buffers=%u descOK=%d shape=%d uavProbe=%d qpc=%lld",
+        generation,diagnostic_checks,sc,(unsigned long)qi,(unsigned long)desc_hr,d.Width,d.Height,(unsigned)d.Format,d.BufferCount,desc_ok,shape,uav_probe,qpc());
     return shape;
 }
 #include "streamline_camera.inl"
@@ -492,7 +536,7 @@ AZEXPORT void __cdecl azslRegisterQueue(ID3D12CommandQueue *wrapper){
     if(!q||q.Get()==wrapper||q->GetDesc().Type!=D3D12_COMMAND_LIST_TYPE_DIRECT)return;
     if(!patch(q.Get(),10,reinterpret_cast<void*>(&execute))){fatal=true;log("FG FATAL native_queue_hook_failed queue=%p",q.Get());}
 }
-AZEXPORT int __cdecl azslReady(){std::lock_guard<std::recursive_mutex> g(lock);return initialized&&!fatal&&hdr&&shape;}
+AZEXPORT int __cdecl azslReady(){std::lock_guard<std::recursive_mutex> g(lock);return initialized&&!fatal&&hdr&&producer_ready();}
 AZEXPORT int __cdecl azslNativeChain(IDXGISwapChain1 *sc,IDXGISwapChain1 **out){
     std::lock_guard<std::recursive_mutex> g(lock);if(!out||!get_native||sc!=managed)return 0;*out=nullptr;
     ComPtr<IUnknown> base;if(get_native(sc,reinterpret_cast<void**>(base.GetAddressOf()))!=sl::Result::eOk||!base)return 0;
@@ -500,7 +544,7 @@ AZEXPORT int __cdecl azslNativeChain(IDXGISwapChain1 *sc,IDXGISwapChain1 **out){
 }
 AZEXPORT void __cdecl azslChainChange(IDXGISwapChain1 *sc,int action,unsigned color,HRESULT hr){
     std::lock_guard<std::recursive_mutex> g(lock);if(sc!=managed)return;
-    if(action==0){off("resize");++generation;lineage.clear();bb={};shape=false;}
+    if(action==0){off("resize");++generation;lineage.clear();bb={};probe_bb={};shape=false;uav_probe=false;}
     else if(action==1){if(SUCCEEDED(hr))chain_info(sc);}
     else if(action==2&&SUCCEEDED(hr)){bool pq=color==DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
         if(pq!=hdr){off("colorspace");++generation;lineage.clear();hdr=pq;}chain_info(sc);}
@@ -508,12 +552,12 @@ AZEXPORT void __cdecl azslChainChange(IDXGISwapChain1 *sc,int action,unsigned co
 }
 AZEXPORT uint64_t __cdecl azslCameraBegin(ID3D12Device *wrapper,ID3D12GraphicsCommandList *cl,uint64_t resolve,uint64_t recording,uint64_t seq,D3D12_CPU_DESCRIPTOR_HANDLE *rt){
     std::lock_guard<std::recursive_mutex> g(lock);
-    if(!initialized||fatal||!hdr||!shape||!rt||!resolve||!recording||!wrapper||!gameplay_gate())return 0;
+    if(!initialized||fatal||!hdr||!producer_ready()||!rt||!resolve||!recording||!wrapper||!gameplay_gate())return 0;
     auto n=native<ID3D12GraphicsCommandList>(cl);
     if(!n||n.Get()==cl||!hook_list(n.Get()))return 0;
     auto &r=record(n.Get());if(!r.known||r.submitted)return 0;
     Packet *p=allocate(resolve,seq);if(!p)return 0;
-    if(new_token(p->token,&(++token_serial))!=sl::Result::eOk||!p->token){p->bad=true;return 0;}
+    if(!p->probe_only&&(new_token(p->token,&(++token_serial))!=sl::Result::eOk||!p->token)){p->bad=true;return 0;}
     if(!make_texture(wrapper,p->camera_tex,64,1,DXGI_FORMAT_R32_FLOAT,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)){p->bad=true;return 0;}
     if(!p->camera_heap){D3D12_DESCRIPTOR_HEAP_DESC d{};d.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;d.NumDescriptors=1;
         if(FAILED(wrapper->CreateDescriptorHeap(&d,IID_PPV_ARGS(&p->camera_heap)))){p->bad=true;return 0;}
@@ -551,33 +595,45 @@ AZEXPORT void __cdecl azslCore(ID3D12GraphicsCommandList *cl,ID3D12Resource *dep
     add(n.Get(),{core,0,0,p->id});
 }
 AZEXPORT int __cdecl azslWantsFinal(uint64_t resolve){
-    std::lock_guard<std::recursive_mutex> g(lock);return initialized&&!fatal&&hdr&&shape&&final_packet(resolve)!=nullptr;
+    std::lock_guard<std::recursive_mutex> g(lock);return initialized&&!fatal&&hdr&&producer_ready()&&final_packet(resolve)!=nullptr;
 }
 AZEXPORT void __cdecl azslFinal(ID3D12GraphicsCommandList *cl,ID3D12Resource *target,ID3D12Resource *hudless,uint64_t resolve,uint64_t recording){
     std::lock_guard<std::recursive_mutex> g(lock);auto *p=final_packet(resolve);
     if(!p||p->final.record)return;auto n=native<ID3D12GraphicsCommandList>(cl);
     auto t=native<ID3D12Resource>(target),h=native<ID3D12Resource>(hudless);
     if(!n||n.Get()==cl||!hook_list(n.Get())||!t||!h){p->bad=true;return;}
-    auto &r=record(n.Get());uint64_t id=cookie(t.Get());
-    if(!r.known||r.submitted||!id){p->bad=true;return;}
+    auto &r=record(n.Get());uint64_t id=cookie(t.Get()),probe=p->probe_only?observed_cookie(t.Get()):0;
+    if(!r.known||r.submitted||(!id&&!probe)){p->bad=true;return;}
     p->final.record=r.id;p->final.game_record=recording;
     bool ok=clone(n.Get(),h.Get(),p->hud,ow,oh,DXGI_FORMAT_R10G10B10A2_UNORM,D3D12_RESOURCE_STATE_RENDER_TARGET,p->hud_initialized);
     p->hud_initialized=ok;if(!ok){p->bad=true;p->quarantined=true;}
     add(n.Get(),{final,id,0,p->id});
-    log("FG FINAL_RECORD resolve=%llu packet=%llu target=%p cookie=%llu gameRecording=%llu nativeRecording=%llu generation=%llu hudless=%d",resolve,p->id,t.Get(),id,recording,r.id,generation,ok);
+    log("FG FINAL_RECORD resolve=%llu packet=%llu target=%p cookie=%llu gameRecording=%llu nativeRecording=%llu generation=%llu hudless=%d probeOnly=%d observedCookie=%llu",resolve,p->id,t.Get(),id,recording,r.id,generation,ok,p->probe_only,probe);
 }
 AZEXPORT int __cdecl azslBeforePresent(IDXGISwapChain1 *sc,UINT flags,uint64_t call){
     std::lock_guard<std::recursive_mutex> g(lock);
     if(sc!=managed||flags&DXGI_PRESENT_TEST||active.call)return 0;
     active={};active.call=call?call:UINT64_MAX;active.gen=generation;
-    if(!initialized||fatal||!hdr||!chain_info(sc)||!gameplay_gate()){off("chain_or_hooks_or_gameplay_gate");return 1;}
+    if(!initialized||fatal||!hdr){off("chain_or_hooks_or_gameplay_gate");return 1;}
+    if(!chain_info(sc)){
+        off("chain_or_hooks_or_gameplay_gate");
+        if(uav_probe&&gameplay_gate()){
+            ComPtr<IDXGISwapChain3> s;
+            if(SUCCEEDED(sc->QueryInterface(IID_PPV_ARGS(&s)))){
+                unsigned i=s->GetCurrentBackBufferIndex();
+                if(i<probe_bb.size())log("FG PRESENT_SKIP call=%llu generation=%llu index=%u cookie=%llu reason=uav_probe_only qpc=%lld",call,generation,i,probe_bb[i],qpc());
+            }
+        }
+        return 1; // Never tag or enable FG on the diagnostic UAV chain.
+    }
+    if(!gameplay_gate()){off("chain_or_hooks_or_gameplay_gate");return 1;}
     ComPtr<IDXGISwapChain3> s;if(FAILED(sc->QueryInterface(IID_PPV_ARGS(&s)))){off("chain3");return 1;}
     unsigned index=s->GetCurrentBackBufferIndex();active.index=index;
     if(index>=bb.size()){off("index");return 1;}
     auto it=lineage.find(bb[index]);auto v=it==lineage.end()?Provenance{}:it->second;
     lineage.erase(bb[index]); // consume once, never re-use old contents
     auto *p=find_packet(v.packet);
-    if(!p||p->bad||p->presented||p->gen!=generation||v.gen!=generation||v.queue!=present_queue.Get()||!v.fence){
+    if(!p||p->probe_only||p->bad||p->presented||p->gen!=generation||v.gen!=generation||v.queue!=present_queue.Get()||!v.fence){
         off("unproven_present_lineage");
         log("FG PRESENT_SKIP call=%llu generation=%llu index=%u cookie=%llu reason=lineage packet=%llu packetBad=%d packetPresented=%d transferRecording=%llu submit=%llu actualQueue=%p expectedQueue=%p transferFence=%d",call,generation,index,bb[index],v.packet,p?p->bad:0,p?p->presented:0,v.record,v.submit,v.queue,present_queue.Get(),bool(v.fence));return 1;
     }
